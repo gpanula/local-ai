@@ -17,6 +17,10 @@
   * *Example*: `🔧 (sysadmin): add check-mode dry-run verification`
 * **Bot Author**: All commits must use the repository's local Git author configuration (`smurf-frank <frank@grumpy.smurf.work>`).
 
-## 3. Safety & Verification Standards
+## 3. GitHub CLI & Credential Scoping (direnv)
+* **Scoped Token Execution**: For all `gh` CLI operations (creating PRs, merging, querying PR status), the agent must utilize the repository-scoped environment provided by `direnv` (exporting `GH_TOKEN` from local `.git/credentials`).
+* **Multi-User Isolation**: Never rely on or modify global `~/.config/gh/hosts.yml` defaults, preserving the human user's personal GitHub CLI sessions.
+
+## 4. Safety & Verification Standards
 * **Linux SysAdmin**: Always prefer dry-runs / check-mode / non-destructive inspection before applying changes.
 * **Rollbacks & State**: Preserve file states and track changes cleanly.
