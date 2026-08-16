@@ -31,3 +31,8 @@ Thumbs.db
 *.log
 scratch/
 tmp/
+
+# Environment & Direnv files
+.envrc
+.env
+.direnv/
