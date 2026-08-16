@@ -1,10 +1,27 @@
-# Commit Message Style Guide & Gitmoji Standards
+# Development Standards & Contributing Guide
 
-To ensure a clean, readable, and structured Git history, all commit messages in this repository must begin with a **[Gitmoji](https://gitmoji.dev/)** (either the Unicode emoji or shortcode format).
+To maintain a clean, stable, and bisectable repository, all contributors and AI agents follow structured branch hygiene and the **[Gitmoji](https://gitmoji.dev/)** commit standard.
 
 ---
 
-## 📌 Commit Message Format
+## 🌿 1. Branching & PR Workflow
+
+### Branch Rules
+* **Direct commits to `main` are prohibited.** All work must be developed on a dedicated branch and merged via Pull Request.
+* A local `.githooks/pre-commit` hook guards against accidental commits on `main`.
+
+### Branch Naming Conventions
+Use descriptive prefixes for all branch names:
+* `feat/<topic>` — New features, configurations, or modules (e.g., `feat/loom-ollama-routing`)
+* `fix/<topic>` — Bug fixes, syntax corrections, or troubleshooting (e.g., `fix/ansible-module-idempotency`)
+* `docs/<topic>` — Documentation, roadmaps, or architecture notes (e.g., `docs/moe-benchmarks`)
+* `exp/<topic>` — Experiments, prototypes, or benchmark scripts (e.g., `exp/olmoe-throughput`)
+
+---
+
+## 📌 2. Commit Message Format
+
+Every commit message must begin with a valid **Gitmoji** (either the Unicode emoji or shortcode format):
 
 ```text
 <gitmoji> [optional scope]: <description>
@@ -20,7 +37,7 @@ To ensure a clean, readable, and structured Git history, all commit messages in 
 
 ---
 
-## 🎨 Common Gitmojis for Local AI & Infrastructure
+## 🎨 3. Common Gitmojis
 
 | Gitmoji | Shortcode | Meaning / Use Case |
 | :--- | :--- | :--- |
@@ -42,11 +59,8 @@ To ensure a clean, readable, and structured Git history, all commit messages in 
 
 ---
 
-## ⚙️ Automated Enforcement
+## ⚙️ 4. Automated Verification
 
-Commit messages are validated automatically:
-1. **CI Pipeline**: [`.github/workflows/gitmoji-check.yml`](file:///.github/workflows/gitmoji-check.yml) validates all incoming commits on pushes and pull requests.
-2. **Local Git Hook**: Developers and AI agents can enable the local commit hook:
-   ```bash
-   git config core.hooksPath .githooks
-   ```
+* **Pre-commit Hook**: Blocks direct commits on `main` (`.githooks/pre-commit`).
+* **Commit-msg Hook**: Validates Gitmoji prefix format on every commit (`.githooks/commit-msg`).
+* **GitHub Actions CI**: Validates all incoming PRs and commits against the Gitmoji standard (`.github/workflows/gitmoji-check.yml`).
