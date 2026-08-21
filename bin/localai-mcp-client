@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# CLI Entrypoint for Local AI MCP Client Orchestrator
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+exec python3 "${SCRIPT_DIR}/../sysadmin/mcp_client.py" "$@"

@@ -6,6 +6,8 @@ __pycache__/
 # Virtual environments & packages
 .venv/
 venv/
+test_venv/
+sysadmin/venv/
 ENV/
 env/
 *.egg-info/
@@ -27,12 +29,30 @@ Thumbs.db
 *.swp
 *~
 
-# Local scratch / logs
+# Local scratch / logs / recordings
 *.log
 scratch/
 tmp/
+recordings/
+*.cast
 
 # Environment & Direnv files
 .envrc
 .env
 .direnv/
+
+# Sandbox temporary artifacts
+.claude/
+.claude
+.mcp.json
+.ripgreprc
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.idea
+/.profile
+/.vscode
+/.zprofile
+/.zshrc
+

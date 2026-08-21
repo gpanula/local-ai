@@ -1,0 +1,90 @@
+{
+  "name": "local-ai-sandbox",
+  "description": "Restricts terminal-mcp execution to the local-ai workspace and whitelisted development tools",
+  "filesystem": {
+    "readWrite": [
+      "${WORKSPACE}",
+      "/tmp",
+      "~/.cache",
+      "~/.local",
+      "~/.npm",
+      "~/.direnv"
+    ],
+    "readOnly": [
+      "/usr",
+      "/bin",
+      "/sbin",
+      "/lib",
+      "/lib64",
+      "/etc/ssl",
+      "/etc/resolv.conf",
+      "/etc/hosts",
+      "~"
+    ],
+    "blocked": [
+      "~/.ssh",
+      "~/.aws",
+      "~/.gnupg",
+      "~/.config/gh",
+      "/root",
+      "/etc/shadow",
+      "/etc/sudoers"
+    ]
+  },
+  "network": {
+    "mode": "allowlist",
+    "allowedDomains": [
+      "github.com",
+      "api.github.com",
+      "raw.githubusercontent.com",
+      "objects.githubusercontent.com",
+      "pypi.org",
+      "pypi.python.org",
+      "files.pythonhosted.org",
+      "bootstrap.pypa.io"
+    ]
+  },
+  "commandWhitelist": [
+    "git",
+    "gh",
+    "python3",
+    "python3.12",
+    "python3.10",
+    "python",
+    "pip",
+    "pip3",
+    "ansible",
+    "ansible-core",
+    "ansible-playbook",
+    "ansible-lint",
+    "ansible-galaxy",
+    "ansible-doc",
+    "nvidia-smi",
+    "ollama",
+    "curl",
+    "wget",
+    "mkdir",
+    "rm",
+    "cp",
+    "mv",
+    "chmod",
+    "touch",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "rg",
+    "ripgrep",
+    "find",
+    "sed",
+    "awk",
+    "tree",
+    "diff",
+    "echo",
+    "which",
+    "pwd",
+    "env",
+    "direnv"
+  ]
+}
