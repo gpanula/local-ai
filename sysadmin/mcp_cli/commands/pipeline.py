@@ -1,0 +1,432 @@
+"""Multi-agent pipeline commands: build-and-run, pipeline-run.
+
+The ``pipeline-run`` orchestration loop is extracted into ``revision_loop()``
+and pure helper methods (``_extract_strategy``, ``_extract_stats``,
+``_extract_tool_calls``) so the logic is independently unit-testable with a
+mocked transport layer.
+"""
+
+import json
+import re
+
+from mcp_core import transport
+from mcp_core.sanitize import sanitize_script_code
+from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path
+from mcp_cli.base import BaseCommand, command
+
+
+@command
+class BuildAndRunCommand(BaseCommand):
+    name = "build-and-run"
+    help = "Have Ollama generate code from a prompt file and execute it live in terminal-mcp"
+
+    def register_args(self, parser):
+        parser.add_argument("file", help="Path to prompt markdown/text file")
+        parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+        parser.add_argument("--type", default="sysadmin", help="Task category")
+        parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
+
+    def run(self, args):
+        valid_path = validate_workspace_path(args.file, "prompt file")
+        with open(valid_path, "r", encoding="utf-8") as f:
+            task_content = f.read()
+        print(f"🤖 [Ollama {args.model}] Processing prompt from {args.file}...")
+        plan = transport.call_mcp("ollama_task_agent", {
+            "task": task_content,
+            "model": args.model,
+            "task_type": args.type,
+        })
+        print(f"✅ [Ollama {args.model}] Strategy & Commands Generated. Extracting execution block...")
+        code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", plan)
+        if not code_blocks:
+            print("❌ No executable code blocks found in Ollama output. Raw plan:\n", plan)
+        else:
+            exec_cmd = sanitize_script_code(max(code_blocks, key=len))
+            # Send status banner into terminal-mcp interactive window
+            banner_cmd = f"echo '🤖 [Ollama {args.model}] Executing prompt: {args.file}'; {exec_cmd}"
+            print(f"🚀 [Ollama {args.model}] Executing build & run commands live in terminal-mcp...")
+            report = transport.call_mcp("ollama_execute_task", {
+                "command": banner_cmd,
+                "task_description": f"Build & Execute task from {args.file}",
+                "model": args.model,
+                "timeout": args.timeout,
+            })
+            print(report)
+
+
+@command
+class PipelineRunCommand(BaseCommand):
+    name = "pipeline-run"
+    help = "Multi-agent pipeline: Author (qwen2.5-coder) -> Lint (Shellcheck) -> Review (qwen3) -> Live Execution"
+
+    def register_args(self, parser):
+        parser.add_argument("file", help="Path to prompt markdown/text file")
+        parser.add_argument("--author", default="qwen2.5-coder:7b", help="Model to synthesize code (default: qwen2.5-coder:7b)")
+        parser.add_argument("--reviewer", default="qwen3:8b", help="Model to review & verify code (default: qwen3:8b)")
+        parser.add_argument("--no-lint", action="store_true", help="Skip pre-flight linting step")
+        parser.add_argument("--bootstrap", action="store_true", help="Flag task as bootstrap (tolerates missing host tools before installation)")
+        parser.add_argument("--max-retries", type=int, default=2, help="Max revision cycles if reviewer rejects (default: 2)")
+        parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
+        parser.add_argument("--dry-run", action="store_true", help="Stop after review without executing")
+
+    def run(self, args):
+        valid_path = validate_workspace_path(args.file, "prompt file")
+        with open(valid_path, "r", encoding="utf-8") as f:
+            prompt_content = f.read()
+
+        result = self.revision_loop(prompt_content, args)
+
+        if not result["approved"]:
+            if result["abort_reason"]:
+                transport.send_terminal_mcp(f"❌ [Pipeline Aborted] {result['abort_reason']}.")
+            else:
+                transport.send_terminal_mcp(f"❌ [Pipeline Failed] Maximum iterations ({args.max_retries}) reached without approval.")
+            return
+
+        if args.dry_run:
+            transport.send_terminal_mcp("🏁 [Dry-Run] Pipeline completed verification. Skipping execution.")
+            return
+
+        self.execute(result, args)
+
+    # --- testable pipeline internals ---
+
+    def revision_loop(self, prompt_content, args):
+        """Author → Lint → Review cycle.
+
+        Returns a dict with keys: ``approved``, ``final_code_block``,
+        ``abort_reason``, ``write_file_call``, ``iterations``.
+        """
+        current_prompt = prompt_content
+        approved = False
+        iteration = 0
+        max_attempts = args.max_retries
+        final_code_block = ""
+        abort_reason = ""
+        linter_history = []
+        reviewer_history = []
+        write_file_call = None
+
+        while iteration < max_attempts and not approved:
+            iteration += 1
+            transport.send_terminal_mcp(
+                f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 [Pipeline Iteration {iteration}/{max_attempts}] Authoring with `{args.author}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+
+            author_response = transport.call_mcp("ollama_task_agent", {
+                "task": current_prompt,
+                "model": args.author,
+                "task_type": "coding",
+            })
+
+            # Extract and format Author Analysis & Strategy
+            strategy_text = self._extract_strategy(author_response)
+            if strategy_text:
+                transport.send_terminal_mcp("─── [AUTHOR ANALYSIS & STRATEGY] ──────────────────────────")
+                transport.send_terminal_mcp(strategy_text)
+                author_stats = self._extract_stats(author_response)
+                if author_stats:
+                    transport.send_terminal_mcp(f"📊 {author_stats}")
+                transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+
+            tool_calls = self._extract_tool_calls(author_response)
+            write_file_call = next(
+                (tc for tc in tool_calls if tc.get("name") == "write_file" and tc.get("arguments", {}).get("content")),
+                None,
+            )
+
+            final_code_block = ""
+            if write_file_call:
+                wf_args = write_file_call.get("arguments", {})
+                target_path = wf_args.get("path", "")
+                target_content = wf_args.get("content", "")
+                is_exec = wf_args.get("make_executable", False)
+                transport.send_terminal_mcp(f"🛠️ [Native Tool Call] write_file -> `{target_path}` ({len(target_content)} bytes, exec: {is_exec})")
+                final_code_block = sanitize_script_code(target_content)
+            else:
+                code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", author_response)
+                if not code_blocks:
+                    transport.send_terminal_mcp(f"⚠️ [Format Error] No executable bash code block or write_file tool call extracted. Retrying `{args.author}`...")
+                    current_prompt = (
+                        f"{prompt_content}\n\n"
+                        f"### Formatting Error:\nYour previous response did not contain a valid ```bash ... ``` code block. "
+                        f"Please provide the complete synthesized Bash script inside a ```bash code block."
+                    )
+                    continue
+                final_code_block = sanitize_script_code(max(code_blocks, key=len))
+                preview_first_line = final_code_block.splitlines()[0] if final_code_block.splitlines() else ""
+                transport.send_terminal_mcp(f"📝 Synthesized Script ({len(final_code_block)} bytes) - {preview_first_line}")
+
+            # Step 2: Pre-Flight Linting
+            linter_output = "No linter run."
+            linter_failed = False
+            if not args.no_lint:
+                raw_linter = transport.call_mcp("shellcheck_inspect", {"script": final_code_block})
+                if "binary not found" in raw_linter:
+                    if args.bootstrap:
+                        linter_output = "ℹ️ Pre-flight shellcheck skipped (bootstrap in progress: shellcheck is not yet installed on host and will be installed by this script)."
+                        transport.send_terminal_mcp("ℹ️ [Pre-Flight Linter] Shellcheck skipped (bootstrap task in progress)")
+                    else:
+                        linter_output = raw_linter
+                        transport.send_terminal_mcp("⚠️ [Pre-Flight Linter] Host shellcheck binary not found.")
+                else:
+                    linter_output = raw_linter
+                    first_line = linter_output.splitlines()[0] if linter_output.splitlines() else ''
+                    transport.send_terminal_mcp(f"🔍 [Pre-Flight Linter] Output: {first_line}")
+                    if "ShellCheck Analysis Findings (exit 1)" in raw_linter or "exit 1" in raw_linter:
+                        linter_failed = True
+
+            # Auto-reject on pre-flight linter failure (unless explicitly flagged as bootstrap task)
+            if linter_failed:
+                current_prompt, abort_reason = self._handle_linter_failure(
+                    prompt_content, final_code_block, raw_linter, linter_history,
+                    iteration, max_attempts, current_prompt, abort_reason,
+                )
+                if abort_reason:
+                    break
+                continue
+            else:
+                linter_history.append(None)
+
+            # Step 3: Reviewer Evaluation
+            review_verdict = self._review(args, prompt_content, final_code_block, linter_output)
+            approved, abort_reason, current_prompt, reviewer_history = self._handle_review(
+                args, review_verdict, prompt_content, final_code_block,
+                reviewer_history, iteration, max_attempts, current_prompt, approved, abort_reason,
+            )
+            if abort_reason:
+                break
+
+        return {
+            "approved": approved,
+            "final_code_block": final_code_block,
+            "abort_reason": abort_reason,
+            "write_file_call": write_file_call,
+            "iterations": iteration,
+        }
+
+    @staticmethod
+    def _extract_strategy(author_response: str) -> str:
+        """Extract the Author Analysis & Strategy preamble from the response."""
+        strategy_text = ""
+        if "### 1. Analysis & Strategy" in author_response or "### Analysis & Strategy" in author_response:
+            parts = re.split(r"###\s*(?:2\.\s*)?Implementation", author_response, flags=re.IGNORECASE)
+            strategy_text = parts[0].strip()
+        elif "```" in author_response:
+            strategy_text = author_response.split("```")[0].strip()
+        else:
+            strategy_text = author_response.strip()
+        return strategy_text
+
+    @staticmethod
+    def _extract_stats(author_response: str) -> str:
+        """Extract the '*Generated by `model`: N tokens in Xs (Y t/s)*' footer."""
+        match = re.search(r"(\*Generated by `[^`]+`: \d+ tokens in [\d\.]+s \([\d\.]+ t/s\)\*)", author_response)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _extract_tool_calls(author_response: str):
+        """Extract structured tool calls (fenced code blocks or raw JSON lines)."""
+        tool_calls = []
+        tool_call_blocks = re.findall(r"```(?:tool_call|json)?\s*\n([\s\S]*?)```", author_response)
+        for tc_str in tool_call_blocks:
+            try:
+                tc_obj = json.loads(tc_str.strip())
+                if isinstance(tc_obj, dict):
+                    if "name" in tc_obj and "arguments" in tc_obj:
+                        tool_calls.append(tc_obj)
+                    elif "name" in tc_obj and tc_obj.get("name") in ("write_file", "read_file"):
+                        tool_calls.append({"name": tc_obj["name"], "arguments": tc_obj})
+                    elif "tool" in tc_obj:
+                        tool_calls.append({"name": tc_obj["tool"], "arguments": tc_obj.get("arguments", tc_obj)})
+            except json.JSONDecodeError:
+                pass
+
+        # Also inspect raw lines for un-fenced JSON tool calls
+        for line in author_response.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("{") and ("write_file" in line_str or "read_file" in line_str):
+                try:
+                    tc_obj = json.loads(line_str)
+                    if isinstance(tc_obj, dict) and "name" in tc_obj:
+                        tool_calls.append(tc_obj)
+                except json.JSONDecodeError:
+                    pass
+        return tool_calls
+
+    @staticmethod
+    def _handle_linter_failure(prompt_content, final_code_block, raw_linter, linter_history,
+                               iteration, max_attempts, current_prompt, abort_reason):
+        """Process ShellCheck auto-reject: extract findings, detect stuck loops, build retry prompt."""
+        sc_codes = re.findall(r"(SC\d{4})", raw_linter)
+        finding_lines = []
+        for line in raw_linter.splitlines():
+            cleaned = line.strip()
+            if cleaned.startswith("In - line") or "SC" in cleaned or cleaned.startswith("Did you mean:"):
+                finding_lines.append(cleaned)
+
+        sc_summary = f"SC codes: {', '.join(sorted(set(sc_codes)))}" if sc_codes else "Syntax/style issues"
+
+        # Consecutive repeat counting for identical linter signatures
+        current_sig = tuple(sorted(sc_codes)) if sc_codes else tuple(finding_lines[:2])
+        consecutive_linter_repeats = 1
+        for past_sig in reversed(linter_history):
+            if past_sig == current_sig and current_sig is not None:
+                consecutive_linter_repeats += 1
+            else:
+                break
+        linter_history.append(current_sig)
+
+        transport.send_terminal_mcp(f"⚠️ [Pre-Flight Linter Auto-Reject] ShellCheck findings ({sc_summary}) [Repeat: {consecutive_linter_repeats}/3]")
+        for fl in finding_lines[:4]:
+            transport.send_terminal_mcp(f"   ↳ {fl}")
+
+        print(f"\n[Pre-Flight Linter Findings]:\n{raw_linter}\n")
+
+        if consecutive_linter_repeats >= 3:
+            abort_reason = f"Stuck in pre-flight linter loop ({sc_summary}) on iteration {iteration}/{max_attempts}"
+            transport.send_terminal_mcp(f"🛑 [Stuck Loop Detected] Author repeated identical ShellCheck findings ({sc_summary}) for 3 consecutive iterations. Aborting pipeline early.")
+            print(f"\n[Stuck Loop Abort]: Repeating findings {current_sig} (3 consecutive times)\n")
+            return current_prompt, abort_reason
+
+        current_prompt = (
+            f"{prompt_content}\n\n"
+            f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+            f"### Pre-Flight Linter (ShellCheck) Findings:\n{raw_linter}\n\n"
+            f"Please rewrite the script, fixing ALL ShellCheck findings (e.g., properly quote variables, avoid SC2016 single quote expansion errors, and adhere to defensive standards)."
+        )
+        return current_prompt, abort_reason
+
+    @staticmethod
+    def _build_review_prompt(args, prompt_content, final_code_block, linter_output) -> str:
+        """Assemble the reviewer verification prompt for the script under review."""
+        return (
+            f"You are the Lead Verification Engineer reviewing a script authored by `{args.author}`.\n\n"
+            f"### Original Prompt Specification:\n{prompt_content}\n\n"
+            f"### Synthesized Script Code:\n```bash\n{final_code_block}\n```\n\n"
+            f"### Pre-Flight Linter Output:\n{linter_output}\n\n"
+            f"### System & Environment Facts:\n"
+            f"- Virtual Environment Isolation: All project tooling must be invoked via explicit paths (`${{VENV_DIR}}/bin/<binary>`). Never rely on bare ambient PATH binaries.\n"
+            f"- Package Mapping: `shellcheck-py` installs the native CLI binary at `${{VENV_DIR}}/bin/shellcheck`. Testing `[ -x ${{VENV_DIR}}/bin/shellcheck ]` and `shellcheck --version` is the correct and expected verification.\n"
+            f"- Library Mapping: `pyyaml` provides the `yaml` Python module tested via `python -c 'import yaml'`.\n\n"
+            f"### Verification Checklist:\n"
+            f"1. Requirements: Are all technical specifications and packages met?\n"
+            f"2. Pre-Flight Linters: Are there zero unhandled ShellCheck errors or warnings?\n"
+            f"3. Explicit Virtual Environment: Are binaries invoked explicitly via `${{VENV_DIR}}/bin/<tool>` rather than bare ambient PATH commands?\n"
+            f"4. Defensive Standards: Are strict flags (`set -euo pipefail`), diagnostic `ERR` trap with line number, `EXIT` cleanup trap, binary existence assertions (`[ -x ...]`), and functional smoke tests implemented?\n"
+            f"5. Temporary Directory Resilience: Does the script safely handle temporary directories without assuming $TMPDIR exists (e.g. ensuring `mkdir -p \"${{TMPDIR:-/tmp}}\"` or using `mktemp -d -p /tmp`)?\n"
+            f"6. Sandbox & Safety: Does Ansible use a temporary directory in `/tmp` to avoid read-only permissions errors?\n"
+            f"7. Success Gate: Is the final success message (`🎉 ...`) guarded so it cannot run if an earlier step fails?\n"
+            f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n\n"
+            f"### Decision Rule:\n"
+            f"Conclude your response with exactly `DECISION: APPROVED` if all criteria are satisfied, or `DECISION: REVISION_REQUESTED` followed by bullet points detailing the required fixes."
+        )
+
+    @staticmethod
+    def _review(args, prompt_content, final_code_block, linter_output) -> str:
+        """Run the reviewer (ollama_chat) against the synthesized script."""
+        transport.send_terminal_mcp(f"🧐 [Verifier `{args.reviewer}`] Evaluating script against prompt specifications...")
+        review_prompt = PipelineRunCommand._build_review_prompt(args, prompt_content, final_code_block, linter_output)
+        return transport.call_mcp("ollama_chat", {
+            "prompt": review_prompt,
+            "model": args.reviewer,
+            "system_prompt": "You are a strict, uncompromising code verifier and systems engineer.",
+            "temperature": 0.1,
+            "num_ctx": 4096,
+        })
+
+    @staticmethod
+    def _handle_review(args, review_verdict, prompt_content, final_code_block, reviewer_history,
+                       iteration, max_attempts, current_prompt, approved, abort_reason):
+        """Process the reviewer verdict: detect stuck loops, update history and prompt."""
+        review_stats = PipelineRunCommand._extract_stats(review_verdict)
+
+        verdict_decision = "DECISION: APPROVED" if "DECISION: APPROVED" in review_verdict else "DECISION: REVISION_REQUESTED"
+        transport.send_terminal_mcp(f"📋 [Reviewer Verdict ({args.reviewer})]: {verdict_decision}")
+        if review_stats:
+            transport.send_terminal_mcp(f"📊 {review_stats}")
+
+        if "DECISION: REVISION_REQUESTED" in review_verdict:
+            critique_points = []
+            for line in review_verdict.splitlines():
+                if line.strip().startswith("- ") or line.strip().startswith("* ") or line.strip().startswith("DECISION:"):
+                    critique_points.append(line.strip())
+            critique_summary = "\n".join(critique_points) if critique_points else review_verdict.strip()
+
+            # Check for consecutive identical reviewer critiques
+            critique_sig = tuple(critique_points) if critique_points else (review_verdict.strip(),)
+            consecutive_rev_repeats = 1
+            for past_rev in reversed(reviewer_history):
+                if past_rev == critique_sig and critique_sig is not None:
+                    consecutive_rev_repeats += 1
+                else:
+                    break
+            reviewer_history.append(critique_sig)
+
+            transport.send_terminal_mcp(f"─── [REVIEWER REQUIRED FIXES] [Repeat: {consecutive_rev_repeats}/3] ───────────────")
+            transport.send_terminal_mcp(critique_summary)
+            transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+
+            if consecutive_rev_repeats >= 3:
+                abort_reason = f"Stuck in reviewer revision loop on iteration {iteration}/{max_attempts}"
+                transport.send_terminal_mcp("🛑 [Stuck Loop Detected] Reviewer issued identical critique for 3 consecutive iterations. Aborting pipeline early.")
+                print(f"\n[Stuck Loop Abort]: Repeating reviewer critique 3 times\n")
+                return approved, abort_reason, current_prompt, reviewer_history
+        else:
+            reviewer_history.append(None)
+
+        print(f"\n{review_verdict}\n")
+
+        if "DECISION: APPROVED" in review_verdict:
+            approved = True
+            transport.send_terminal_mcp(f"✅ [Pipeline Approved] Script passed all verification gates!")
+        else:
+            transport.send_terminal_mcp(f"⚠️ [Revision Requested] Feedback loop initiated for `{args.author}`...")
+            current_prompt = (
+                f"{prompt_content}\n\n"
+                f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+                f"### Reviewer Feedback & Required Fixes:\n{review_verdict}\n\n"
+                f"Please rewrite and fix the script addressing all reviewer critique points."
+            )
+        return approved, abort_reason, current_prompt, reviewer_history
+
+    def execute(self, result, args):
+        """Step 4: Live terminal execution of approved code."""
+        final_code_block = result["final_code_block"]
+        write_file_call = result.get("write_file_call")
+
+        if write_file_call:
+            wf_args = write_file_call.get("arguments", {})
+            target_path = wf_args.get("path", "")
+            is_exec = wf_args.get("make_executable", False)
+
+            # 1. Execute write_file natively via MCP
+            transport.send_terminal_mcp(f"📝 [Native Tool Execution] Writing `{target_path}` via MCP...")
+            wf_res = transport.call_mcp("write_file", wf_args)
+            transport.send_terminal_mcp(f"✅ {wf_res}")
+
+            # 2. Run execution command in terminal-mcp
+            exec_bin = f"./{target_path}" if is_exec else f"python3 {target_path}"
+            transport.send_terminal_mcp(f"🚀 [Live Terminal Execution] Running `{exec_bin}` in terminal-mcp...")
+            banner_cmd = f"echo '🤖 [Ollama Verified Pipeline] Executing: {exec_bin}'; {exec_bin}"
+            report = transport.call_mcp("ollama_execute_task", {
+                "command": banner_cmd,
+                "task_description": f"Verified execution of {target_path}",
+                "cwd": WORKSPACE_ROOT,
+                "model": args.reviewer,
+                "timeout": args.timeout,
+            })
+            print(f"\n{report}")
+        else:
+            transport.send_terminal_mcp(f"🚀 [Live Terminal Execution] Running verified script in terminal-mcp...")
+            banner_cmd = f"echo '🤖 [Ollama Verified Pipeline] Executing: {args.file}'; (\n{final_code_block}\n)"
+            report = transport.call_mcp("ollama_execute_task", {
+                "command": banner_cmd,
+                "task_description": f"Verified pipeline execution of {args.file}",
+                "cwd": WORKSPACE_ROOT,
+                "model": args.reviewer,
+                "timeout": args.timeout,
+            })
+            print(f"\n{report}")
