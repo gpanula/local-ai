@@ -38,35 +38,15 @@ def _validate_ollama_host(raw: str) -> str:
 
 OLLAMA_HOST = _validate_ollama_host(os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
 PROTOCOL_VERSION = "2024-11-05"
-WORKSPACE_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# Make `mcp_core` importable when server.py runs as a standalone script (it is
+# invoked via subprocess by mcp_core.transport.call_mcp), then share the canonical
+# workspace helpers instead of redefining them locally.
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "..")))
+from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path, is_valid_mcp_socket
 
-
-def _validate_workspace_path(path: str, purpose: str = "file") -> str:
-    """Resolve and assert path lies within the workspace root. Returns realpath."""
-    if not path or not path.strip():
-        raise ValueError(f"Path cannot be empty for {purpose}")
-    expanded = os.path.expanduser(path.strip())
-    if not os.path.isabs(expanded):
-        resolved = os.path.realpath(os.path.join(WORKSPACE_ROOT, expanded))
-    else:
-        resolved = os.path.realpath(expanded)
-
-    if not (resolved == WORKSPACE_ROOT or resolved.startswith(WORKSPACE_ROOT + os.sep)):
-        raise ValueError(f"Rejected {purpose} path outside workspace: {path!r}")
-    return resolved
-
-
-def _is_valid_mcp_socket(path: str) -> bool:
-    """Verify that the socket exists, is a Unix domain socket, not a symlink, and owned by current user."""
-    try:
-        st = os.stat(path, follow_symlinks=False)
-        return (
-            stat.S_ISSOCK(st.st_mode) and
-            not stat.S_ISLNK(st.st_mode) and
-            st.st_uid == os.getuid()
-        )
-    except OSError:
-        return False
+# Alias to the historical private names so existing call sites remain unchanged.
+_validate_workspace_path = validate_workspace_path
+_is_valid_mcp_socket = is_valid_mcp_socket
 
 
 def _http_request(endpoint: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, timeout: int = 300) -> Dict[str, Any]:
