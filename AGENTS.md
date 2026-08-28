@@ -31,6 +31,7 @@
   * Exit cleanup traps: `trap 'rm -rf "${TMP_DIR:-}"' EXIT`
   * Temporary Directory Resilience: Never assume `$TMPDIR` exists or is initialized. Always ensure parent directories exist (`mkdir -p "${TMPDIR:-/tmp}"`) or explicitly specify `-p /tmp` when creating scratch files/directories (e.g. `mktemp -d -p /tmp` or `mktemp -d "/tmp/script_XXXXXX"`).
   * Explicit binary assertions: Explicitly verify that required binaries exist and are executable (`[ -x "${BIN}" ]`) after build/install steps.
+  * Explicit Virtual Environment & Binary Isolation: Sysadmin scripts must never rely on ambient system `$PATH` for project tooling. Scripts must deterministically resolve the target virtual environment (`VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"`) and invoke tools directly via explicit paths (`"${VENV_DIR}/bin/<binary>"`).
   * Functional sanity gates: Test binary execution and return codes before emitting success banners. Success banners (`🎉 ...`) must NEVER be printed if an intermediate assertion fails.
 
 ## 5. Privacy, Secrets & Sensitive Information
