@@ -114,3 +114,152 @@ def test_revision_loop_format_error_retries(fake_send_terminal_mcp, monkeypatch)
     result = PipelineRunCommand().revision_loop("Do something", make_args(max_retries=3))
     assert result["approved"] is True
     assert result["iterations"] == 2
+
+
+# --- lesson staging hook (Phase 2.04) ---
+
+def _stage_with_store(monkeypatch, tmp_path, result, args):
+    """Run _stage_lesson_if_rework against a temp-file MemoryStore."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    cmd = PipelineRunCommand()
+    cmd._stage_lesson_if_rework(result, "prompt content", args)
+    return memory_mod.MemoryStore(db_path)
+
+
+def test_stage_solved_pattern_after_rework(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations > 1 AND approved -> solved_pattern staged via LLM extraction.
+    def _fake(tool_name, arguments):
+        return (
+            '{"category": "sysadmin_bash", "keywords": ["trap"], '
+            '"proposed_rule": "Never nest script content inside subshell strings."}'
+        )
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix quoting",
+        "reviewer_history": [("- Fix quoting",)],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args())
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "solved_pattern"
+        assert pending[0]["proposed_rule"] == "Never nest script content inside subshell strings."
+    finally:
+        store.close()
+    assert result["lesson_type"] == "solved_pattern"
+
+
+def test_stage_hard_failure_on_max_retries(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations == max AND not approved AND no abort_reason -> hard_failure.
+    def _fake(tool_name, arguments):
+        return '{"category": "unknown", "keywords": [], "proposed_rule": "Hard failure rule."}'
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": False,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Still failing",
+        "reviewer_history": [("- Still failing",)],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args(max_retries=2))
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "hard_failure"
+    finally:
+        store.close()
+    assert result["lesson_type"] == "hard_failure"
+
+
+def test_stage_intractable_pattern_on_abort(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # abort_reason set -> intractable_pattern staged WITHOUT extra Ollama call.
+    calls = []
+
+    def _fake(tool_name, arguments):
+        calls.append(tool_name)
+        return "unused"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": False,
+        "iterations": 3,
+        "abort_reason": "Stuck in reviewer revision loop on iteration 3/3",
+        "last_critique": "",
+        "reviewer_history": [
+            ("- Fix heredoc",),
+            ("- Fix heredoc",),
+            ("- Fix heredoc",),
+        ],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args(max_retries=3))
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "intractable_pattern"
+        assert pending[0]["outcome"] == "aborted"
+    finally:
+        store.close()
+    assert result["lesson_type"] == "intractable_pattern"
+    # No extra Ollama call for the stuck-loop shortcut.
+    assert calls == [], f"call_mcp was invoked: {calls}"
+
+
+def test_stage_noop_on_iteration_one_pass(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations == 1 AND approved -> nothing staged, no banner.
+    calls = []
+
+    def _fake(tool_name, arguments):
+        calls.append(tool_name)
+        return "unused"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "abort_reason": "",
+        "last_critique": "",
+        "reviewer_history": [],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args())
+    try:
+        assert store.list_pending_lessons() == []
+    finally:
+        store.close()
+    assert result["lesson_type"] is None
+    assert calls == []
+
+
+def test_stage_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Staging error (e.g. disk full) logs a warning but pipeline still reports normally.
+    def _fake(tool_name, arguments):
+        return '{"category": "x", "keywords": [], "proposed_rule": "r"}'
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix",
+        "reviewer_history": [("- Fix",)],
+    }
+    # Force MemoryStore to fail by pointing at an unwritable path.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    cmd = PipelineRunCommand()
+    # Should not raise; staging failure is swallowed and logged.
+    cmd._stage_lesson_if_rework(result, "prompt content", make_args())
+    assert result["lesson_type"] == "solved_pattern"

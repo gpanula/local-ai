@@ -100,6 +100,8 @@
 
 ## Phase 2 — Lesson Staging (Pipeline Write Path) (~1 day)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-28. See [`phase2_completion.md`](./phase2_completion.md) for the full completion report.
+
 **Goal**: After any pipeline run where rework occurred (iteration > 1), stage a structured lesson in the pending queue — regardless of whether the run ultimately succeeded or failed. Failed runs carry equally valuable (often more actionable) anti-pattern signal.
 
 ### Pipeline Exit States & Staging Behavior
@@ -125,10 +127,10 @@
 - `MemoryStore.promote_pending_lesson(pending_id, edits=None)` — moves from `pending_lessons` to `lessons` table (with optional field overrides), deletes the pending row
 
 **Acceptance Criteria**:
-- [ ] Stage a lesson, list returns it, get returns it by ID
-- [ ] Promote moves the row from `pending_lessons` to `lessons` and deletes the pending row
-- [ ] Promote with `edits={"rule": "new text"}` applies the override to the promoted lesson
-- [ ] Delete removes from pending, does not affect `lessons` table
+- [x] Stage a lesson, list returns it, get returns it by ID
+- [x] Promote moves the row from `pending_lessons` to `lessons` and deletes the pending row
+- [x] Promote with `edits={"rule": "new text"}` applies the override to the promoted lesson
+- [x] Delete removes from pending, does not affect `lessons` table
 
 ### Phase 2.02 — Lesson Extraction Prompt (LLM-Assisted)
 
@@ -141,9 +143,9 @@
 - Fallback: if Ollama returns unparseable JSON, constructs a best-effort lesson from raw critique text with `category="unknown"`
 
 **Acceptance Criteria**:
-- [ ] With a mocked `transport.call_mcp` returning valid JSON, function returns a complete lesson dict
-- [ ] With a mocked transport returning garbage, fallback produces a valid (if coarse) lesson dict rather than crashing
-- [ ] Extraction prompt instructs the model to output *only* JSON, no preamble
+- [x] With a mocked `transport.call_mcp` returning valid JSON, function returns a complete lesson dict
+- [x] With a mocked transport returning garbage, fallback produces a valid (if coarse) lesson dict rather than crashing
+- [x] Extraction prompt instructs the model to output *only* JSON, no preamble
 
 ### Phase 2.03 — Intractable Pattern Shortcut
 
@@ -156,9 +158,9 @@
 - Constructs `proposed_rule` from the repeating critique points
 
 **Acceptance Criteria**:
-- [ ] Given a `reviewer_history` with 3 identical critique tuples, produces a valid lesson dict
-- [ ] Does **not** call `transport.call_mcp` — zero Ollama invocations
-- [ ] `proposed_rule` captures the substance of the repeating critique
+- [x] Given a `reviewer_history` with 3 identical critique tuples, produces a valid lesson dict
+- [x] Does **not** call `transport.call_mcp` — zero Ollama invocations
+- [x] `proposed_rule` captures the substance of the repeating critique
 
 ### Phase 2.04 — Pipeline Hook & Tests
 
@@ -175,12 +177,12 @@
 - Staging failures are logged but never block the pipeline
 
 **Acceptance Criteria**:
-- [ ] `pipeline-run` with ≥2 iterations ending in approval → `solved_pattern` staged, banner printed
-- [ ] `pipeline-run` exhausting `max_retries` → `hard_failure` staged
-- [ ] `pipeline-run` stuck-loop abort → `intractable_pattern` staged without extra Ollama call
-- [ ] `pipeline-run` passing on iteration 1 → nothing staged, no banner
-- [ ] Staging error (e.g. disk full) logs a warning but pipeline still reports its normal result
-- [ ] Unit tests cover all four exit states with mocked transport (no live model needed)
+- [x] `pipeline-run` with ≥2 iterations ending in approval → `solved_pattern` staged, banner printed
+- [x] `pipeline-run` exhausting `max_retries` → `hard_failure` staged
+- [x] `pipeline-run` stuck-loop abort → `intractable_pattern` staged without extra Ollama call
+- [x] `pipeline-run` passing on iteration 1 → nothing staged, no banner
+- [x] Staging error (e.g. disk full) logs a warning but pipeline still reports its normal result
+- [x] Unit tests cover all four exit states with mocked transport (no live model needed)
 
 ---
 

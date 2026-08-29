@@ -353,3 +353,96 @@ class MemoryStore:
             lesson["rank"] = row["rank"]
             results.append(lesson)
         return results
+
+    # ------------------------------------------------------------------
+    # Pending lesson CRUD (staging queue)
+    # ------------------------------------------------------------------
+    def _next_pending_id(self) -> str:
+        """Generate a deterministic ``pending-YYYYMMDD-NN`` ID with a uniqueness guard."""
+        prefix = f"pending-{date.today().strftime('%Y%m%d')}"
+        pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
+        max_seq = 0
+        for (rowid,) in self.conn.execute(
+            "SELECT id FROM pending_lessons WHERE id LIKE ?", (f"{prefix}-%",)
+        ):
+            m = pattern.match(rowid)
+            if m:
+                max_seq = max(max_seq, int(m.group(1)))
+        return f"{prefix}-{max_seq + 1:02d}"
+
+    def stage_pending_lesson(self, lesson: dict) -> str:
+        """Insert a lesson into the pending review queue and return its ID.
+
+        ``lesson`` may include an explicit ``id`` or omit it to auto-generate a
+        ``pending-YYYYMMDD-NN`` ID. ``keywords`` may be a list or JSON string.
+        """
+        pending_id = lesson.get("id") or self._next_pending_id()
+        keywords = lesson.get("keywords", [])
+        keywords_json = json.dumps(keywords) if not isinstance(keywords, str) else keywords
+
+        self.conn.execute(
+            """
+            INSERT INTO pending_lessons
+                (id, staged_at, task_file, proposed_rule, category, keywords,
+                 reviewer_critique, lesson_type, outcome)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pending_id,
+                lesson.get("staged_at", _now_iso()),
+                lesson.get("task_file", ""),
+                lesson["proposed_rule"],
+                lesson.get("category", "unknown"),
+                keywords_json,
+                lesson.get("reviewer_critique", ""),
+                lesson.get("lesson_type", "solved_pattern"),
+                lesson.get("outcome", ""),
+            ),
+        )
+        self.conn.commit()
+        return pending_id
+
+    def list_pending_lessons(self) -> list:
+        """Return all pending lessons, ordered by ``staged_at``."""
+        rows = self.conn.execute(
+            "SELECT * FROM pending_lessons ORDER BY staged_at, id"
+        ).fetchall()
+        return [self._row_to_pending(r) for r in rows]
+
+    def get_pending_lesson(self, pending_id: str) -> Optional[dict]:
+        """Return a pending lesson dict by ID, or ``None`` if not found."""
+        row = self.conn.execute(
+            "SELECT * FROM pending_lessons WHERE id = ?", (pending_id,)
+        ).fetchone()
+        return self._row_to_pending(row) if row else None
+
+    def delete_pending_lesson(self, pending_id: str) -> None:
+        """Remove a lesson from the pending queue (does not affect ``lessons``)."""
+        self.conn.execute("DELETE FROM pending_lessons WHERE id = ?", (pending_id,))
+        self.conn.commit()
+
+    def promote_pending_lesson(self, pending_id: str, edits: Optional[dict] = None) -> Optional[str]:
+        """Move a pending lesson into the active ``lessons`` table.
+
+        Maps pending fields to lesson fields (``proposed_rule`` → ``rule``,
+        ``task_file`` → ``source_task``), applies optional ``edits`` overrides,
+        inserts into ``lessons`` (with FTS sync), then deletes the pending row.
+
+        Returns the new active lesson ID, or ``None`` if the pending row is missing.
+        """
+        pending = self.get_pending_lesson(pending_id)
+        if pending is None:
+            return None
+
+        edits = edits or {}
+        lesson = {
+            "category": edits.get("category", pending.get("category", "unknown")),
+            "keywords": edits.get("keywords", pending.get("keywords", [])),
+            "rule": edits.get("rule", pending.get("proposed_rule", "")),
+            "created": edits.get("created", _today()),
+            "source_task": edits.get("source_task", pending.get("task_file", "")),
+            "lesson_type": edits.get("lesson_type", pending.get("lesson_type", "solved_pattern")),
+        }
+        lesson_id = self.insert_lesson(lesson)
+        self.delete_pending_lesson(pending_id)
+        return lesson_id

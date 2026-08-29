@@ -7,12 +7,20 @@ mocked transport layer.
 """
 
 import json
+import logging
 import re
 
 from mcp_core import transport
+from mcp_core.extraction import (
+    extract_lesson_from_critique,
+    extract_lesson_from_stuck_loop,
+)
+from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
 from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path
 from mcp_cli.base import BaseCommand, command
+
+logger = logging.getLogger(__name__)
 
 
 @command
@@ -75,6 +83,9 @@ class PipelineRunCommand(BaseCommand):
             prompt_content = f.read()
 
         result = self.revision_loop(prompt_content, args)
+
+        # Stage a lesson in the pending queue if rework occurred (never blocks).
+        self._stage_lesson_if_rework(result, prompt_content, args)
 
         if not result["approved"]:
             if result["abort_reason"]:
@@ -199,13 +210,82 @@ class PipelineRunCommand(BaseCommand):
             if abort_reason:
                 break
 
+        # Capture the last non-empty reviewer critique for lesson extraction.
+        last_critique = ""
+        for sig in reversed(reviewer_history):
+            if sig:
+                if isinstance(sig, (list, tuple)):
+                    last_critique = "\n".join(str(p) for p in sig)
+                else:
+                    last_critique = str(sig)
+                break
+
         return {
             "approved": approved,
             "final_code_block": final_code_block,
             "abort_reason": abort_reason,
             "write_file_call": write_file_call,
             "iterations": iteration,
+            "reviewer_history": reviewer_history,
+            "last_critique": last_critique,
+            "rework_occurred": iteration > 1,
+            "lesson_type": None,
         }
+
+    def _stage_lesson_if_rework(self, result, prompt_content, args) -> None:
+        """Stage a lesson in the pending queue after a rework run.
+
+        Exit-state mapping:
+          - iterations == 1 AND approved  -> no-op
+          - iterations > 1 AND approved   -> solved_pattern (LLM extraction)
+          - iterations == max AND not approved AND no abort_reason -> hard_failure (LLM extraction)
+          - abort_reason set              -> intractable_pattern (stuck-loop shortcut, no LLM)
+
+        Staging failures are logged but never block the pipeline.
+        """
+        iterations = result.get("iterations", 0)
+        approved = result.get("approved", False)
+        abort_reason = result.get("abort_reason", "")
+        task_file = getattr(args, "file", "")
+
+        # Determine the exit state and lesson type.
+        if abort_reason:
+            lesson_type = "intractable_pattern"
+        elif approved and iterations > 1:
+            lesson_type = "solved_pattern"
+        elif not approved and iterations >= args.max_retries:
+            lesson_type = "hard_failure"
+        else:
+            # Pass on iteration 1 (or any other no-op state).
+            result["lesson_type"] = None
+            return
+
+        result["lesson_type"] = lesson_type
+
+        try:
+            if lesson_type == "intractable_pattern":
+                lesson = extract_lesson_from_stuck_loop(
+                    result.get("reviewer_history", []),
+                    abort_reason,
+                    task_file,
+                )
+            else:
+                lesson = extract_lesson_from_critique(
+                    result.get("last_critique", ""),
+                    task_file,
+                    prompt_content,
+                    args.reviewer,
+                    lesson_type=lesson_type,
+                    outcome="approved" if approved else "failed",
+                )
+
+            with MemoryStore() as store:
+                store.stage_pending_lesson(lesson)
+            transport.send_terminal_mcp(
+                f"💡 1 new lesson staged in pending queue (type: {lesson_type})"
+            )
+        except Exception as exc:  # noqa: BLE001 - staging must never block the pipeline
+            logger.warning("Failed to stage lesson (type=%s): %s", lesson_type, exc)
 
     @staticmethod
     def _extract_strategy(author_response: str) -> str:
