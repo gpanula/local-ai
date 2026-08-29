@@ -260,6 +260,8 @@
 
 ## Phase 4 — Lesson Injection (Pipeline Read Path) (~1–2 days)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-29. See [`phase4_completion.md`](./phase4_completion.md) for the full completion report.
+
 **Goal**: Before the Author's first iteration, query the memory store for lessons relevant to the current task prompt and inject the top-K into the Author's context.
 
 ### Phase 4.01 — Injection Formatter
@@ -273,9 +275,9 @@
 - Returns empty string when the lessons list is empty (no section header injected)
 
 **Acceptance Criteria**:
-- [ ] 3 lessons produce a readable markdown section with 3 numbered blocks
-- [ ] Empty list returns `""`
-- [ ] Output contains no raw JSON — human-readable rule text only
+- [x] 3 lessons produce a readable markdown section with 3 numbered blocks
+- [x] Empty list returns `""`
+- [x] Output contains no raw JSON — human-readable rule text only
 
 ### Phase 4.02 — Embedding Model Setup
 
@@ -288,9 +290,9 @@
 - Returns a float vector; raises on failure
 
 **Acceptance Criteria**:
-- [ ] `ollama list` shows `nomic-embed-text`
-- [ ] `get_embedding("test sentence")` returns a list of floats with length > 0
-- [ ] Function works from within `sysadmin/` import path
+- [x] `ollama list` shows `nomic-embed-text`
+- [x] `get_embedding("test sentence")` returns a list of floats with length > 0
+- [x] Function works from within `sysadmin/` import path
 
 ### Phase 4.03 — Vector Search with `sqlite-vec`
 
@@ -304,9 +306,9 @@
 - `MemoryStore.search_lessons_hybrid(query_text, query_embedding, top_k=3) → list[dict]` — combines FTS5 BM25 + vector scores
 
 **Acceptance Criteria**:
-- [ ] Insert 5 lessons with embeddings; vector search for a related embedding returns the correct lesson first
-- [ ] Hybrid search combines both signals (a lesson matching both keyword and vector scores outranks one matching only one)
-- [ ] If `sqlite-vec` is not importable, `search_lessons_hybrid` degrades gracefully to FTS5-only
+- [x] Insert 5 lessons with embeddings; vector search for a related embedding returns the correct lesson first
+- [x] Hybrid search combines both signals (a lesson matching both keyword and vector scores outranks one matching only one)
+- [x] If `sqlite-vec` is not importable, `search_lessons_hybrid` degrades gracefully to FTS5-only
 
 ### Phase 4.04 — Pipeline Injection Hook & Tests
 
@@ -320,10 +322,10 @@
 - When no lessons match, no injection and no banner
 
 **Acceptance Criteria**:
-- [ ] A lesson about "heredoc delimiters" is retrieved and injected when the task prompt mentions "heredoc"
-- [ ] Pipeline result includes `injected_lessons` list with matching IDs
-- [ ] With zero lessons in the store, pipeline runs identically to current behavior (no regression)
-- [ ] Unit tests: insert lessons, mock pipeline, verify injection appears in Author prompt
+- [x] A lesson about "heredoc delimiters" is retrieved and injected when the task prompt mentions "heredoc"
+- [x] Pipeline result includes `injected_lessons` list with matching IDs
+- [x] With zero lessons in the store, pipeline runs identically to current behavior (no regression)
+- [x] Unit tests: insert lessons, mock pipeline, verify injection appears in Author prompt
 
 ---
 
@@ -569,6 +571,6 @@ Phase 7 can begin after Phase 2 (trajectory recording) but the wiki needs Phase 
 | Python 3.12 | ✅ Available | — |
 | SQLite 3.45 (built-in) | ✅ Available | — |
 | SQLite FTS5 | ✅ Built-in since 3.9 | Verify: `python3 -c "import sqlite3; c=sqlite3.connect(':memory:'); c.execute('CREATE VIRTUAL TABLE t USING fts5(x)')"` |
-| `nomic-embed-text` | ❌ Not pulled | `ollama pull nomic-embed-text` (Phase 4) |
-| `sqlite-vec` | ❌ Not installed | `pip install sqlite-vec` (Phase 4, or defer to 4b) |
+| `nomic-embed-text` | ✅ Pulled (Phase 4) | 768-dim embeddings via `/api/embed` |
+| `sqlite-vec` | ✅ Installed (Phase 4) | `sysadmin/venv` — vector/hybrid search |
 | Ollama API | ✅ Running | Models available for extraction calls |

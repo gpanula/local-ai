@@ -11,10 +11,12 @@ import logging
 import re
 
 from mcp_core import transport
+from mcp_core.embeddings import get_embedding
 from mcp_core.extraction import (
     extract_lesson_from_critique,
     extract_lesson_from_stuck_loop,
 )
+from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
 from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path
@@ -117,6 +119,16 @@ class PipelineRunCommand(BaseCommand):
         linter_history = []
         reviewer_history = []
         write_file_call = None
+        injected_lessons = []
+
+        # Phase 4.04: enrich the Author prompt with relevant lessons from memory
+        # before the first iteration. Never blocks the pipeline on failure.
+        try:
+            current_prompt, injected_lessons = self._inject_lessons(
+                prompt_content, args
+            )
+        except Exception as exc:  # noqa: BLE001 - injection must never block
+            logger.warning("Lesson injection skipped: %s", exc)
 
         while iteration < max_attempts and not approved:
             iteration += 1
@@ -230,7 +242,78 @@ class PipelineRunCommand(BaseCommand):
             "last_critique": last_critique,
             "rework_occurred": iteration > 1,
             "lesson_type": None,
+            "injected_lessons": injected_lessons,
         }
+
+    # Stop-words filtered out of the prompt-derived keyword query.
+    _INJECTION_STOPWORDS = {
+        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+        "that", "this", "is", "are", "was", "were", "be", "been", "it", "as",
+        "at", "by", "from", "your", "you", "please", "write", "using", "use",
+        "script", "task", "file", "create", "make", "ensure", "must", "should",
+    }
+
+    def _inject_lessons(self, prompt_content: str, args) -> tuple:
+        """Query memory for lessons relevant to the prompt and prepend them.
+
+        Extracts significant keywords from the prompt and runs an FTS5 OR query
+        (a strict phrase match would miss single-term relevance). Returns
+        ``(enriched_prompt, injected_lesson_ids)``. When no lessons match, the
+        prompt is returned unchanged with an empty ID list (no banner).
+        """
+        keywords = self._build_injection_keywords(prompt_content)
+        if not keywords:
+            return prompt_content, []
+
+        try:
+            with MemoryStore() as store:
+                lessons = self._search_by_keywords(store, keywords, top_k=3)
+        except Exception as exc:  # noqa: BLE001 - injection must never block
+            logger.warning("Lesson search failed: %s", exc)
+            return prompt_content, []
+
+        if not lessons:
+            return prompt_content, []
+
+        injected_section = format_lessons_for_prompt(lessons)
+        enriched = f"{injected_section}\n\n{prompt_content}"
+        injected_ids = [lesson.get("id") for lesson in lessons if lesson.get("id")]
+        transport.send_terminal_mcp(
+            f"📚 Injected {len(injected_ids)} relevant lessons from memory"
+        )
+        return enriched, injected_ids
+
+    @staticmethod
+    def _build_injection_keywords(prompt_content: str) -> list:
+        """Derive the significant keyword tokens from the prompt."""
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", prompt_content.lower())
+        seen = []
+        for tok in tokens:
+            if tok in PipelineRunCommand._INJECTION_STOPWORDS or tok in seen:
+                continue
+            seen.append(tok)
+        return seen
+
+    @staticmethod
+    def _search_by_keywords(store, keywords: list, top_k: int = 3) -> list:
+        """Search lessons per-keyword and merge results, ranked by match count.
+
+        ``search_lessons`` treats its query as a strict phrase, so a full-sentence
+        prompt would rarely match. Searching each significant keyword individually
+        and merging (deduped, ranked by how many keywords matched) recovers
+        single-term relevance for injection.
+        """
+        scored: dict = {}
+        for kw in keywords:
+            for lesson in store.search_lessons(kw, top_k=top_k * 3):
+                lesson_id = lesson.get("id")
+                if lesson_id is None:
+                    continue
+                entry = scored.setdefault(lesson_id, {"lesson": lesson, "hits": 0})
+                entry["hits"] += 1
+
+        ranked = sorted(scored.values(), key=lambda e: e["hits"], reverse=True)
+        return [e["lesson"] for e in ranked[:top_k]]
 
     def _stage_lesson_if_rework(self, result, prompt_content, args) -> None:
         """Stage a lesson in the pending queue after a rework run.

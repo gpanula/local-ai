@@ -12,13 +12,24 @@ file or ``:memory:``) to avoid side effects on the real store.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sqlite3
+import struct
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from mcp_core.workspace import WORKSPACE_ROOT
+
+# sqlite-vec is optional: if importable, vector/hybrid search is enabled; otherwise
+# search_lessons_hybrid degrades gracefully to FTS5-only search.
+try:  # pragma: no cover - depends on optional dependency
+    import sqlite_vec
+    _SQLITE_VEC_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    sqlite_vec = None
+    _SQLITE_VEC_AVAILABLE = False
 
 # Default runtime database location (git-ignored via .gitignore `.localai/`).
 DEFAULT_DB_PATH = os.path.join(WORKSPACE_ROOT, ".localai", "memory.db")
@@ -61,7 +72,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     lesson_type TEXT NOT NULL DEFAULT 'solved_pattern',
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     prevented_rework_count INTEGER NOT NULL DEFAULT 0,
-    ineffective_count INTEGER NOT NULL DEFAULT 0
+    ineffective_count INTEGER NOT NULL DEFAULT 0,
+    embeddings BLOB
 );
 
 CREATE TABLE IF NOT EXISTS pending_lessons (
@@ -110,6 +122,46 @@ def _flatten_keywords(keywords: Any) -> str:
     return str(keywords or "")
 
 
+def _serialize_embedding(embedding: Any) -> Optional[bytes]:
+    """Serialize a list of floats to a little-endian float32 BLOB (sqlite-vec format).
+
+    Returns ``None`` when no embedding is provided.
+    """
+    if embedding is None:
+        return None
+    if isinstance(embedding, bytes):
+        return embedding
+    if not isinstance(embedding, (list, tuple)):
+        return None
+    floats = [float(v) for v in embedding]
+    return struct.pack(f"<{len(floats)}f", *floats)
+
+
+def _deserialize_embedding(blob: Any) -> Optional[list]:
+    """Deserialize a float32 BLOB back into a list of floats."""
+    if blob is None:
+        return None
+    if isinstance(blob, (list, tuple)):
+        return [float(v) for v in blob]
+    try:
+        count = len(blob) // 4
+        return list(struct.unpack(f"<{count}f", blob))
+    except (struct.error, TypeError):
+        return None
+
+
+def _cosine_similarity(a: list, b: list) -> float:
+    """Cosine similarity between two equal-length float vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 class MemoryStore:
     """SQLite-backed store for lessons and the pending review queue.
 
@@ -137,9 +189,30 @@ class MemoryStore:
     # Connection lifecycle
     # ------------------------------------------------------------------
     def _create_schema(self) -> None:
-        """Create all tables if they do not exist (idempotent)."""
+        """Create all tables if they do not exist (idempotent).
+
+        Loads the optional ``sqlite-vec`` extension when available so vector
+        search works, and migrates pre-existing databases by adding the
+        ``embeddings`` column if it is missing.
+        """
+        if _SQLITE_VEC_AVAILABLE:
+            try:
+                self.conn.enable_load_extension(True)
+                sqlite_vec.load(self.conn)
+            except Exception:  # noqa: BLE001 - vector search is optional
+                pass
         self.conn.executescript(_SCHEMA)
+        self._migrate_embeddings_column()
         self.conn.commit()
+
+    def _migrate_embeddings_column(self) -> None:
+        """Add the ``embeddings`` BLOB column to ``lessons`` if it is missing."""
+        cols = {
+            r[1]
+            for r in self.conn.execute("PRAGMA table_info(lessons)").fetchall()
+        }
+        if "embeddings" not in cols:
+            self.conn.execute("ALTER TABLE lessons ADD COLUMN embeddings BLOB")
 
     def close(self) -> None:
         """Commit any pending transaction and close the connection."""
@@ -206,18 +279,21 @@ class MemoryStore:
         """Insert a lesson and return its generated ID.
 
         ``lesson`` may include an explicit ``id`` (used as-is) or omit it to
-        auto-generate one. ``keywords`` may be a list or a JSON string.
+        auto-generate one. ``keywords`` may be a list or a JSON string. An
+        optional ``embeddings`` value (a list of floats) is stored as a BLOB
+        for vector search.
         """
         lesson_id = lesson.get("id") or self._next_lesson_id()
         keywords = lesson.get("keywords", [])
         keywords_json = json.dumps(keywords) if not isinstance(keywords, str) else keywords
+        embedding_blob = _serialize_embedding(lesson.get("embeddings"))
 
         self.conn.execute(
             """
             INSERT INTO lessons
                 (id, category, keywords, rule, created, source_task, lesson_type,
-                 retrieval_count, prevented_rework_count, ineffective_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 retrieval_count, prevented_rework_count, ineffective_count, embeddings)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lesson_id,
@@ -230,6 +306,7 @@ class MemoryStore:
                 int(lesson.get("retrieval_count", 0)),
                 int(lesson.get("prevented_rework_count", 0)),
                 int(lesson.get("ineffective_count", 0)),
+                embedding_blob,
             ),
         )
         self._sync_fts_insert(lesson_id, lesson["rule"], keywords, lesson.get("category", "unknown"))
@@ -352,6 +429,93 @@ class MemoryStore:
             lesson = self._row_to_lesson(row)
             lesson["rank"] = row["rank"]
             results.append(lesson)
+        return results
+
+    # ------------------------------------------------------------------
+    # Vector & hybrid search (sqlite-vec, optional)
+    # ------------------------------------------------------------------
+    def search_lessons_vector(self, query_embedding: list, top_k: int = 3) -> list:
+        """Vector similarity search over lessons using cosine similarity.
+
+        Requires ``sqlite-vec`` to be importable. Returns up to ``top_k`` lesson
+        dicts, each including a ``vector_rank`` field (cosine similarity; higher
+        is better). Lessons without an embedding are skipped. Returns ``[]`` if
+        ``sqlite-vec`` is unavailable or no embeddings are stored.
+        """
+        if not _SQLITE_VEC_AVAILABLE:
+            return []
+        if not query_embedding:
+            return []
+
+        query_blob = _serialize_embedding(query_embedding)
+        if query_blob is None:
+            return []
+
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT lessons.*, vec_distance_cosine(lessons.embeddings, ?) AS vec_dist
+                FROM lessons
+                WHERE lessons.embeddings IS NOT NULL
+                ORDER BY vec_dist ASC
+                LIMIT ?
+                """,
+                (query_blob, top_k),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # sqlite-vec not loaded for this connection (e.g. extension load failed).
+            return []
+
+        results = []
+        for row in rows:
+            lesson = self._row_to_lesson(row)
+            # vec_distance_cosine returns a distance (0 = identical); convert to similarity.
+            lesson["vector_rank"] = 1.0 - float(row["vec_dist"])
+            results.append(lesson)
+        return results
+
+    def search_lessons_hybrid(self, query_text: str, query_embedding: list, top_k: int = 3) -> list:
+        """Combine FTS5 BM25 keyword search with vector similarity.
+
+        When ``sqlite-vec`` is unavailable or no embedding is provided, this
+        degrades gracefully to FTS5-only search (``search_lessons``). Otherwise
+        it merges both signals: a lesson matching both keyword and vector scores
+        outranks one matching only a single signal.
+        """
+        if not _SQLITE_VEC_AVAILABLE or not query_embedding:
+            return self.search_lessons(query_text, top_k=top_k)
+
+        fts_results = self.search_lessons(query_text, top_k=top_k * 3)
+        vec_results = self.search_lessons_vector(query_embedding, top_k=top_k * 3)
+
+        # Normalize BM25 rank (lower is better) into a 0..1 score.
+        fts_scores: dict = {}
+        if fts_results:
+            max_rank = max(r.get("rank", 0.0) for r in fts_results) or 1.0
+            for r in fts_results:
+                # BM25 rank is negative; smaller magnitude = better. Map to 0..1.
+                fts_scores[r["id"]] = 1.0 - (abs(r.get("rank", 0.0)) / (abs(max_rank) or 1.0))
+
+        vec_scores: dict = {}
+        for r in vec_results:
+            vec_scores[r["id"]] = r.get("vector_rank", 0.0)
+
+        all_ids = set(fts_scores) | set(vec_scores)
+        combined = []
+        for lesson_id in all_ids:
+            fts = fts_scores.get(lesson_id, 0.0)
+            vec = vec_scores.get(lesson_id, 0.0)
+            combined.append((lesson_id, fts + vec))
+
+        combined.sort(key=lambda item: item[1], reverse=True)
+        top_ids = [lesson_id for lesson_id, _ in combined[:top_k]]
+
+        results = []
+        for lesson_id in top_ids:
+            lesson = self.get_lesson(lesson_id)
+            if lesson:
+                lesson["hybrid_rank"] = dict(combined)[lesson_id]
+                results.append(lesson)
         return results
 
     # ------------------------------------------------------------------

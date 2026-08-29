@@ -263,3 +263,103 @@ def test_stage_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_p
     # Should not raise; staging failure is swallowed and logged.
     cmd._stage_lesson_if_rework(result, "prompt content", make_args())
     assert result["lesson_type"] == "solved_pattern"
+
+
+# --- lesson injection hook (Phase 4.04) ---
+
+def _inject_with_store(monkeypatch, tmp_path, prompt, lessons):
+    """Run _inject_lessons against a temp-file MemoryStore preloaded with lessons."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        for lesson in lessons:
+            store.insert_lesson(lesson)
+    cmd = PipelineRunCommand()
+    return cmd._inject_lessons(prompt, make_args())
+
+
+def test_inject_retrieves_heredoc_lesson(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    lessons = [
+        {
+            "id": "l1",
+            "rule": "Use unindented heredoc delimiters on column 0.",
+            "keywords": ["heredoc", "EOF"],
+            "category": "sysadmin_bash",
+        },
+        {
+            "id": "l2",
+            "rule": "ansible temp dir",
+            "keywords": ["ansible"],
+            "category": "ansible",
+        },
+    ]
+    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "Write a script using a heredoc", lessons)
+    assert "l1" in ids
+    assert "### Relevant Lessons from Past Runs" in enriched
+    assert "unindented heredoc delimiters" in enriched
+    # Original prompt preserved.
+    assert "Write a script using a heredoc" in enriched
+
+
+def test_inject_no_match_returns_unchanged(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    lessons = [
+        {
+            "id": "l1",
+            "rule": "ansible temp dir",
+            "keywords": ["ansible"],
+            "category": "ansible",
+        }
+    ]
+    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "nothing relevant here", lessons)
+    assert ids == []
+    assert enriched == "nothing relevant here"
+    assert "### Relevant Lessons from Past Runs" not in enriched
+
+
+def test_inject_empty_store_no_regression(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "Do something", [])
+    assert ids == []
+    assert enriched == "Do something"
+
+
+def test_inject_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Point DEFAULT_DB_PATH at an unwritable location so MemoryStore fails.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    cmd = PipelineRunCommand()
+    enriched, ids = cmd._inject_lessons("Do something", make_args())
+    assert ids == []
+    assert enriched == "Do something"
+
+
+def test_revision_loop_tracks_injected_lessons(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Preload a heredoc lesson, then run the full revision loop and confirm the
+    # result dict carries injected_lessons.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        store.insert_lesson(
+            {
+                "id": "l1",
+                "rule": "Use unindented heredoc delimiters.",
+                "keywords": ["heredoc"],
+                "category": "sysadmin_bash",
+            }
+        )
+
+    scripted_call_mcp(monkeypatch)
+    result = PipelineRunCommand().revision_loop("Write a heredoc script", make_args())
+    assert "l1" in result["injected_lessons"]
+    assert result["approved"] is True

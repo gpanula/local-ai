@@ -223,3 +223,87 @@ def test_context_manager_rolls_back_on_exception(tmp_path):
             raise RuntimeError("boom")
     with MemoryStore(db_path) as m2:
         assert m2.list_lessons() == []
+
+
+# ---------------------------------------------------------------------------
+# Vector & hybrid search (Phase 4.03)
+# ---------------------------------------------------------------------------
+def _embed_lesson(store, lesson_id, rule, keywords, embedding):
+    store.insert_lesson(
+        {
+            "id": lesson_id,
+            "rule": rule,
+            "keywords": keywords,
+            "category": "sysadmin_bash",
+            "embeddings": embedding,
+        }
+    )
+
+
+def test_vector_search_returns_most_similar_first(store):
+    _embed_lesson(store, "v1", "heredoc delimiters", ["heredoc"], [1.0, 0.0, 0.0])
+    _embed_lesson(store, "v2", "ansible temp dir", ["ansible"], [0.0, 1.0, 0.0])
+    _embed_lesson(store, "v3", "venv isolation", ["venv"], [0.0, 0.0, 1.0])
+    results = store.search_lessons_vector([1.0, 0.0, 0.0], top_k=2)
+    assert results[0]["id"] == "v1"
+    assert results[0]["vector_rank"] > results[1]["vector_rank"]
+
+
+def test_vector_search_skips_lessons_without_embedding(store):
+    store.insert_lesson(_lesson(id="no-embed", rule="No embedding here"))
+    _embed_lesson(store, "v1", "heredoc", ["heredoc"], [1.0, 0.0])
+    results = store.search_lessons_vector([1.0, 0.0], top_k=5)
+    ids = [r["id"] for r in results]
+    assert "v1" in ids
+    assert "no-embed" not in ids
+
+
+def test_hybrid_search_combines_signals(store):
+    # l1 matches both keyword "heredoc" and vector [1,0,0].
+    _embed_lesson(store, "l1", "heredoc delimiters", ["heredoc"], [1.0, 0.0, 0.0])
+    # l2 matches only the vector (no keyword overlap with "heredoc").
+    _embed_lesson(store, "l2", "unrelated rule", ["unrelated"], [0.9, 0.1, 0.0])
+    results = store.search_lessons_hybrid("heredoc", [1.0, 0.0, 0.0], top_k=2)
+    assert results[0]["id"] == "l1"
+
+
+def test_hybrid_search_degrades_to_fts_without_embedding(store):
+    store.insert_lesson(_lesson(id="h1", rule="heredoc delimiters", keywords=["heredoc"]))
+    # No query embedding -> falls back to FTS5-only.
+    results = store.search_lessons_hybrid("heredoc", [], top_k=3)
+    assert any(r["id"] == "h1" for r in results)
+
+
+def test_embeddings_column_migrated_on_existing_db(tmp_path):
+    # Simulate a pre-Phase-4 database without the embeddings column.
+    import sqlite3
+
+    db_path = os.path.join(str(tmp_path), "old.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE lessons (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL DEFAULT 'unknown',
+            keywords TEXT NOT NULL DEFAULT '[]',
+            rule TEXT NOT NULL,
+            created TEXT NOT NULL,
+            source_task TEXT NOT NULL DEFAULT '',
+            lesson_type TEXT NOT NULL DEFAULT 'solved_pattern',
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            prevented_rework_count INTEGER NOT NULL DEFAULT 0,
+            ineffective_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Opening with MemoryStore should add the embeddings column.
+    with MemoryStore(db_path) as m:
+        cols = {r[1] for r in m.conn.execute("PRAGMA table_info(lessons)").fetchall()}
+        assert "embeddings" in cols
+        # And vector search should work after migration.
+        m.insert_lesson(_lesson(id="m1", rule="heredoc", embeddings=[1.0, 0.0]))
+        results = m.search_lessons_vector([1.0, 0.0], top_k=3)
+        assert results[0]["id"] == "m1"
