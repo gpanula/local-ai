@@ -307,3 +307,75 @@ def test_embeddings_column_migrated_on_existing_db(tmp_path):
         m.insert_lesson(_lesson(id="m1", rule="heredoc", embeddings=[1.0, 0.0]))
         results = m.search_lessons_vector([1.0, 0.0], top_k=3)
         assert results[0]["id"] == "m1"
+
+
+# ---------------------------------------------------------------------------
+# Telemetry counters (Phase 5.01)
+# ---------------------------------------------------------------------------
+def test_increment_retrieval_count_batch(store):
+    store.insert_lesson(_lesson(id="a", rule="rule a"))
+    store.insert_lesson(_lesson(id="b", rule="rule b"))
+    store.increment_retrieval_count(["a", "b"])
+    assert store.get_lesson("a")["retrieval_count"] == 1
+    assert store.get_lesson("b")["retrieval_count"] == 1
+    store.increment_retrieval_count(["a"])
+    assert store.get_lesson("a")["retrieval_count"] == 2
+
+
+def test_increment_retrieval_count_empty_is_noop(store):
+    store.insert_lesson(_lesson(id="a", rule="rule a"))
+    store.increment_retrieval_count([])
+    assert store.get_lesson("a")["retrieval_count"] == 0
+
+
+def test_increment_retrieval_count_persists(tmp_path):
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    with MemoryStore(db_path) as m:
+        m.insert_lesson(_lesson(id="a", rule="rule a"))
+        m.increment_retrieval_count(["a"])
+    # Reopen and confirm the counter persisted to disk.
+    with MemoryStore(db_path) as m2:
+        assert m2.get_lesson("a")["retrieval_count"] == 1
+
+
+def test_update_telemetry_increments_field(store):
+    store.insert_lesson(_lesson(id="a", rule="rule a"))
+    store.update_telemetry("a", "prevented_rework_count")
+    store.update_telemetry("a", "ineffective_count", increment=2)
+    lesson = store.get_lesson("a")
+    assert lesson["prevented_rework_count"] == 1
+    assert lesson["ineffective_count"] == 2
+
+
+def test_update_telemetry_ignores_unknown_field(store):
+    store.insert_lesson(_lesson(id="a", rule="rule a"))
+    store.update_telemetry("a", "not_a_field")
+    assert store.get_lesson("a")["retrieval_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Dynamic ranking suppression (Phase 5.03)
+# ---------------------------------------------------------------------------
+def test_suppression_ranks_effective_above_ineffective(store):
+    # Identical rule text (same BM25), different telemetry.
+    store.insert_lesson(
+        _lesson(id="ineffective", rule="Use unindented heredoc delimiters",
+                keywords=["heredoc"], retrieval_count=10, prevented_rework_count=0)
+    )
+    store.insert_lesson(
+        _lesson(id="effective", rule="Use unindented heredoc delimiters",
+                keywords=["heredoc"], retrieval_count=2, prevented_rework_count=1)
+    )
+    results = store.search_lessons("heredoc", top_k=3)
+    ids = [r["id"] for r in results]
+    assert ids.index("effective") < ids.index("ineffective")
+
+
+def test_suppression_new_lesson_neutral(store):
+    store.insert_lesson(
+        _lesson(id="new", rule="Use unindented heredoc delimiters", keywords=["heredoc"])
+    )
+    results = store.search_lessons("heredoc", top_k=3)
+    new = next(r for r in results if r["id"] == "new")
+    # Neutral multiplier (0+1)/(0+2) = 0.5 (BM25 rank is a tiny non-zero value).
+    assert new["utility_score"] == pytest.approx(0.5, abs=1e-3)

@@ -382,6 +382,40 @@ class MemoryStore:
         self.conn.commit()
 
     # ------------------------------------------------------------------
+    # Telemetry counters (Phase 5)
+    # ------------------------------------------------------------------
+    # Counter columns that may be updated via update_telemetry.
+    TELEMETRY_FIELDS = ("retrieval_count", "prevented_rework_count", "ineffective_count")
+
+    def increment_retrieval_count(self, lesson_ids: list) -> None:
+        """Batch-increment ``retrieval_count`` for each lesson ID.
+
+        No-op when ``lesson_ids`` is empty. Persists to disk (commits).
+        """
+        if not lesson_ids:
+            return
+        for lesson_id in lesson_ids:
+            self.conn.execute(
+                "UPDATE lessons SET retrieval_count = retrieval_count + 1 WHERE id = ?",
+                (lesson_id,),
+            )
+        self.conn.commit()
+
+    def update_telemetry(self, lesson_id: str, field: str, increment: int = 1) -> None:
+        """Increment a telemetry counter column for a lesson.
+
+        ``field`` must be one of ``retrieval_count``, ``prevented_rework_count``,
+        or ``ineffective_count``. Unknown fields are ignored.
+        """
+        if field not in self.TELEMETRY_FIELDS:
+            return
+        self.conn.execute(
+            f"UPDATE lessons SET {field} = {field} + ? WHERE id = ?",
+            (increment, lesson_id),
+        )
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
     # FTS5 sync helpers
     # ------------------------------------------------------------------
     def _sync_fts_insert(self, lesson_id: str, rule: str, keywords: Any, category: str) -> None:
@@ -401,8 +435,10 @@ class MemoryStore:
         """Full-text keyword search over lessons, ranked by FTS5 BM25.
 
         Returns up to ``top_k`` lesson dicts, each including a ``rank`` field
-        (the FTS5 BM25 score; lower is better). Empty queries and no-match
-        queries return ``[]``.
+        (the FTS5 BM25 score; lower is better) and a ``utility_score`` field
+        (BM25 magnitude weighted by the lesson's utility multiplier). Lessons
+        retrieved frequently without preventing rework are suppressed below the
+        top-K threshold. Empty queries and no-match queries return ``[]``.
         """
         query = (query or "").strip()
         if not query:
@@ -421,15 +457,35 @@ class MemoryStore:
             ORDER BY rank
             LIMIT ?
             """,
-            (match_expr, top_k),
+            (match_expr, top_k * 3),
         ).fetchall()
 
         results = []
         for row in rows:
             lesson = self._row_to_lesson(row)
             lesson["rank"] = row["rank"]
+            lesson["utility_score"] = self._utility_score(lesson)
             results.append(lesson)
-        return results
+
+        # Sort by utility score descending (higher = more useful), then trim.
+        results.sort(key=lambda r: r["utility_score"], reverse=True)
+        return results[:top_k]
+
+    @staticmethod
+    def _utility_score(lesson: dict) -> float:
+        """Compute the utility-weighted score for a lesson.
+
+        Multiplier = (prevented + 1) / (retrieved + 2). A brand-new lesson
+        (0 retrieved, 0 prevented) gets a neutral 0.5 multiplier. The BM25 rank
+        is negative (lower = better), so we negate it and add 1 to keep it
+        strictly positive (so ties in BM25 are still broken by the multiplier),
+        then multiply by the multiplier. Higher = more useful.
+        """
+        retrieved = int(lesson.get("retrieval_count", 0))
+        prevented = int(lesson.get("prevented_rework_count", 0))
+        multiplier = (prevented + 1) / (retrieved + 2)
+        rank = float(lesson.get("rank", 0.0))
+        return (-rank + 1) * multiplier
 
     # ------------------------------------------------------------------
     # Vector & hybrid search (sqlite-vec, optional)
@@ -503,9 +559,16 @@ class MemoryStore:
         all_ids = set(fts_scores) | set(vec_scores)
         combined = []
         for lesson_id in all_ids:
+            lesson = self.get_lesson(lesson_id)
+            if lesson is None:
+                continue
             fts = fts_scores.get(lesson_id, 0.0)
             vec = vec_scores.get(lesson_id, 0.0)
-            combined.append((lesson_id, fts + vec))
+            # Apply the utility suppression factor to the combined score.
+            multiplier = (int(lesson.get("prevented_rework_count", 0)) + 1) / (
+                int(lesson.get("retrieval_count", 0)) + 2
+            )
+            combined.append((lesson_id, (fts + vec) * multiplier))
 
         combined.sort(key=lambda item: item[1], reverse=True)
         top_ids = [lesson_id for lesson_id, _ in combined[:top_k]]

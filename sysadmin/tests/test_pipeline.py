@@ -297,7 +297,8 @@ def test_inject_retrieves_heredoc_lesson(fake_send_terminal_mcp, monkeypatch, tm
             "category": "ansible",
         },
     ]
-    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "Write a script using a heredoc", lessons)
+    enriched, injected = _inject_with_store(monkeypatch, tmp_path, "Write a script using a heredoc", lessons)
+    ids = [lesson.get("id") for lesson in injected]
     assert "l1" in ids
     assert "### Relevant Lessons from Past Runs" in enriched
     assert "unindented heredoc delimiters" in enriched
@@ -363,3 +364,96 @@ def test_revision_loop_tracks_injected_lessons(fake_send_terminal_mcp, monkeypat
     result = PipelineRunCommand().revision_loop("Write a heredoc script", make_args())
     assert "l1" in result["injected_lessons"]
     assert result["approved"] is True
+
+
+# --- telemetry & attribution hook (Phase 5) ---
+
+def _apply_telemetry_with_store(monkeypatch, tmp_path, result):
+    """Run _apply_telemetry against a temp-file MemoryStore preloaded with lessons."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        for lesson in result.get("injected_lesson_dicts", []):
+            store.insert_lesson(lesson)
+    cmd = PipelineRunCommand()
+    cmd._apply_telemetry(result)
+    return memory_mod.MemoryStore(db_path)
+
+
+def test_telemetry_increments_retrieval_and_credits(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "last_critique": "",
+        "injected_lessons": ["l1", "l2"],
+        "injected_lesson_dicts": [
+            {"id": "l1", "keywords": ["heredoc"], "rule": "r"},
+            {"id": "l2", "keywords": ["ansible"], "rule": "r"},
+        ],
+    }
+    store = _apply_telemetry_with_store(monkeypatch, tmp_path, result)
+    try:
+        # Iteration-1 pass credits all -> prevented_rework_count += 1.
+        assert store.get_lesson("l1")["retrieval_count"] == 1
+        assert store.get_lesson("l1")["prevented_rework_count"] == 1
+        assert store.get_lesson("l2")["prevented_rework_count"] == 1
+    finally:
+        store.close()
+
+
+def test_telemetry_blames_overlapping_lesson(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "last_critique": "- Fix heredoc delimiter indentation",
+        "injected_lessons": ["l1", "l2"],
+        "injected_lesson_dicts": [
+            {"id": "l1", "keywords": ["heredoc"], "rule": "r"},
+            {"id": "l2", "keywords": ["ansible"], "rule": "r"},
+        ],
+    }
+    store = _apply_telemetry_with_store(monkeypatch, tmp_path, result)
+    try:
+        # l1 overlaps "heredoc" -> blamed (ineffective_count += 1).
+        assert store.get_lesson("l1")["ineffective_count"] == 1
+        # l2 no overlap -> innocent (no counter change).
+        assert store.get_lesson("l2")["ineffective_count"] == 0
+        assert store.get_lesson("l2")["prevented_rework_count"] == 0
+    finally:
+        store.close()
+
+
+def test_telemetry_noop_without_injected_lessons(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        store.insert_lesson({"id": "l1", "keywords": ["heredoc"], "rule": "r"})
+    result = {"approved": True, "iterations": 1, "injected_lessons": [], "injected_lesson_dicts": []}
+    PipelineRunCommand()._apply_telemetry(result)
+    with memory_mod.MemoryStore(db_path) as store2:
+        assert store2.get_lesson("l1")["retrieval_count"] == 0
+
+
+def test_telemetry_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "injected_lessons": ["l1"],
+        "injected_lesson_dicts": [{"id": "l1", "keywords": ["heredoc"], "rule": "r"}],
+    }
+    # Should not raise; telemetry failure is swallowed and logged.
+    PipelineRunCommand()._apply_telemetry(result)

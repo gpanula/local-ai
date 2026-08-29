@@ -331,6 +331,8 @@
 
 ## Phase 5 — Retrieval Telemetry & Attribution (~1 day)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-29. See [`phase5_completion.md`](./phase5_completion.md) for the full completion report.
+
 **Goal**: Track whether injected lessons actually prevented rework, and decay ineffective lessons out of top-K results over time.
 
 ### Phase 5.01 — Retrieval Counter Updates
@@ -343,9 +345,9 @@
 - No-op when `injected_lessons` is empty
 
 **Acceptance Criteria**:
-- [ ] After a pipeline run injecting lessons A and B, both have `retrieval_count += 1`
-- [ ] Running with no injected lessons does not modify any rows
-- [ ] Counter survives across MemoryStore sessions (persisted to disk)
+- [x] After a pipeline run injecting lessons A and B, both have `retrieval_count += 1`
+- [x] Running with no injected lessons does not modify any rows
+- [x] Counter survives across MemoryStore sessions (persisted to disk)
 
 ### Phase 5.02 — Attribution Logic (Blame / Innocent / Credit)
 
@@ -362,10 +364,10 @@
 - `MemoryStore.update_telemetry(lesson_id, field, increment=1)` — generic counter update
 
 **Acceptance Criteria**:
-- [ ] Iteration-1 pass credits all injected lessons
-- [ ] Lesson with keyword "heredoc" is blamed when critique mentions "heredoc"
-- [ ] Lesson with keyword "ansible" is innocent when critique is about "heredoc"
-- [ ] Counters reflect the attribution correctly in the database
+- [x] Iteration-1 pass credits all injected lessons
+- [x] Lesson with keyword "heredoc" is blamed when critique mentions "heredoc"
+- [x] Lesson with keyword "ansible" is innocent when critique is about "heredoc"
+- [x] Counters reflect the attribution correctly in the database
 
 ### Phase 5.03 — Dynamic Ranking Suppression & Tests
 
@@ -377,9 +379,9 @@
 - `search_lessons_hybrid()` applies the same suppression factor to the combined score
 
 **Acceptance Criteria**:
-- [ ] A lesson retrieved 10 times with 0 preventions ranks lower than a lesson retrieved 2 times with 1 prevention (given similar BM25 scores)
-- [ ] A brand-new lesson (0 retrieved, 0 prevented) gets a neutral score of `1 × (1/2) = 0.5` multiplier — not penalized
-- [ ] Unit tests with synthetic counters verify ranking order changes
+- [x] A lesson retrieved 10 times with 0 preventions ranks lower than a lesson retrieved 2 times with 1 prevention (given similar BM25 scores)
+- [x] A brand-new lesson (0 retrieved, 0 prevented) gets a neutral score of `1 × (1/2) = 0.5` multiplier — not penalized
+- [x] Unit tests with synthetic counters verify ranking order changes
 
 ---
 

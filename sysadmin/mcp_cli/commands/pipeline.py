@@ -11,6 +11,7 @@ import logging
 import re
 
 from mcp_core import transport
+from mcp_core.attribution import attribute_lessons
 from mcp_core.embeddings import get_embedding
 from mcp_core.extraction import (
     extract_lesson_from_critique,
@@ -86,6 +87,9 @@ class PipelineRunCommand(BaseCommand):
 
         result = self.revision_loop(prompt_content, args)
 
+        # Phase 5: record retrieval + attribution telemetry (never blocks).
+        self._apply_telemetry(result)
+
         # Stage a lesson in the pending queue if rework occurred (never blocks).
         self._stage_lesson_if_rework(result, prompt_content, args)
 
@@ -120,13 +124,17 @@ class PipelineRunCommand(BaseCommand):
         reviewer_history = []
         write_file_call = None
         injected_lessons = []
+        injected_lesson_dicts = []
 
         # Phase 4.04: enrich the Author prompt with relevant lessons from memory
         # before the first iteration. Never blocks the pipeline on failure.
         try:
-            current_prompt, injected_lessons = self._inject_lessons(
+            current_prompt, injected_lesson_dicts = self._inject_lessons(
                 prompt_content, args
             )
+            injected_lessons = [
+                lesson.get("id") for lesson in injected_lesson_dicts if lesson.get("id")
+            ]
         except Exception as exc:  # noqa: BLE001 - injection must never block
             logger.warning("Lesson injection skipped: %s", exc)
 
@@ -243,6 +251,7 @@ class PipelineRunCommand(BaseCommand):
             "rework_occurred": iteration > 1,
             "lesson_type": None,
             "injected_lessons": injected_lessons,
+            "injected_lesson_dicts": injected_lesson_dicts,
         }
 
     # Stop-words filtered out of the prompt-derived keyword query.
@@ -258,8 +267,9 @@ class PipelineRunCommand(BaseCommand):
 
         Extracts significant keywords from the prompt and runs an FTS5 OR query
         (a strict phrase match would miss single-term relevance). Returns
-        ``(enriched_prompt, injected_lesson_ids)``. When no lessons match, the
-        prompt is returned unchanged with an empty ID list (no banner).
+        ``(enriched_prompt, injected_lessons)`` where ``injected_lessons`` is a
+        list of lesson dicts (used for attribution). When no lessons match, the
+        prompt is returned unchanged with an empty list (no banner).
         """
         keywords = self._build_injection_keywords(prompt_content)
         if not keywords:
@@ -277,11 +287,10 @@ class PipelineRunCommand(BaseCommand):
 
         injected_section = format_lessons_for_prompt(lessons)
         enriched = f"{injected_section}\n\n{prompt_content}"
-        injected_ids = [lesson.get("id") for lesson in lessons if lesson.get("id")]
         transport.send_terminal_mcp(
-            f"📚 Injected {len(injected_ids)} relevant lessons from memory"
+            f"📚 Injected {len(lessons)} relevant lessons from memory"
         )
-        return enriched, injected_ids
+        return enriched, lessons
 
     @staticmethod
     def _build_injection_keywords(prompt_content: str) -> list:
@@ -314,6 +323,37 @@ class PipelineRunCommand(BaseCommand):
 
         ranked = sorted(scored.values(), key=lambda e: e["hits"], reverse=True)
         return [e["lesson"] for e in ranked[:top_k]]
+
+    def _apply_telemetry(self, result) -> None:
+        """Record retrieval + attribution telemetry for injected lessons.
+
+        Phase 5: increments ``retrieval_count`` for every injected lesson, then
+        attributes each lesson (credited / blamed / innocent) based on the
+        pipeline outcome and reviewer critique, updating the corresponding
+        counter. Failures are logged but never block the pipeline.
+        """
+        injected_ids = result.get("injected_lessons", [])
+        injected_dicts = result.get("injected_lesson_dicts", [])
+        if not injected_ids:
+            return
+
+        try:
+            with MemoryStore() as store:
+                store.increment_retrieval_count(injected_ids)
+
+                attribution = attribute_lessons(
+                    injected_dicts,
+                    result,
+                    result.get("last_critique", ""),
+                )
+                for lesson_id, verdict in attribution.items():
+                    if verdict == "credited":
+                        store.update_telemetry(lesson_id, "prevented_rework_count")
+                    elif verdict == "blamed":
+                        store.update_telemetry(lesson_id, "ineffective_count")
+                    # "innocent" -> no counter change.
+        except Exception as exc:  # noqa: BLE001 - telemetry must never block
+            logger.warning("Telemetry update failed: %s", exc)
 
     def _stage_lesson_if_rework(self, result, prompt_content, args) -> None:
         """Stage a lesson in the pending queue after a rework run.

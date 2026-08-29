@@ -1,98 +1,85 @@
-# Phase 4 — Lesson Injection (Pipeline Read Path) — Implementation Plan
+# Phase 5 — Retrieval Telemetry & Attribution — Implementation Plan
 
-> **Source**: [`ollama_update/memory_multi-phase_implementation_summary.md`](../ollama_update/memory_multi-phase_implementation_summary.md) §Phase 4
-> **Status**: Phases 1–3 ✅ COMPLETE. Phase 4 is the read path: query memory for relevant lessons and inject them into the Author prompt before iteration 1.
+> **Source**: [`ollama_update/memory_multi-phase_implementation_summary.md`](../ollama_update/memory_multi-phase_implementation_summary.md) §Phase 5
+> **Status**: Phases 1–4 ✅ COMPLETE. Phase 5 tracks whether injected lessons actually prevented rework, and decays ineffective lessons out of top-K results.
 
 ---
 
 ## Goal
 
-Before the Author's first iteration, query the memory store for lessons relevant to the current task prompt and inject the top-K into the Author's context.
+Track whether injected lessons actually prevented rework, and decay ineffective lessons out of top-K results over time.
 
 ---
 
 ## Current State (verified)
 
-- [`MemoryStore`](../sysadmin/mcp_core/memory.py:113) already has `search_lessons(query, top_k=3)` (FTS5 BM25) and full CRUD. No embeddings column yet.
-- [`PipelineRunCommand.revision_loop()`](../sysadmin/mcp_cli/commands/pipeline.py:105) builds `current_prompt = prompt_content` and loops. Injection must happen before iteration 1.
-- [`transport.call_mcp`](../sysadmin/mcp_core/transport.py:21) is the JSON-RPC bridge to `server.py`. There is **no** embedding tool in the MCP server (no `/api/embed` handler), so `get_embedding` must call Ollama's HTTP API directly.
-- [`server.py`](../sysadmin/mcp_ollama/server.py:52) already has `_http_request()` + `OLLAMA_HOST` for direct HTTP — the same pattern will be reused in `embeddings.py`.
-- Tests use `tmp_path` DBs and monkeypatched `transport.call_mcp` (see [`conftest.py`](../sysadmin/tests/conftest.py:17)).
+- [`MemoryStore`](../sysadmin/mcp_core/memory.py:165) already has `retrieval_count`, `prevented_rework_count`, `ineffective_count` columns (default 0) on the `lessons` table, and `insert_lesson`/`update_lesson`/`get_lesson`/`list_lessons` CRUD.
+- [`search_lessons`](../sysadmin/mcp_core/memory.py:400) returns FTS5 BM25-ranked lessons with a `rank` field (lower = better). No utility weighting yet.
+- [`search_lessons_hybrid`](../sysadmin/mcp_core/memory.py:477) merges FTS5 + vector scores; no suppression factor yet.
+- [`revision_loop`](../sysadmin/mcp_cli/commands/pipeline.py:107) already returns `injected_lessons` (list of IDs) and `last_critique` (reviewer critique text) in its result dict.
+- [`PipelineRunCommand.run`](../sysadmin/mcp_cli/commands/pipeline.py:82) calls `revision_loop()` then `_stage_lesson_if_rework()` — the natural place to add telemetry/attribution after the loop.
+- Tests use `tmp_path` DBs + monkeypatched `transport.call_mcp` (see [`conftest.py`](../sysadmin/tests/conftest.py:17)).
 
 ---
 
 ## Sub-Phase Breakdown
 
-### Phase 4.01 — Injection Formatter
-
-**New file**: [`sysadmin/mcp_core/injection.py`](../sysadmin/mcp_core/injection.py)
-
-- `format_lessons_for_prompt(lessons: list[dict]) -> str`
-- Renders a `### Relevant Lessons from Past Runs` markdown section.
-- Each lesson → numbered block with rule text, category, keywords.
-- Returns `""` when `lessons` is empty (no header injected).
-- No raw JSON — human-readable rule text only.
-
-**Acceptance**:
-- 3 lessons → readable section with 3 numbered blocks.
-- Empty list → `""`.
-- No raw JSON in output.
-
----
-
-### Phase 4.02 — Embedding Model Setup
-
-**New file**: [`sysadmin/mcp_core/embeddings.py`](../sysadmin/mcp_core/embeddings.py)
-
-- `get_embedding(text: str, model: str = "nomic-embed-text") -> list[float]`
-- Calls Ollama HTTP API `POST /api/embed` directly (reuse `OLLAMA_HOST` resolution + `urllib`, mirroring `server.py`).
-- Returns a float vector; raises on failure.
-- Model pull: `ollama pull nomic-embed-text` (manual/CLI step, documented).
-
-**Acceptance**:
-- `ollama list` shows `nomic-embed-text`.
-- `get_embedding("test sentence")` returns `list[float]` with `len > 0`.
-- Importable from `sysadmin/`.
-
----
-
-### Phase 4.03 — Vector Search with `sqlite-vec`
+### Phase 5.01 — Retrieval Counter Updates
 
 **Modify**: [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py)
 
-- `pip install sqlite-vec` in the sysadmin venv.
-- Add `embeddings` BLOB column to `lessons` (schema migration — `ALTER TABLE ... ADD COLUMN` guarded by existence check, since existing DBs won't have it).
-- `insert_lesson()`: store embedding if provided.
-- `search_lessons_vector(query_embedding, top_k=3) -> list[dict]` — cosine similarity via `sqlite-vec`.
-- `search_lessons_hybrid(query_text, query_embedding, top_k=3) -> list[dict]` — combines FTS5 BM25 + vector scores.
-- **Graceful degradation**: if `sqlite-vec` is not importable, `search_lessons_hybrid` falls back to FTS5-only (`search_lessons`).
-
-**Acceptance**:
-- 5 lessons with embeddings → vector search returns correct lesson first.
-- Hybrid combines both signals.
-- `sqlite-vec` missing → hybrid degrades to FTS5-only.
-
-> **Deferral note**: If `sqlite-vec` install fails, Phase 4.03 is deferred and Phase 4.04 ships with FTS5-only search (per the summary's explicit fallback).
-
----
-
-### Phase 4.04 — Pipeline Injection Hook & Tests
+- `MemoryStore.increment_retrieval_count(lesson_ids: list[str]) -> None` — batch increment `retrieval_count` for each ID (single `UPDATE ... WHERE id IN (...)` or per-ID loop). No-op on empty list.
 
 **Modify**: [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py)
 
-- In `revision_loop()`, before iteration 1: query `search_lessons` (or `search_lessons_hybrid`) with `prompt_content` as query.
-- Prepend `format_lessons_for_prompt()` output to `current_prompt`.
-- Track `injected_lessons` (list of lesson IDs) in the result dict.
-- Terminal banner: `📚 Injected N relevant lessons from memory`.
-- No matches → no injection, no banner.
-
-**New tests**: [`sysadmin/tests/test_injection.py`](../sysadmin/tests/test_injection.py) + additions to [`test_pipeline.py`](../sysadmin/tests/test_pipeline.py)
+- After `revision_loop()` returns (in `run()`), call `increment_retrieval_count(result["injected_lessons"])` inside a `MemoryStore` context. Never blocks on failure.
 
 **Acceptance**:
-- "heredoc" lesson retrieved/injected when prompt mentions "heredoc".
-- Result includes `injected_lessons` list.
-- Zero lessons → identical behavior (no regression).
-- Unit tests verify injection appears in Author prompt.
+- Injecting lessons A and B → both `retrieval_count += 1`.
+- No injected lessons → no rows modified.
+- Counter persists across sessions (disk-backed).
+
+---
+
+### Phase 5.02 — Attribution Logic (Blame / Innocent / Credit)
+
+**New file**: [`sysadmin/mcp_core/attribution.py`](../sysadmin/mcp_core/attribution.py)
+
+- `attribute_lessons(injected_lessons: list[dict], pipeline_result: dict, reviewer_critique: str) -> dict[str, str]`
+  - Returns `lesson_id → "credited" | "blamed" | "innocent"`.
+  - **Pass on iteration 1** (`iterations == 1 AND approved`): all injected → `"credited"`.
+  - **Rework occurred** (`iterations > 1`): compare each lesson's keywords against reviewer-critique keywords:
+    - Overlap → `"blamed"`.
+    - No overlap → `"innocent"`.
+- `MemoryStore.update_telemetry(lesson_id, field, increment=1)` — generic counter update (guards field against `retrieval_count`/`prevented_rework_count`/`ineffective_count`).
+
+**Modify**: [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py)
+
+- After `revision_loop()`, compute attribution and apply counter updates:
+  - `"credited"` → `prevented_rework_count += 1`
+  - `"blamed"` → `ineffective_count += 1`
+  - `"innocent"` → no counter change
+- Needs the injected lesson dicts (not just IDs) to read keywords. `_inject_lessons` currently returns only IDs — extend it (or re-fetch lessons by ID) to also return the lesson dicts.
+
+**Acceptance**:
+- Iteration-1 pass credits all injected lessons.
+- Lesson with keyword "heredoc" blamed when critique mentions "heredoc".
+- Lesson with keyword "ansible" innocent when critique is about "heredoc".
+- Counters reflect attribution in the DB.
+
+---
+
+### Phase 5.03 — Dynamic Ranking Suppression & Tests
+
+**Modify**: [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py)
+
+- `search_lessons()`: apply utility multiplier `(prevented + 1) / (retrieved + 2)` to the BM25 score. Since BM25 rank is negative (lower = better), multiply the rank by the inverse of the multiplier (or compute a weighted score and re-sort). Final ordering must suppress high-retrieval/low-prevention lessons.
+- `search_lessons_hybrid()`: apply the same suppression factor to the combined score.
+
+**Acceptance**:
+- Lesson retrieved 10× / 0 prevented ranks lower than lesson retrieved 2× / 1 prevented (similar BM25).
+- Brand-new lesson (0/0) gets neutral `1 × (1/2) = 0.5` multiplier — not penalized.
+- Unit tests with synthetic counters verify ranking order changes.
 
 ---
 
@@ -100,16 +87,16 @@ Before the Author's first iteration, query the memory store for lessons relevant
 
 ```mermaid
 flowchart LR
-    A[4.01 Injection Formatter] --> D[4.04 Pipeline Hook]
-    B[4.02 Embedding Setup] --> C[4.03 Vector Search]
-    C --> D
+    A[5.01 Retrieval Counter] --> C[5.03 Ranking Suppression]
+    B[5.02 Attribution Logic] --> C
+    A --> D[Pipeline Hook]
+    B --> D
     D --> E[Tests]
 ```
 
-- 4.01 is independent (pure function).
-- 4.02 → 4.03 (embeddings feed vector search).
-- 4.04 depends on 4.01 (formatter) and optionally 4.03 (hybrid search).
-- 4.04 can ship with FTS5-only if 4.03 is deferred.
+- 5.01 and 5.02 are independent (both feed the pipeline hook).
+- 5.03 depends on the counter columns (already present) and the suppression formula.
+- The pipeline hook (in `run()`) wires 5.01 + 5.02 together.
 
 ---
 
@@ -117,29 +104,32 @@ flowchart LR
 
 | File | Action |
 |:---|:---|
-| [`sysadmin/mcp_core/injection.py`](../sysadmin/mcp_core/injection.py) | **New** — formatter |
-| [`sysadmin/mcp_core/embeddings.py`](../sysadmin/mcp_core/embeddings.py) | **New** — `get_embedding` |
-| [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py) | **Modify** — embeddings column + vector/hybrid search |
-| [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py) | **Modify** — injection hook |
-| [`sysadmin/tests/test_injection.py`](../sysadmin/tests/test_injection.py) | **New** — formatter tests |
-| [`sysadmin/tests/test_memory.py`](../sysadmin/tests/test_memory.py) | **Modify** — vector/hybrid search tests |
-| [`sysadmin/tests/test_pipeline.py`](../sysadmin/tests/test_pipeline.py) | **Modify** — injection hook tests |
+| [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py) | **Modify** — `increment_retrieval_count`, `update_telemetry`, suppression in `search_lessons`/`search_lessons_hybrid` |
+| [`sysadmin/mcp_core/attribution.py`](../sysadmin/mcp_core/attribution.py) | **New** — `attribute_lessons` |
+| [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py) | **Modify** — telemetry + attribution hook in `run()`; `_inject_lessons` returns lesson dicts |
+| [`sysadmin/tests/test_attribution.py`](../sysadmin/tests/test_attribution.py) | **New** — attribution unit tests |
+| [`sysadmin/tests/test_memory.py`](../sysadmin/tests/test_memory.py) | **Modify** — counter + suppression tests |
+| [`sysadmin/tests/test_pipeline.py`](../sysadmin/tests/test_pipeline.py) | **Modify** — telemetry/attribution hook tests |
 
 ---
 
-## Open Questions / Decisions
+## Key Design Decisions
 
-1. **Embedding transport**: No MCP embedding tool exists. Plan uses direct HTTP to Ollama `/api/embed` (consistent with `server.py`). Alternative: add an `ollama_embed` tool to `server.py`. **Recommendation**: direct HTTP in `embeddings.py` (simpler, no server change).
-2. **`sqlite-vec` availability**: unknown until install attempted. Plan handles graceful FTS5-only fallback.
-3. **Schema migration**: existing `.localai/memory.db` lacks `embeddings` column. Plan uses guarded `ALTER TABLE ADD COLUMN`.
+1. **`_inject_lessons` must return lesson dicts** (not just IDs) so attribution can read `keywords`. Change its return to `(enriched_prompt, injected_lessons: list[dict])`, and derive `injected_lessons` IDs in the result dict from those dicts. This keeps `revision_loop`'s `injected_lessons` field as IDs (backward-compatible with Phase 4 tests) while giving `run()` access to full dicts.
+
+2. **Suppression formula direction**: BM25 `rank` is negative (lower = better). To suppress, compute `weighted = rank / multiplier` (dividing a negative by a small positive makes it more negative = worse) OR compute a positive "score" and sort descending. Implementation will use a positive utility score for clarity: `score = -bm25_rank × multiplier`, sort descending.
+
+3. **Attribution keyword overlap**: reuse the tokenization approach from `extraction._extract_keywords` (lowercase, stopword-filtered) for both lesson keywords and critique text. Overlap = any shared token.
+
+4. **Telemetry never blocks**: all counter/attribution updates wrapped in try/except with `logger.warning`, mirroring the Phase 2/4 staging/injection pattern.
 
 ---
 
-## Acceptance Gate (Phase 4 complete)
+## Acceptance Gate (Phase 5 complete)
 
-- [ ] `format_lessons_for_prompt` renders readable markdown; empty → `""`.
-- [ ] `get_embedding` returns a float vector (or documented deferral).
-- [ ] Vector/hybrid search works, or degrades to FTS5-only.
-- [ ] Pipeline injects relevant lessons before iteration 1; `injected_lessons` tracked; banner shown.
-- [ ] Zero-lesson store → no regression.
+- [ ] `increment_retrieval_count` batch-increments and persists; no-op on empty.
+- [ ] `attribute_lessons` returns correct credited/blamed/innocent mapping.
+- [ ] `update_telemetry` updates the correct counter column.
+- [ ] Pipeline applies retrieval + attribution counters after each run.
+- [ ] `search_lessons`/`search_lessons_hybrid` suppress low-utility lessons.
 - [ ] All tests pass: `python3 -m pytest sysadmin/tests/ -v`.
