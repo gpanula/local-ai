@@ -8,6 +8,8 @@
 
 ## Phase 1 — Scaffolding & Data Layer (~1 day)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-28. See [`phase1_completion.md`](./phase1_completion.md) for the full completion report.
+
 **Goal**: Create the directory structure, SQLite schema, and pure-Python data access layer. No Ollama calls, no embeddings — just deterministic CRUD and FTS5 keyword search.
 
 ### Phase 1.01 — Directory Structure & Git Hygiene
@@ -22,9 +24,9 @@
 - `ollama_update/lessons.md` — skeleton with header and format instructions
 
 **Acceptance Criteria**:
-- [ ] `.localai/` directory exists and is excluded by `git check-ignore -v .localai/`
-- [ ] `sysadmin/data/` directory exists
-- [ ] `SYSTEM_RULES.md` and `lessons.md` are valid markdown with clear header sections
+- [x] `.localai/` directory exists and is excluded by `git check-ignore -v .localai/`
+- [x] `sysadmin/data/` directory exists
+- [x] `SYSTEM_RULES.md` and `lessons.md` are valid markdown with clear header sections
 
 ### Phase 1.02 — SQLite Schema & `MemoryStore` Init
 
@@ -40,9 +42,9 @@
 - Context manager support (`__enter__` / `__exit__`)
 
 **Acceptance Criteria**:
-- [ ] `python3 -c "from mcp_core.memory import MemoryStore; m = MemoryStore(); m.close()"` runs from `sysadmin/` and creates `.localai/memory.db`
-- [ ] Opening the database a second time does not error (idempotent schema)
-- [ ] `sqlite3 .localai/memory.db ".tables"` shows `lessons`, `pending_lessons`, `lessons_fts`
+- [x] `python3 -c "from mcp_core.memory import MemoryStore; m = MemoryStore(); m.close()"` runs from `sysadmin/` and creates `.localai/memory.db`
+- [x] Opening the database a second time does not error (idempotent schema)
+- [x] `sqlite3 .localai/memory.db ".tables"` shows `lessons`, `pending_lessons`, `lessons_fts`
 
 ### Phase 1.03 — Lesson CRUD Operations
 
@@ -57,10 +59,10 @@
 - FTS5 index automatically kept in sync via SQLite triggers or manual insert/delete into `lessons_fts`
 
 **Acceptance Criteria**:
-- [ ] Insert a lesson, retrieve it by ID, fields match
-- [ ] `list_lessons()` returns all lessons; `list_lessons(category="sysadmin_bash")` filters correctly
-- [ ] Update a lesson's rule text, re-fetch confirms change
-- [ ] Delete a lesson, `get_lesson()` returns `None`
+- [x] Insert a lesson, retrieve it by ID, fields match
+- [x] `list_lessons()` returns all lessons; `list_lessons(category="sysadmin_bash")` filters correctly
+- [x] Update a lesson's rule text, re-fetch confirms change
+- [x] Delete a lesson, `get_lesson()` returns `None`
 
 ### Phase 1.04 — FTS5 Keyword Search
 
@@ -72,10 +74,10 @@
 - Handles empty queries and no-match cases gracefully (returns `[]`)
 
 **Acceptance Criteria**:
-- [ ] Insert 5 lessons with distinct keywords; search "heredoc EOF" returns the heredoc-related lesson ranked first
-- [ ] Search for a term that matches no lessons returns empty list
-- [ ] `top_k` parameter limits results correctly
-- [ ] Deleted lessons do not appear in search results
+- [x] Insert 5 lessons with distinct keywords; search "heredoc EOF" returns the heredoc-related lesson ranked first
+- [x] Search for a term that matches no lessons returns empty list
+- [x] `top_k` parameter limits results correctly
+- [x] Deleted lessons do not appear in search results
 
 ### Phase 1.05 — Unit Tests
 
@@ -90,9 +92,9 @@
   - Context manager protocol (`with MemoryStore(...) as m:`)
 
 **Acceptance Criteria**:
-- [ ] `python3 -m pytest sysadmin/tests/test_memory.py -v` passes all tests from the `sysadmin/` directory
-- [ ] Tests create no persistent files (use temp directories or `:memory:` where possible)
-- [ ] At least 8 test cases covering the above scenarios
+- [x] `python3 -m pytest sysadmin/tests/test_memory.py -v` passes all tests from the `sysadmin/` directory
+- [x] Tests create no persistent files (use temp directories or `:memory:` where possible)
+- [x] At least 8 test cases covering the above scenarios
 
 ---
 
