@@ -188,6 +188,8 @@
 
 ## Phase 3 — Interactive Review CLI (Human Gate) (~1 day)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-29. See [`phase3_completion.md`](./phase3_completion.md) for the full completion report.
+
 **Goal**: `review-lessons` CLI command lets the developer batch-review all staged pending lessons interactively (Keep / Modify / Discard).
 
 ### Phase 3.01 — Lessons Markdown Writer
@@ -201,9 +203,9 @@
 - Handles first-lesson case (file has only the skeleton header)
 
 **Acceptance Criteria**:
-- [ ] Appending a lesson to the skeleton `lessons.md` produces valid markdown with correct YAML frontmatter
-- [ ] Appending a second lesson does not corrupt the first
-- [ ] Output matches the format from `ai_memory_summary.md` §Pattern 1 (id, category, keywords, created, source_task)
+- [x] Appending a lesson to the skeleton `lessons.md` produces valid markdown with correct YAML frontmatter
+- [x] Appending a second lesson does not corrupt the first
+- [x] Output matches the format from `ai_memory_summary.md` §Pattern 1 (id, category, keywords, created, source_task)
 
 ### Phase 3.02 — CLI Command Registration
 
@@ -216,8 +218,8 @@
 - When no pending lessons exist, prints `✅ No pending lessons to review.` and exits cleanly
 
 **Acceptance Criteria**:
-- [ ] `python3 sysadmin/mcp_client.py --help` lists `review-lessons` in available commands
-- [ ] `python3 sysadmin/mcp_client.py review-lessons` with empty pending queue prints the clean message and exits 0
+- [x] `python3 sysadmin/mcp_client.py --help` lists `review-lessons` in available commands
+- [x] `python3 sysadmin/mcp_client.py review-lessons` with empty pending queue prints the clean message and exits 0
 
 ### Phase 3.03 — Interactive Review Loop
 
@@ -234,11 +236,11 @@
 - Prints summary at end: `Kept: 2 | Modified: 1 | Discarded: 1 | Skipped: 0`
 
 **Acceptance Criteria**:
-- [ ] Interactive prompts render correctly in terminal with readable formatting
-- [ ] Keep action results in the lesson appearing in both `lessons.md` and `memory.db` active table
-- [ ] Modify action allows editing rule text before promotion
-- [ ] Discard removes from pending without affecting active lessons
-- [ ] Summary counts are accurate
+- [x] Interactive prompts render correctly in terminal with readable formatting
+- [x] Keep action results in the lesson appearing in both `lessons.md` and `memory.db` active table
+- [x] Modify action allows editing rule text before promotion
+- [x] Discard removes from pending without affecting active lessons
+- [x] Summary counts are accurate
 
 ### Phase 3.04 — Tests
 
@@ -250,9 +252,9 @@
 - Tests verify: markdown format, CRUD side effects, summary counts
 
 **Acceptance Criteria**:
-- [ ] All tests pass with `python3 -m pytest sysadmin/tests/test_lessons_writer.py sysadmin/tests/test_review_lessons.py -v`
-- [ ] No tests require live terminal interaction (all use mocked stdin)
-- [ ] At least 6 test cases across both files
+- [x] All tests pass with `python3 -m pytest sysadmin/tests/test_lessons_writer.py sysadmin/tests/test_review_lessons.py -v`
+- [x] No tests require live terminal interaction (all use mocked stdin)
+- [x] At least 6 test cases across both files
 
 ---
 
