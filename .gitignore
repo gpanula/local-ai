@@ -56,3 +56,6 @@ recordings/
 /.zprofile
 /.zshrc
 
+# roo / zoo code bits
+.roo/
+.roomodes
