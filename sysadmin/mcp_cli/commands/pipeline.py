@@ -8,6 +8,7 @@ mocked transport layer.
 
 import json
 import logging
+import os
 import re
 
 from mcp_core import transport
@@ -126,11 +127,21 @@ class PipelineRunCommand(BaseCommand):
         injected_lessons = []
         injected_lesson_dicts = []
 
+        # Phase 6.05: prepend universal system rules to the Author prompt.
+        # Never blocks the pipeline on failure (missing/empty file = no-op).
+        rules_section = ""
+        try:
+            rules_section = self._load_system_rules()
+            if rules_section:
+                current_prompt = f"{rules_section}\n\n{current_prompt}"
+        except Exception as exc:  # noqa: BLE001 - rules load must never block
+            logger.warning("System rules load skipped: %s", exc)
+
         # Phase 4.04: enrich the Author prompt with relevant lessons from memory
         # before the first iteration. Never blocks the pipeline on failure.
         try:
             current_prompt, injected_lesson_dicts = self._inject_lessons(
-                prompt_content, args
+                current_prompt, args
             )
             injected_lessons = [
                 lesson.get("id") for lesson in injected_lesson_dicts if lesson.get("id")
@@ -222,7 +233,9 @@ class PipelineRunCommand(BaseCommand):
                 linter_history.append(None)
 
             # Step 3: Reviewer Evaluation
-            review_verdict = self._review(args, prompt_content, final_code_block, linter_output)
+            review_verdict = self._review(
+                args, prompt_content, final_code_block, linter_output, rules_section
+            )
             approved, abort_reason, current_prompt, reviewer_history = self._handle_review(
                 args, review_verdict, prompt_content, final_code_block,
                 reviewer_history, iteration, max_attempts, current_prompt, approved, abort_reason,
@@ -253,6 +266,30 @@ class PipelineRunCommand(BaseCommand):
             "injected_lessons": injected_lessons,
             "injected_lesson_dicts": injected_lesson_dicts,
         }
+
+    # Path to the universal system rules store (relative to workspace root).
+    SYSTEM_RULES_PATH = os.path.join(WORKSPACE_ROOT, "sysadmin", "prompts", "SYSTEM_RULES.md")
+
+    @staticmethod
+    def _load_system_rules(rules_path: str | None = None) -> str:
+        """Read ``SYSTEM_RULES.md`` and render it as a ``### Universal System Rules`` section.
+
+        Returns an empty string when the file is missing or empty (no-op, no
+        regression). The rules text is wrapped in a markdown section header so it
+        can be prepended to the Author prompt or appended to the Reviewer prompt.
+        """
+        path = rules_path or PipelineRunCommand.SYSTEM_RULES_PATH
+        try:
+            if not os.path.exists(path):
+                return ""
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if not content:
+                return ""
+            return f"### Universal System Rules\n\n{content}"
+        except OSError as exc:  # noqa: BLE001 - rules load must never block
+            logger.warning("Could not read system rules at %s: %s", path, exc)
+            return ""
 
     # Stop-words filtered out of the prompt-derived keyword query.
     _INJECTION_STOPWORDS = {
@@ -503,8 +540,16 @@ class PipelineRunCommand(BaseCommand):
         return current_prompt, abort_reason
 
     @staticmethod
-    def _build_review_prompt(args, prompt_content, final_code_block, linter_output) -> str:
-        """Assemble the reviewer verification prompt for the script under review."""
+    def _build_review_prompt(args, prompt_content, final_code_block, linter_output, rules_section: str = "") -> str:
+        """Assemble the reviewer verification prompt for the script under review.
+
+        ``rules_section`` (optional) is the ``### Universal System Rules`` block
+        from Phase 6.05, appended as an additional verification reference. When
+        empty, the prompt is unchanged (no regression).
+        """
+        rules_block = ""
+        if rules_section:
+            rules_block = f"\n\n### Universal System Rules (must also be satisfied):\n{rules_section}"
         return (
             f"You are the Lead Verification Engineer reviewing a script authored by `{args.author}`.\n\n"
             f"### Original Prompt Specification:\n{prompt_content}\n\n"
@@ -522,16 +567,24 @@ class PipelineRunCommand(BaseCommand):
             f"5. Temporary Directory Resilience: Does the script safely handle temporary directories without assuming $TMPDIR exists (e.g. ensuring `mkdir -p \"${{TMPDIR:-/tmp}}\"` or using `mktemp -d -p /tmp`)?\n"
             f"6. Sandbox & Safety: Does Ansible use a temporary directory in `/tmp` to avoid read-only permissions errors?\n"
             f"7. Success Gate: Is the final success message (`🎉 ...`) guarded so it cannot run if an earlier step fails?\n"
-            f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n\n"
+            f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n"
+            f"9. Universal System Rules: Verify the script satisfies every rule in the Universal System Rules section below.{rules_block}\n\n"
             f"### Decision Rule:\n"
             f"Conclude your response with exactly `DECISION: APPROVED` if all criteria are satisfied, or `DECISION: REVISION_REQUESTED` followed by bullet points detailing the required fixes."
         )
 
     @staticmethod
-    def _review(args, prompt_content, final_code_block, linter_output) -> str:
-        """Run the reviewer (ollama_chat) against the synthesized script."""
+    def _review(args, prompt_content, final_code_block, linter_output, rules_section: str = "") -> str:
+        """Run the reviewer (ollama_chat) against the synthesized script.
+
+        ``rules_section`` (optional) is the ``### Universal System Rules`` block
+        from Phase 6.05, passed through to the review prompt as an additional
+        verification reference.
+        """
         transport.send_terminal_mcp(f"🧐 [Verifier `{args.reviewer}`] Evaluating script against prompt specifications...")
-        review_prompt = PipelineRunCommand._build_review_prompt(args, prompt_content, final_code_block, linter_output)
+        review_prompt = PipelineRunCommand._build_review_prompt(
+            args, prompt_content, final_code_block, linter_output, rules_section
+        )
         return transport.call_mcp("ollama_chat", {
             "prompt": review_prompt,
             "model": args.reviewer,

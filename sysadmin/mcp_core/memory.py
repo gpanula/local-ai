@@ -351,18 +351,26 @@ class MemoryStore:
             kw = fields["keywords"]
             fields["keywords"] = json.dumps(kw) if not isinstance(kw, str) else kw
 
+        # Re-sync FTS index if searchable fields changed. Delete from the FTS
+        # index BEFORE updating the content table: for external-content FTS5
+        # tables the DELETE reads the current content row, so it must run while
+        # the old values are still present. Deleting after the UPDATE can raise
+        # "database disk image is malformed" (SQLITE_CORRUPT) when the old and
+        # new token sets differ (e.g. a single-keyword lesson being rewritten).
+        fts_fields_changed = bool({"rule", "keywords", "category"} & set(fields))
+        if fts_fields_changed:
+            self.conn.execute(
+                "DELETE FROM lessons_fts WHERE rowid = (SELECT rowid FROM lessons WHERE id = ?)",
+                (lesson_id,),
+            )
+
         assignments = ", ".join(f"{k} = ?" for k in fields)
         self.conn.execute(
             f"UPDATE lessons SET {assignments} WHERE id = ?",
             (*fields.values(), lesson_id),
         )
 
-        # Re-sync FTS index if searchable fields changed.
-        if {"rule", "keywords", "category"} & set(fields):
-            self.conn.execute(
-                "DELETE FROM lessons_fts WHERE rowid = (SELECT rowid FROM lessons WHERE id = ?)",
-                (lesson_id,),
-            )
+        if fts_fields_changed:
             row = self.conn.execute(
                 "SELECT rule, keywords, category FROM lessons WHERE id = ?", (lesson_id,)
             ).fetchone()

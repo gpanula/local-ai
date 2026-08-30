@@ -1,135 +1,144 @@
-# Phase 5 — Retrieval Telemetry & Attribution — Implementation Plan
+# Phase 6 — Audit, Promotion & System Rules — Implementation Plan
 
-> **Source**: [`ollama_update/memory_multi-phase_implementation_summary.md`](../ollama_update/memory_multi-phase_implementation_summary.md) §Phase 5
-> **Status**: Phases 1–4 ✅ COMPLETE. Phase 5 tracks whether injected lessons actually prevented rework, and decays ineffective lessons out of top-K results.
-
----
+> **Source**: [`ollama_update/memory_multi-phase_implementation_summary.md`](../ollama_update/memory_multi-phase_implementation_summary.md) §Phase 6
+> **Status**: Phases 1–5 ✅ COMPLETE. Phase 6 pending.
 
 ## Goal
 
-Track whether injected lessons actually prevented rework, and decay ineffective lessons out of top-K results over time.
+`audit-lessons` CLI clusters related lessons, promotes recurring patterns to
+`SYSTEM_RULES.md`, flags low-utility lessons for cleanup, and `pipeline.py`
+auto-loads `SYSTEM_RULES.md` into both Author and Reviewer prompts.
 
----
+## Deliverables (5 sub-phases)
 
-## Current State (verified)
+### 6.01 — Lesson Clustering Engine
+- New file [`sysadmin/mcp_core/audit.py`](sysadmin/mcp_core/audit.py)
+- `cluster_lessons(lessons, min_cluster_size=3) -> list[dict]`
+- `flag_low_utility(lessons, min_retrievals=5, max_prevention_ratio=0.3) -> list[dict]`
+- Pure functions (no DB/file I/O).
 
-- [`MemoryStore`](../sysadmin/mcp_core/memory.py:165) already has `retrieval_count`, `prevented_rework_count`, `ineffective_count` columns (default 0) on the `lessons` table, and `insert_lesson`/`update_lesson`/`get_lesson`/`list_lessons` CRUD.
-- [`search_lessons`](../sysadmin/mcp_core/memory.py:400) returns FTS5 BM25-ranked lessons with a `rank` field (lower = better). No utility weighting yet.
-- [`search_lessons_hybrid`](../sysadmin/mcp_core/memory.py:477) merges FTS5 + vector scores; no suppression factor yet.
-- [`revision_loop`](../sysadmin/mcp_cli/commands/pipeline.py:107) already returns `injected_lessons` (list of IDs) and `last_critique` (reviewer critique text) in its result dict.
-- [`PipelineRunCommand.run`](../sysadmin/mcp_cli/commands/pipeline.py:82) calls `revision_loop()` then `_stage_lesson_if_rework()` — the natural place to add telemetry/attribution after the loop.
-- Tests use `tmp_path` DBs + monkeypatched `transport.call_mcp` (see [`conftest.py`](../sysadmin/tests/conftest.py:17)).
+### 6.02 — `SYSTEM_RULES.md` Writer
+- New file [`sysadmin/mcp_core/rules_writer.py`](sysadmin/mcp_core/rules_writer.py)
+- `append_system_rule(rule_text, source_lesson_ids, rules_md_path) -> None`
+- Auto-increments `### Rule #N` numbering; provenance metadata.
 
----
+### 6.03 — Low-Utility Flagging
+- `flag_low_utility()` in `audit.py` (above).
 
-## Sub-Phase Breakdown
+### 6.04 — Interactive `audit-lessons` CLI
+- Extend [`sysadmin/mcp_cli/commands/memory.py`](sysadmin/mcp_cli/commands/memory.py)
+  with `AuditLessonsCommand` (`@command`).
+- Cluster promote / low-utility cleanup flow; archive to `lessons_archive.md`.
 
-### Phase 5.01 — Retrieval Counter Updates
+### 6.05 — Pipeline Auto-Load of System Rules
+- Update [`sysadmin/mcp_cli/commands/pipeline.py`](sysadmin/mcp_cli/commands/pipeline.py)
+  to read `SYSTEM_RULES.md` and inject into Author + Reviewer prompts.
 
-**Modify**: [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py)
+## Design Decisions
 
-- `MemoryStore.increment_retrieval_count(lesson_ids: list[str]) -> None` — batch increment `retrieval_count` for each ID (single `UPDATE ... WHERE id IN (...)` or per-ID loop). No-op on empty list.
+### Clustering algorithm (6.01)
+- Build keyword set per lesson (normalize to lowercase).
+- Two lessons "related" if: share ≥2 keywords **OR** same category.
+- Union-find / connected-components over the "related" relation.
+- Emit clusters with `count >= min_cluster_size`, sorted by size desc.
+- Cluster dict: `{"keywords": [...], "category": str, "lesson_ids": [...], "count": int}`.
+  - `keywords`: union of member keywords (deduped).
+  - `category`: most common category among members.
 
-**Modify**: [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py)
+### Low-utility flagging (6.03)
+- `prevention_ratio = prevented_rework_count / retrieval_count` (0 when retrieval=0).
+- Flag when `retrieval_count >= min_retrievals` AND `prevention_ratio < max_prevention_ratio`.
+- Each flagged lesson gains `prevention_ratio` and `utility_score` fields.
+- `utility_score` reuses the Phase 5 multiplier `(prevented+1)/(retrieved+2)`.
 
-- After `revision_loop()` returns (in `run()`), call `increment_retrieval_count(result["injected_lessons"])` inside a `MemoryStore` context. Never blocks on failure.
+### SYSTEM_RULES writer (6.02)
+- Format matches skeleton in [`sysadmin/prompts/SYSTEM_RULES.md`](sysadmin/prompts/SYSTEM_RULES.md):
+  ```
+  ### Rule #N: <Title>
+  **Promoted**: <date> | **Source Lessons**: <id1>, <id2>
 
-**Acceptance**:
-- Injecting lessons A and B → both `retrieval_count += 1`.
-- No injected lessons → no rows modified.
-- Counter persists across sessions (disk-backed).
+  <rule text>
+  ```
+- Title derived from first line of rule text (truncated ~60 chars).
+- Number = count of existing `### Rule #` headers + 1.
+- Append below the `<!-- Rules are appended below... -->` marker.
 
----
+### audit-lessons CLI (6.04)
+- Loads all active lessons via `MemoryStore.list_lessons()`.
+- Runs `cluster_lessons()` + `flag_low_utility()`.
+- Per cluster prompt: `[p] Promote`, `[m] Modify rule`, `[k] Keep episodic`, `[d] Discard`.
+  - **Promote**: `append_system_rule()`; archive source lessons to
+    `ollama_update/lessons_archive.md`; `delete_lesson()` each member.
+  - **Modify**: prompt for new rule text, then promote.
+  - **Keep**: no-op (lessons stay active).
+  - **Discard**: `delete_lesson()` each member (no archive).
+- Per low-utility lesson prompt: `[d] Delete`, `[m] Rewrite`, `[s] Skip`.
+- Summary at end.
 
-### Phase 5.02 — Attribution Logic (Blame / Innocent / Credit)
+### Pipeline auto-load (6.05)
+- New helper `_load_system_rules()` reads `sysadmin/prompts/SYSTEM_RULES.md`.
+- Returns `""` when file missing/empty (no regression).
+- In `revision_loop()`: prepend rules to `current_prompt` as
+  `### Universal System Rules` section (before lesson injection).
+- In `_build_review_prompt()`: append rules as additional verification reference.
+- Rules content cached per-run (read once, passed through).
 
-**New file**: [`sysadmin/mcp_core/attribution.py`](../sysadmin/mcp_core/attribution.py)
-
-- `attribute_lessons(injected_lessons: list[dict], pipeline_result: dict, reviewer_critique: str) -> dict[str, str]`
-  - Returns `lesson_id → "credited" | "blamed" | "innocent"`.
-  - **Pass on iteration 1** (`iterations == 1 AND approved`): all injected → `"credited"`.
-  - **Rework occurred** (`iterations > 1`): compare each lesson's keywords against reviewer-critique keywords:
-    - Overlap → `"blamed"`.
-    - No overlap → `"innocent"`.
-- `MemoryStore.update_telemetry(lesson_id, field, increment=1)` — generic counter update (guards field against `retrieval_count`/`prevented_rework_count`/`ineffective_count`).
-
-**Modify**: [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py)
-
-- After `revision_loop()`, compute attribution and apply counter updates:
-  - `"credited"` → `prevented_rework_count += 1`
-  - `"blamed"` → `ineffective_count += 1`
-  - `"innocent"` → no counter change
-- Needs the injected lesson dicts (not just IDs) to read keywords. `_inject_lessons` currently returns only IDs — extend it (or re-fetch lessons by ID) to also return the lesson dicts.
-
-**Acceptance**:
-- Iteration-1 pass credits all injected lessons.
-- Lesson with keyword "heredoc" blamed when critique mentions "heredoc".
-- Lesson with keyword "ansible" innocent when critique is about "heredoc".
-- Counters reflect attribution in the DB.
-
----
-
-### Phase 5.03 — Dynamic Ranking Suppression & Tests
-
-**Modify**: [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py)
-
-- `search_lessons()`: apply utility multiplier `(prevented + 1) / (retrieved + 2)` to the BM25 score. Since BM25 rank is negative (lower = better), multiply the rank by the inverse of the multiplier (or compute a weighted score and re-sort). Final ordering must suppress high-retrieval/low-prevention lessons.
-- `search_lessons_hybrid()`: apply the same suppression factor to the combined score.
-
-**Acceptance**:
-- Lesson retrieved 10× / 0 prevented ranks lower than lesson retrieved 2× / 1 prevented (similar BM25).
-- Brand-new lesson (0/0) gets neutral `1 × (1/2) = 0.5` multiplier — not penalized.
-- Unit tests with synthetic counters verify ranking order changes.
-
----
-
-## Dependency Graph
-
-```mermaid
-flowchart LR
-    A[5.01 Retrieval Counter] --> C[5.03 Ranking Suppression]
-    B[5.02 Attribution Logic] --> C
-    A --> D[Pipeline Hook]
-    B --> D
-    D --> E[Tests]
-```
-
-- 5.01 and 5.02 are independent (both feed the pipeline hook).
-- 5.03 depends on the counter columns (already present) and the suppression formula.
-- The pipeline hook (in `run()`) wires 5.01 + 5.02 together.
-
----
-
-## Files Touched
+## Files Changed / Created
 
 | File | Action |
 |:---|:---|
-| [`sysadmin/mcp_core/memory.py`](../sysadmin/mcp_core/memory.py) | **Modify** — `increment_retrieval_count`, `update_telemetry`, suppression in `search_lessons`/`search_lessons_hybrid` |
-| [`sysadmin/mcp_core/attribution.py`](../sysadmin/mcp_core/attribution.py) | **New** — `attribute_lessons` |
-| [`sysadmin/mcp_cli/commands/pipeline.py`](../sysadmin/mcp_cli/commands/pipeline.py) | **Modify** — telemetry + attribution hook in `run()`; `_inject_lessons` returns lesson dicts |
-| [`sysadmin/tests/test_attribution.py`](../sysadmin/tests/test_attribution.py) | **New** — attribution unit tests |
-| [`sysadmin/tests/test_memory.py`](../sysadmin/tests/test_memory.py) | **Modify** — counter + suppression tests |
-| [`sysadmin/tests/test_pipeline.py`](../sysadmin/tests/test_pipeline.py) | **Modify** — telemetry/attribution hook tests |
+| [`sysadmin/mcp_core/audit.py`](sysadmin/mcp_core/audit.py) | CREATE |
+| [`sysadmin/mcp_core/rules_writer.py`](sysadmin/mcp_core/rules_writer.py) | CREATE |
+| [`sysadmin/mcp_cli/commands/memory.py`](sysadmin/mcp_cli/commands/memory.py) | EDIT (add `AuditLessonsCommand`) |
+| [`sysadmin/mcp_cli/commands/pipeline.py`](sysadmin/mcp_cli/commands/pipeline.py) | EDIT (auto-load rules) |
+| [`sysadmin/tests/test_audit.py`](sysadmin/tests/test_audit.py) | CREATE |
+| [`sysadmin/tests/test_rules_writer.py`](sysadmin/tests/test_rules_writer.py) | CREATE |
+| [`sysadmin/tests/test_audit_lessons.py`](sysadmin/tests/test_audit_lessons.py) | CREATE |
+| [`sysadmin/tests/test_cli.py`](sysadmin/tests/test_cli.py) | EDIT (add `audit-lessons` to EXPECTED_COMMANDS) |
+| [`sysadmin/tests/test_pipeline.py`](sysadmin/tests/test_pipeline.py) | EDIT (rules auto-load tests) |
 
----
+## Acceptance Criteria Mapping
 
-## Key Design Decisions
+| Sub-phase | Criteria |
+|:---|:---|
+| 6.01 | 5 heredoc/EOF/delimiter lessons cluster; 2 unrelated don't at size 3; pure function |
+| 6.02 | `### Rule #1` then `### Rule #2`; provenance date + source IDs |
+| 6.03 | 8/0 flagged; 8/4 not; 3/0 not (below threshold) |
+| 6.04 | `audit-lessons` runs; promoted rule in SYSTEM_RULES.md; archive moves lessons; low-utility flagged with stats |
+| 6.05 | rules in both prompts; empty file = no-op; unit tests |
 
-1. **`_inject_lessons` must return lesson dicts** (not just IDs) so attribution can read `keywords`. Change its return to `(enriched_prompt, injected_lessons: list[dict])`, and derive `injected_lessons` IDs in the result dict from those dicts. This keeps `revision_loop`'s `injected_lessons` field as IDs (backward-compatible with Phase 4 tests) while giving `run()` access to full dicts.
+## Test Strategy
 
-2. **Suppression formula direction**: BM25 `rank` is negative (lower = better). To suppress, compute `weighted = rank / multiplier` (dividing a negative by a small positive makes it more negative = worse) OR compute a positive "score" and sort descending. Implementation will use a positive utility score for clarity: `score = -bm25_rank × multiplier`, sort descending.
+- `test_audit.py`: clustering (heredoc cluster, unrelated no-cluster, pure function),
+  low-utility flagging (3 threshold cases).
+- `test_rules_writer.py`: first rule `#1`, second `#2`, provenance fields.
+- `test_audit_lessons.py`: mocked `input()`; promote → SYSTEM_RULES.md + archive +
+  active-table removal; low-utility delete/rewrite/skip; summary counts.
+- `test_pipeline.py`: rules present in Author + Reviewer prompts; empty file no-op.
+- `test_cli.py`: `audit-lessons` registered.
 
-3. **Attribution keyword overlap**: reuse the tokenization approach from `extraction._extract_keywords` (lowercase, stopword-filtered) for both lesson keywords and critique text. Overlap = any shared token.
+## Flow
 
-4. **Telemetry never blocks**: all counter/attribution updates wrapped in try/except with `logger.warning`, mirroring the Phase 2/4 staging/injection pattern.
+```mermaid
+flowchart TD
+    A[audit-lessons CLI] --> B[MemoryStore.list_lessons]
+    B --> C[cluster_lessons]
+    B --> D[flag_low_utility]
+    C --> E{Cluster action}
+    E -->|Promote| F[append_system_rule]
+    F --> G[archive to lessons_archive.md]
+    G --> H[delete_lesson members]
+    E -->|Modify| I[prompt new rule]
+    I --> F
+    E -->|Keep| J[no-op]
+    E -->|Discard| H
+    D --> K{Low-utility action}
+    K -->|Delete| L[delete_lesson]
+    K -->|Rewrite| M[update_lesson]
+    K -->|Skip| N[no-op]
 
----
-
-## Acceptance Gate (Phase 5 complete)
-
-- [ ] `increment_retrieval_count` batch-increments and persists; no-op on empty.
-- [ ] `attribute_lessons` returns correct credited/blamed/innocent mapping.
-- [ ] `update_telemetry` updates the correct counter column.
-- [ ] Pipeline applies retrieval + attribution counters after each run.
-- [ ] `search_lessons`/`search_lessons_hybrid` suppress low-utility lessons.
-- [ ] All tests pass: `python3 -m pytest sysadmin/tests/ -v`.
+    P[pipeline-run] --> Q[revision_loop]
+    Q --> R[_load_system_rules]
+    R --> S[prepend to Author prompt]
+    R --> T[append to Reviewer prompt]
+```

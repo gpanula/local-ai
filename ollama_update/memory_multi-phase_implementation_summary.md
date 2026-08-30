@@ -387,6 +387,8 @@
 
 ## Phase 6 — Audit, Promotion & System Rules (~1–2 days)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-30. See [`phase6_completion.md`](./phase6_completion.md) for the full completion report.
+
 **Goal**: `audit-lessons` CLI command clusters related lessons, promotes recurring patterns to `SYSTEM_RULES.md`, and flags low-utility lessons for cleanup.
 
 ### Phase 6.01 — Lesson Clustering Engine
@@ -400,9 +402,9 @@
 - Sorted by cluster size descending
 
 **Acceptance Criteria**:
-- [ ] 5 lessons about "heredoc" / "EOF" / "delimiter" cluster together
-- [ ] 2 unrelated lessons do not form a cluster at `min_cluster_size=3`
-- [ ] Pure function, no database or file I/O — takes a list, returns a list
+- [x] 5 lessons about "heredoc" / "EOF" / "delimiter" cluster together
+- [x] 2 unrelated lessons do not form a cluster at `min_cluster_size=3`
+- [x] Pure function, no database or file I/O — takes a list, returns a list
 
 ### Phase 6.02 — `SYSTEM_RULES.md` Writer
 
@@ -414,9 +416,9 @@
 - Auto-increments rule number based on existing rules in the file
 
 **Acceptance Criteria**:
-- [ ] Appending to the skeleton `SYSTEM_RULES.md` produces a correctly numbered `### Rule #1` block
-- [ ] Appending a second rule produces `### Rule #2`
-- [ ] Provenance includes date and source lesson IDs
+- [x] Appending to the skeleton `SYSTEM_RULES.md` produces a correctly numbered `### Rule #1` block
+- [x] Appending a second rule produces `### Rule #2`
+- [x] Provenance includes date and source lesson IDs
 
 ### Phase 6.03 — Low-Utility Lesson Flagging
 
@@ -428,9 +430,9 @@
 - Each flagged lesson includes computed `prevention_ratio` and `utility_score`
 
 **Acceptance Criteria**:
-- [ ] Lesson with 8 retrievals and 0 preventions is flagged
-- [ ] Lesson with 8 retrievals and 4 preventions (50%) is not flagged
-- [ ] Lesson with 3 retrievals and 0 preventions is not flagged (below `min_retrievals` threshold)
+- [x] Lesson with 8 retrievals and 0 preventions is flagged
+- [x] Lesson with 8 retrievals and 4 preventions (50%) is not flagged
+- [x] Lesson with 3 retrievals and 0 preventions is not flagged (below `min_retrievals` threshold)
 
 ### Phase 6.04 — Interactive Audit CLI (`audit-lessons`)
 
@@ -445,10 +447,10 @@
 - Prints summary at end
 
 **Acceptance Criteria**:
-- [ ] `python3 sysadmin/mcp_client.py audit-lessons` runs and displays clusters
-- [ ] Promoted rule appears in `SYSTEM_RULES.md` with correct numbering and provenance
-- [ ] Archived lessons move to `lessons_archive.md` and are removed from active table
-- [ ] Low-utility lessons are flagged with stats (retrieval count, prevention ratio)
+- [x] `python3 sysadmin/mcp_client.py audit-lessons` runs and displays clusters
+- [x] Promoted rule appears in `SYSTEM_RULES.md` with correct numbering and provenance
+- [x] Archived lessons move to `lessons_archive.md` and are removed from active table
+- [x] Low-utility lessons are flagged with stats (retrieval count, prevention ratio)
 
 ### Phase 6.05 — Pipeline Auto-Load of System Rules & Tests
 
@@ -461,9 +463,9 @@
 - If `SYSTEM_RULES.md` is empty or missing, no-op (no regression)
 
 **Acceptance Criteria**:
-- [ ] With a rule in `SYSTEM_RULES.md`, both Author and Reviewer prompts contain the rule text
-- [ ] With empty `SYSTEM_RULES.md`, pipeline behavior is unchanged from current
-- [ ] Unit tests verify rules are included in both prompts
+- [x] With a rule in `SYSTEM_RULES.md`, both Author and Reviewer prompts contain the rule text
+- [x] With empty `SYSTEM_RULES.md`, pipeline behavior is unchanged from current
+- [x] Unit tests verify rules are included in both prompts
 
 ---
 

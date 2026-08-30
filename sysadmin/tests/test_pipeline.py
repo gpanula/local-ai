@@ -457,3 +457,80 @@ def test_telemetry_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, t
     }
     # Should not raise; telemetry failure is swallowed and logged.
     PipelineRunCommand()._apply_telemetry(result)
+
+
+# --- system rules auto-load (Phase 6.05) ---
+
+def test_load_system_rules_returns_section(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("### Rule #1: Use set -euo pipefail\n\nAlways use strict flags.\n")
+    section = PipelineRunCommand._load_system_rules(rules_path)
+    assert "### Universal System Rules" in section
+    assert "Always use strict flags." in section
+
+
+def test_load_system_rules_missing_file_returns_empty(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "does_not_exist.md")
+    assert PipelineRunCommand._load_system_rules(rules_path) == ""
+
+
+def test_load_system_rules_empty_file_returns_empty(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("   \n\n  ")
+    assert PipelineRunCommand._load_system_rules(rules_path) == ""
+
+
+def test_review_prompt_includes_rules_section():
+    args = make_args()
+    prompt = PipelineRunCommand._build_review_prompt(
+        args,
+        "Do something",
+        "echo hi",
+        "No findings.",
+        rules_section="### Universal System Rules\n\nAlways use strict flags.",
+    )
+    assert "### Universal System Rules" in prompt
+    assert "Always use strict flags." in prompt
+
+
+def test_review_prompt_without_rules_is_unchanged():
+    args = make_args()
+    prompt = PipelineRunCommand._build_review_prompt(
+        args, "Do something", "echo hi", "No findings."
+    )
+    assert "### Universal System Rules" not in prompt
+
+
+def test_revision_loop_prepends_rules_to_author_prompt(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """With a rules file present, the Author prompt contains the rules text."""
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("### Rule #1: Use set -euo pipefail\n\nAlways use strict flags.\n")
+    monkeypatch.setattr(PipelineRunCommand, "SYSTEM_RULES_PATH", rules_path)
+
+    captured = {}
+
+    def _fake(tool_name, arguments):
+        if tool_name == "ollama_task_agent":
+            captured["task"] = arguments.get("task", "")
+            return AUTHOR_OK
+        if tool_name == "shellcheck_inspect":
+            return "No findings."
+        if tool_name == "ollama_chat":
+            return REVIEW_APPROVED
+        return "DEFAULT"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    PipelineRunCommand().revision_loop("Do something", make_args())
+    assert "### Universal System Rules" in captured["task"]
+    assert "Always use strict flags." in captured["task"]
