@@ -12,6 +12,7 @@ EXPECTED_COMMANDS = {
     "list-models", "pull", "chat", "task", "task-file", "exec",
     "build-and-run", "pipeline-run", "type", "view", "ansible-check",
     "shellcheck", "service-status", "journal-logs", "write-file", "read-file",
+    "review-lessons", "audit-lessons", "compile-wiki",
 }
 
 

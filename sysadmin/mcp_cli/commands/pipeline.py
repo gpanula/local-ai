@@ -7,12 +7,25 @@ mocked transport layer.
 """
 
 import json
+import logging
+import os
 import re
 
 from mcp_core import transport
+from mcp_core.attribution import attribute_lessons
+from mcp_core.embeddings import get_embedding
+from mcp_core.extraction import (
+    extract_lesson_from_critique,
+    extract_lesson_from_stuck_loop,
+)
+from mcp_core.injection import format_lessons_for_prompt
+from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
+from mcp_core.trajectories import record_trajectory
 from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path
 from mcp_cli.base import BaseCommand, command
+
+logger = logging.getLogger(__name__)
 
 
 @command
@@ -76,6 +89,15 @@ class PipelineRunCommand(BaseCommand):
 
         result = self.revision_loop(prompt_content, args)
 
+        # Phase 5: record retrieval + attribution telemetry (never blocks).
+        self._apply_telemetry(result)
+
+        # Stage a lesson in the pending queue if rework occurred (never blocks).
+        self._stage_lesson_if_rework(result, prompt_content, args)
+
+        # Phase 7.01: record a trajectory for multi-iteration runs (never blocks).
+        self._record_trajectory_if_rework(result, prompt_content, args)
+
         if not result["approved"]:
             if result["abort_reason"]:
                 transport.send_terminal_mcp(f"❌ [Pipeline Aborted] {result['abort_reason']}.")
@@ -106,6 +128,33 @@ class PipelineRunCommand(BaseCommand):
         linter_history = []
         reviewer_history = []
         write_file_call = None
+        injected_lessons = []
+        injected_lesson_dicts = []
+        # Phase 7.01: accumulate each iteration's script version (oldest->newest)
+        # so trajectories can capture rejected/approved pairs.
+        script_versions = []
+
+        # Phase 6.05: prepend universal system rules to the Author prompt.
+        # Never blocks the pipeline on failure (missing/empty file = no-op).
+        rules_section = ""
+        try:
+            rules_section = self._load_system_rules()
+            if rules_section:
+                current_prompt = f"{rules_section}\n\n{current_prompt}"
+        except Exception as exc:  # noqa: BLE001 - rules load must never block
+            logger.warning("System rules load skipped: %s", exc)
+
+        # Phase 4.04: enrich the Author prompt with relevant lessons from memory
+        # before the first iteration. Never blocks the pipeline on failure.
+        try:
+            current_prompt, injected_lesson_dicts = self._inject_lessons(
+                current_prompt, args
+            )
+            injected_lessons = [
+                lesson.get("id") for lesson in injected_lesson_dicts if lesson.get("id")
+            ]
+        except Exception as exc:  # noqa: BLE001 - injection must never block
+            logger.warning("Lesson injection skipped: %s", exc)
 
         while iteration < max_attempts and not approved:
             iteration += 1
@@ -159,6 +208,10 @@ class PipelineRunCommand(BaseCommand):
                 preview_first_line = final_code_block.splitlines()[0] if final_code_block.splitlines() else ""
                 transport.send_terminal_mcp(f"📝 Synthesized Script ({len(final_code_block)} bytes) - {preview_first_line}")
 
+            # Phase 7.01: record this iteration's script version for trajectories.
+            if final_code_block:
+                script_versions.append(final_code_block)
+
             # Step 2: Pre-Flight Linting
             linter_output = "No linter run."
             linter_failed = False
@@ -191,12 +244,24 @@ class PipelineRunCommand(BaseCommand):
                 linter_history.append(None)
 
             # Step 3: Reviewer Evaluation
-            review_verdict = self._review(args, prompt_content, final_code_block, linter_output)
+            review_verdict = self._review(
+                args, prompt_content, final_code_block, linter_output, rules_section
+            )
             approved, abort_reason, current_prompt, reviewer_history = self._handle_review(
                 args, review_verdict, prompt_content, final_code_block,
                 reviewer_history, iteration, max_attempts, current_prompt, approved, abort_reason,
             )
             if abort_reason:
+                break
+
+        # Capture the last non-empty reviewer critique for lesson extraction.
+        last_critique = ""
+        for sig in reversed(reviewer_history):
+            if sig:
+                if isinstance(sig, (list, tuple)):
+                    last_critique = "\n".join(str(p) for p in sig)
+                else:
+                    last_critique = str(sig)
                 break
 
         return {
@@ -205,7 +270,213 @@ class PipelineRunCommand(BaseCommand):
             "abort_reason": abort_reason,
             "write_file_call": write_file_call,
             "iterations": iteration,
+            "reviewer_history": reviewer_history,
+            "last_critique": last_critique,
+            "rework_occurred": iteration > 1,
+            "lesson_type": None,
+            "injected_lessons": injected_lessons,
+            "injected_lesson_dicts": injected_lesson_dicts,
+            "script_versions": script_versions,
         }
+
+    # Path to the universal system rules store (relative to workspace root).
+    SYSTEM_RULES_PATH = os.path.join(WORKSPACE_ROOT, "sysadmin", "prompts", "SYSTEM_RULES.md")
+
+    @staticmethod
+    def _load_system_rules(rules_path: str | None = None) -> str:
+        """Read ``SYSTEM_RULES.md`` and render it as a ``### Universal System Rules`` section.
+
+        Returns an empty string when the file is missing or empty (no-op, no
+        regression). The rules text is wrapped in a markdown section header so it
+        can be prepended to the Author prompt or appended to the Reviewer prompt.
+        """
+        path = rules_path or PipelineRunCommand.SYSTEM_RULES_PATH
+        try:
+            if not os.path.exists(path):
+                return ""
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if not content:
+                return ""
+            return f"### Universal System Rules\n\n{content}"
+        except OSError as exc:  # noqa: BLE001 - rules load must never block
+            logger.warning("Could not read system rules at %s: %s", path, exc)
+            return ""
+
+    # Stop-words filtered out of the prompt-derived keyword query.
+    _INJECTION_STOPWORDS = {
+        "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+        "that", "this", "is", "are", "was", "were", "be", "been", "it", "as",
+        "at", "by", "from", "your", "you", "please", "write", "using", "use",
+        "script", "task", "file", "create", "make", "ensure", "must", "should",
+    }
+
+    def _inject_lessons(self, prompt_content: str, args) -> tuple:
+        """Query memory for lessons relevant to the prompt and prepend them.
+
+        Extracts significant keywords from the prompt and runs an FTS5 OR query
+        (a strict phrase match would miss single-term relevance). Returns
+        ``(enriched_prompt, injected_lessons)`` where ``injected_lessons`` is a
+        list of lesson dicts (used for attribution). When no lessons match, the
+        prompt is returned unchanged with an empty list (no banner).
+        """
+        keywords = self._build_injection_keywords(prompt_content)
+        if not keywords:
+            return prompt_content, []
+
+        try:
+            with MemoryStore() as store:
+                lessons = self._search_by_keywords(store, keywords, top_k=3)
+        except Exception as exc:  # noqa: BLE001 - injection must never block
+            logger.warning("Lesson search failed: %s", exc)
+            return prompt_content, []
+
+        if not lessons:
+            return prompt_content, []
+
+        injected_section = format_lessons_for_prompt(lessons)
+        enriched = f"{injected_section}\n\n{prompt_content}"
+        transport.send_terminal_mcp(
+            f"📚 Injected {len(lessons)} relevant lessons from memory"
+        )
+        return enriched, lessons
+
+    @staticmethod
+    def _build_injection_keywords(prompt_content: str) -> list:
+        """Derive the significant keyword tokens from the prompt."""
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", prompt_content.lower())
+        seen = []
+        for tok in tokens:
+            if tok in PipelineRunCommand._INJECTION_STOPWORDS or tok in seen:
+                continue
+            seen.append(tok)
+        return seen
+
+    @staticmethod
+    def _search_by_keywords(store, keywords: list, top_k: int = 3) -> list:
+        """Search lessons per-keyword and merge results, ranked by match count.
+
+        ``search_lessons`` treats its query as a strict phrase, so a full-sentence
+        prompt would rarely match. Searching each significant keyword individually
+        and merging (deduped, ranked by how many keywords matched) recovers
+        single-term relevance for injection.
+        """
+        scored: dict = {}
+        for kw in keywords:
+            for lesson in store.search_lessons(kw, top_k=top_k * 3):
+                lesson_id = lesson.get("id")
+                if lesson_id is None:
+                    continue
+                entry = scored.setdefault(lesson_id, {"lesson": lesson, "hits": 0})
+                entry["hits"] += 1
+
+        ranked = sorted(scored.values(), key=lambda e: e["hits"], reverse=True)
+        return [e["lesson"] for e in ranked[:top_k]]
+
+    def _apply_telemetry(self, result) -> None:
+        """Record retrieval + attribution telemetry for injected lessons.
+
+        Phase 5: increments ``retrieval_count`` for every injected lesson, then
+        attributes each lesson (credited / blamed / innocent) based on the
+        pipeline outcome and reviewer critique, updating the corresponding
+        counter. Failures are logged but never block the pipeline.
+        """
+        injected_ids = result.get("injected_lessons", [])
+        injected_dicts = result.get("injected_lesson_dicts", [])
+        if not injected_ids:
+            return
+
+        try:
+            with MemoryStore() as store:
+                store.increment_retrieval_count(injected_ids)
+
+                attribution = attribute_lessons(
+                    injected_dicts,
+                    result,
+                    result.get("last_critique", ""),
+                )
+                for lesson_id, verdict in attribution.items():
+                    if verdict == "credited":
+                        store.update_telemetry(lesson_id, "prevented_rework_count")
+                    elif verdict == "blamed":
+                        store.update_telemetry(lesson_id, "ineffective_count")
+                    # "innocent" -> no counter change.
+        except Exception as exc:  # noqa: BLE001 - telemetry must never block
+            logger.warning("Telemetry update failed: %s", exc)
+
+    def _stage_lesson_if_rework(self, result, prompt_content, args) -> None:
+        """Stage a lesson in the pending queue after a rework run.
+
+        Exit-state mapping:
+          - iterations == 1 AND approved  -> no-op
+          - iterations > 1 AND approved   -> solved_pattern (LLM extraction)
+          - iterations == max AND not approved AND no abort_reason -> hard_failure (LLM extraction)
+          - abort_reason set              -> intractable_pattern (stuck-loop shortcut, no LLM)
+
+        Staging failures are logged but never block the pipeline.
+        """
+        iterations = result.get("iterations", 0)
+        approved = result.get("approved", False)
+        abort_reason = result.get("abort_reason", "")
+        task_file = getattr(args, "file", "")
+
+        # Determine the exit state and lesson type.
+        if abort_reason:
+            lesson_type = "intractable_pattern"
+        elif approved and iterations > 1:
+            lesson_type = "solved_pattern"
+        elif not approved and iterations >= args.max_retries:
+            lesson_type = "hard_failure"
+        else:
+            # Pass on iteration 1 (or any other no-op state).
+            result["lesson_type"] = None
+            return
+
+        result["lesson_type"] = lesson_type
+
+        try:
+            if lesson_type == "intractable_pattern":
+                lesson = extract_lesson_from_stuck_loop(
+                    result.get("reviewer_history", []),
+                    abort_reason,
+                    task_file,
+                )
+            else:
+                lesson = extract_lesson_from_critique(
+                    result.get("last_critique", ""),
+                    task_file,
+                    prompt_content,
+                    args.reviewer,
+                    lesson_type=lesson_type,
+                    outcome="approved" if approved else "failed",
+                )
+
+            with MemoryStore() as store:
+                store.stage_pending_lesson(lesson)
+            transport.send_terminal_mcp(
+                f"💡 1 new lesson staged in pending queue (type: {lesson_type})"
+            )
+        except Exception as exc:  # noqa: BLE001 - staging must never block the pipeline
+            logger.warning("Failed to stage lesson (type=%s): %s", lesson_type, exc)
+
+    def _record_trajectory_if_rework(self, result, prompt_content, args) -> None:
+        """Record a trajectory entry for multi-iteration runs (Phase 7.01).
+
+        Only records when ``iterations > 1`` (rework occurred). Iteration-1
+        passes produce no trajectory. Failures are logged but never block the
+        pipeline.
+        """
+        iterations = result.get("iterations", 0)
+        if iterations <= 1:
+            return
+        try:
+            record_trajectory(
+                result,
+                prompt_content,
+                task_file=getattr(args, "file", ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - trajectory must never block
+            logger.warning("Failed to record trajectory: %s", exc)
 
     @staticmethod
     def _extract_strategy(author_response: str) -> str:
@@ -300,8 +571,16 @@ class PipelineRunCommand(BaseCommand):
         return current_prompt, abort_reason
 
     @staticmethod
-    def _build_review_prompt(args, prompt_content, final_code_block, linter_output) -> str:
-        """Assemble the reviewer verification prompt for the script under review."""
+    def _build_review_prompt(args, prompt_content, final_code_block, linter_output, rules_section: str = "") -> str:
+        """Assemble the reviewer verification prompt for the script under review.
+
+        ``rules_section`` (optional) is the ``### Universal System Rules`` block
+        from Phase 6.05, appended as an additional verification reference. When
+        empty, the prompt is unchanged (no regression).
+        """
+        rules_block = ""
+        if rules_section:
+            rules_block = f"\n\n### Universal System Rules (must also be satisfied):\n{rules_section}"
         return (
             f"You are the Lead Verification Engineer reviewing a script authored by `{args.author}`.\n\n"
             f"### Original Prompt Specification:\n{prompt_content}\n\n"
@@ -319,16 +598,24 @@ class PipelineRunCommand(BaseCommand):
             f"5. Temporary Directory Resilience: Does the script safely handle temporary directories without assuming $TMPDIR exists (e.g. ensuring `mkdir -p \"${{TMPDIR:-/tmp}}\"` or using `mktemp -d -p /tmp`)?\n"
             f"6. Sandbox & Safety: Does Ansible use a temporary directory in `/tmp` to avoid read-only permissions errors?\n"
             f"7. Success Gate: Is the final success message (`🎉 ...`) guarded so it cannot run if an earlier step fails?\n"
-            f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n\n"
+            f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n"
+            f"9. Universal System Rules: Verify the script satisfies every rule in the Universal System Rules section below.{rules_block}\n\n"
             f"### Decision Rule:\n"
             f"Conclude your response with exactly `DECISION: APPROVED` if all criteria are satisfied, or `DECISION: REVISION_REQUESTED` followed by bullet points detailing the required fixes."
         )
 
     @staticmethod
-    def _review(args, prompt_content, final_code_block, linter_output) -> str:
-        """Run the reviewer (ollama_chat) against the synthesized script."""
+    def _review(args, prompt_content, final_code_block, linter_output, rules_section: str = "") -> str:
+        """Run the reviewer (ollama_chat) against the synthesized script.
+
+        ``rules_section`` (optional) is the ``### Universal System Rules`` block
+        from Phase 6.05, passed through to the review prompt as an additional
+        verification reference.
+        """
         transport.send_terminal_mcp(f"🧐 [Verifier `{args.reviewer}`] Evaluating script against prompt specifications...")
-        review_prompt = PipelineRunCommand._build_review_prompt(args, prompt_content, final_code_block, linter_output)
+        review_prompt = PipelineRunCommand._build_review_prompt(
+            args, prompt_content, final_code_block, linter_output, rules_section
+        )
         return transport.call_mcp("ollama_chat", {
             "prompt": review_prompt,
             "model": args.reviewer,

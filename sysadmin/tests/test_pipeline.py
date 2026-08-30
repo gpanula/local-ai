@@ -114,3 +114,506 @@ def test_revision_loop_format_error_retries(fake_send_terminal_mcp, monkeypatch)
     result = PipelineRunCommand().revision_loop("Do something", make_args(max_retries=3))
     assert result["approved"] is True
     assert result["iterations"] == 2
+
+
+# --- lesson staging hook (Phase 2.04) ---
+
+def _stage_with_store(monkeypatch, tmp_path, result, args):
+    """Run _stage_lesson_if_rework against a temp-file MemoryStore."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    cmd = PipelineRunCommand()
+    cmd._stage_lesson_if_rework(result, "prompt content", args)
+    return memory_mod.MemoryStore(db_path)
+
+
+def test_stage_solved_pattern_after_rework(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations > 1 AND approved -> solved_pattern staged via LLM extraction.
+    def _fake(tool_name, arguments):
+        return (
+            '{"category": "sysadmin_bash", "keywords": ["trap"], '
+            '"proposed_rule": "Never nest script content inside subshell strings."}'
+        )
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix quoting",
+        "reviewer_history": [("- Fix quoting",)],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args())
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "solved_pattern"
+        assert pending[0]["proposed_rule"] == "Never nest script content inside subshell strings."
+    finally:
+        store.close()
+    assert result["lesson_type"] == "solved_pattern"
+
+
+def test_stage_hard_failure_on_max_retries(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations == max AND not approved AND no abort_reason -> hard_failure.
+    def _fake(tool_name, arguments):
+        return '{"category": "unknown", "keywords": [], "proposed_rule": "Hard failure rule."}'
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": False,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Still failing",
+        "reviewer_history": [("- Still failing",)],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args(max_retries=2))
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "hard_failure"
+    finally:
+        store.close()
+    assert result["lesson_type"] == "hard_failure"
+
+
+def test_stage_intractable_pattern_on_abort(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # abort_reason set -> intractable_pattern staged WITHOUT extra Ollama call.
+    calls = []
+
+    def _fake(tool_name, arguments):
+        calls.append(tool_name)
+        return "unused"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": False,
+        "iterations": 3,
+        "abort_reason": "Stuck in reviewer revision loop on iteration 3/3",
+        "last_critique": "",
+        "reviewer_history": [
+            ("- Fix heredoc",),
+            ("- Fix heredoc",),
+            ("- Fix heredoc",),
+        ],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args(max_retries=3))
+    try:
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["lesson_type"] == "intractable_pattern"
+        assert pending[0]["outcome"] == "aborted"
+    finally:
+        store.close()
+    assert result["lesson_type"] == "intractable_pattern"
+    # No extra Ollama call for the stuck-loop shortcut.
+    assert calls == [], f"call_mcp was invoked: {calls}"
+
+
+def test_stage_noop_on_iteration_one_pass(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # iterations == 1 AND approved -> nothing staged, no banner.
+    calls = []
+
+    def _fake(tool_name, arguments):
+        calls.append(tool_name)
+        return "unused"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "abort_reason": "",
+        "last_critique": "",
+        "reviewer_history": [],
+    }
+    store = _stage_with_store(monkeypatch, tmp_path, result, make_args())
+    try:
+        assert store.list_pending_lessons() == []
+    finally:
+        store.close()
+    assert result["lesson_type"] is None
+    assert calls == []
+
+
+def test_stage_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Staging error (e.g. disk full) logs a warning but pipeline still reports normally.
+    def _fake(tool_name, arguments):
+        return '{"category": "x", "keywords": [], "proposed_rule": "r"}'
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix",
+        "reviewer_history": [("- Fix",)],
+    }
+    # Force MemoryStore to fail by pointing at an unwritable path.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    cmd = PipelineRunCommand()
+    # Should not raise; staging failure is swallowed and logged.
+    cmd._stage_lesson_if_rework(result, "prompt content", make_args())
+    assert result["lesson_type"] == "solved_pattern"
+
+
+# --- lesson injection hook (Phase 4.04) ---
+
+def _inject_with_store(monkeypatch, tmp_path, prompt, lessons):
+    """Run _inject_lessons against a temp-file MemoryStore preloaded with lessons."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        for lesson in lessons:
+            store.insert_lesson(lesson)
+    cmd = PipelineRunCommand()
+    return cmd._inject_lessons(prompt, make_args())
+
+
+def test_inject_retrieves_heredoc_lesson(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    lessons = [
+        {
+            "id": "l1",
+            "rule": "Use unindented heredoc delimiters on column 0.",
+            "keywords": ["heredoc", "EOF"],
+            "category": "sysadmin_bash",
+        },
+        {
+            "id": "l2",
+            "rule": "ansible temp dir",
+            "keywords": ["ansible"],
+            "category": "ansible",
+        },
+    ]
+    enriched, injected = _inject_with_store(monkeypatch, tmp_path, "Write a script using a heredoc", lessons)
+    ids = [lesson.get("id") for lesson in injected]
+    assert "l1" in ids
+    assert "### Relevant Lessons from Past Runs" in enriched
+    assert "unindented heredoc delimiters" in enriched
+    # Original prompt preserved.
+    assert "Write a script using a heredoc" in enriched
+
+
+def test_inject_no_match_returns_unchanged(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    lessons = [
+        {
+            "id": "l1",
+            "rule": "ansible temp dir",
+            "keywords": ["ansible"],
+            "category": "ansible",
+        }
+    ]
+    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "nothing relevant here", lessons)
+    assert ids == []
+    assert enriched == "nothing relevant here"
+    assert "### Relevant Lessons from Past Runs" not in enriched
+
+
+def test_inject_empty_store_no_regression(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    enriched, ids = _inject_with_store(monkeypatch, tmp_path, "Do something", [])
+    assert ids == []
+    assert enriched == "Do something"
+
+
+def test_inject_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Point DEFAULT_DB_PATH at an unwritable location so MemoryStore fails.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    cmd = PipelineRunCommand()
+    enriched, ids = cmd._inject_lessons("Do something", make_args())
+    assert ids == []
+    assert enriched == "Do something"
+
+
+def test_revision_loop_tracks_injected_lessons(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    # Preload a heredoc lesson, then run the full revision loop and confirm the
+    # result dict carries injected_lessons.
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        store.insert_lesson(
+            {
+                "id": "l1",
+                "rule": "Use unindented heredoc delimiters.",
+                "keywords": ["heredoc"],
+                "category": "sysadmin_bash",
+            }
+        )
+
+    scripted_call_mcp(monkeypatch)
+    result = PipelineRunCommand().revision_loop("Write a heredoc script", make_args())
+    assert "l1" in result["injected_lessons"]
+    assert result["approved"] is True
+
+
+# --- telemetry & attribution hook (Phase 5) ---
+
+def _apply_telemetry_with_store(monkeypatch, tmp_path, result):
+    """Run _apply_telemetry against a temp-file MemoryStore preloaded with lessons."""
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        for lesson in result.get("injected_lesson_dicts", []):
+            store.insert_lesson(lesson)
+    cmd = PipelineRunCommand()
+    cmd._apply_telemetry(result)
+    return memory_mod.MemoryStore(db_path)
+
+
+def test_telemetry_increments_retrieval_and_credits(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "last_critique": "",
+        "injected_lessons": ["l1", "l2"],
+        "injected_lesson_dicts": [
+            {"id": "l1", "keywords": ["heredoc"], "rule": "r"},
+            {"id": "l2", "keywords": ["ansible"], "rule": "r"},
+        ],
+    }
+    store = _apply_telemetry_with_store(monkeypatch, tmp_path, result)
+    try:
+        # Iteration-1 pass credits all -> prevented_rework_count += 1.
+        assert store.get_lesson("l1")["retrieval_count"] == 1
+        assert store.get_lesson("l1")["prevented_rework_count"] == 1
+        assert store.get_lesson("l2")["prevented_rework_count"] == 1
+    finally:
+        store.close()
+
+
+def test_telemetry_blames_overlapping_lesson(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "last_critique": "- Fix heredoc delimiter indentation",
+        "injected_lessons": ["l1", "l2"],
+        "injected_lesson_dicts": [
+            {"id": "l1", "keywords": ["heredoc"], "rule": "r"},
+            {"id": "l2", "keywords": ["ansible"], "rule": "r"},
+        ],
+    }
+    store = _apply_telemetry_with_store(monkeypatch, tmp_path, result)
+    try:
+        # l1 overlaps "heredoc" -> blamed (ineffective_count += 1).
+        assert store.get_lesson("l1")["ineffective_count"] == 1
+        # l2 no overlap -> innocent (no counter change).
+        assert store.get_lesson("l2")["ineffective_count"] == 0
+        assert store.get_lesson("l2")["prevented_rework_count"] == 0
+    finally:
+        store.close()
+
+
+def test_telemetry_noop_without_injected_lessons(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", db_path)
+    with memory_mod.MemoryStore(db_path) as store:
+        store.insert_lesson({"id": "l1", "keywords": ["heredoc"], "rule": "r"})
+    result = {"approved": True, "iterations": 1, "injected_lessons": [], "injected_lesson_dicts": []}
+    PipelineRunCommand()._apply_telemetry(result)
+    with memory_mod.MemoryStore(db_path) as store2:
+        assert store2.get_lesson("l1")["retrieval_count"] == 0
+
+
+def test_telemetry_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    import os
+
+    from mcp_core import memory as memory_mod
+
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "memory.db")
+    monkeypatch.setattr(memory_mod, "DEFAULT_DB_PATH", bad_path)
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "injected_lessons": ["l1"],
+        "injected_lesson_dicts": [{"id": "l1", "keywords": ["heredoc"], "rule": "r"}],
+    }
+    # Should not raise; telemetry failure is swallowed and logged.
+    PipelineRunCommand()._apply_telemetry(result)
+
+
+# --- system rules auto-load (Phase 6.05) ---
+
+def test_load_system_rules_returns_section(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("### Rule #1: Use set -euo pipefail\n\nAlways use strict flags.\n")
+    section = PipelineRunCommand._load_system_rules(rules_path)
+    assert "### Universal System Rules" in section
+    assert "Always use strict flags." in section
+
+
+def test_load_system_rules_missing_file_returns_empty(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "does_not_exist.md")
+    assert PipelineRunCommand._load_system_rules(rules_path) == ""
+
+
+def test_load_system_rules_empty_file_returns_empty(tmp_path):
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("   \n\n  ")
+    assert PipelineRunCommand._load_system_rules(rules_path) == ""
+
+
+def test_review_prompt_includes_rules_section():
+    args = make_args()
+    prompt = PipelineRunCommand._build_review_prompt(
+        args,
+        "Do something",
+        "echo hi",
+        "No findings.",
+        rules_section="### Universal System Rules\n\nAlways use strict flags.",
+    )
+    assert "### Universal System Rules" in prompt
+    assert "Always use strict flags." in prompt
+
+
+def test_review_prompt_without_rules_is_unchanged():
+    args = make_args()
+    prompt = PipelineRunCommand._build_review_prompt(
+        args, "Do something", "echo hi", "No findings."
+    )
+    assert "### Universal System Rules" not in prompt
+
+
+def test_revision_loop_prepends_rules_to_author_prompt(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """With a rules file present, the Author prompt contains the rules text."""
+    import os
+
+    rules_path = os.path.join(str(tmp_path), "SYSTEM_RULES.md")
+    with open(rules_path, "w", encoding="utf-8") as f:
+        f.write("### Rule #1: Use set -euo pipefail\n\nAlways use strict flags.\n")
+    monkeypatch.setattr(PipelineRunCommand, "SYSTEM_RULES_PATH", rules_path)
+
+    captured = {}
+
+    def _fake(tool_name, arguments):
+        if tool_name == "ollama_task_agent":
+            captured["task"] = arguments.get("task", "")
+            return AUTHOR_OK
+        if tool_name == "shellcheck_inspect":
+            return "No findings."
+        if tool_name == "ollama_chat":
+            return REVIEW_APPROVED
+        return "DEFAULT"
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    PipelineRunCommand().revision_loop("Do something", make_args())
+    assert "### Universal System Rules" in captured["task"]
+    assert "Always use strict flags." in captured["task"]
+
+
+# --- trajectory recording hook (Phase 7.01) ---
+
+def test_revision_loop_tracks_script_versions(fake_send_terminal_mcp, monkeypatch):
+    """A 2-iteration run accumulates both script versions in the result."""
+    scripted_call_mcp(monkeypatch, author=(AUTHOR_OK, AUTHOR_OK), review=(REVIEW_REVISION, REVIEW_APPROVED))
+    result = PipelineRunCommand().revision_loop("Do something", make_args())
+    assert result["iterations"] == 2
+    assert len(result["script_versions"]) == 2
+    assert "echo hello" in result["script_versions"][0]
+    assert "echo hello" in result["script_versions"][1]
+
+
+def test_record_trajectory_hook_writes_for_rework(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """A multi-iteration run writes one trajectory line."""
+    import json
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    traj_path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", traj_path)
+    monkeypatch.setattr(traj_mod, "DEFAULT_RAW_DIR", str(tmp_path))
+
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix heredoc",
+        "injected_lessons": ["l1"],
+        "script_versions": ["echo v1", "echo v2"],
+    }
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())
+    with open(traj_path, encoding="utf-8") as f:
+        lines = [l for l in f if l.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["iterations"] == 2
+    assert record["outcome"] == "approved"
+
+
+def test_record_trajectory_hook_noop_on_iteration_one(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """Iteration-1 passes produce no trajectory record."""
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    traj_path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", traj_path)
+
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "abort_reason": "",
+        "last_critique": "",
+        "injected_lessons": [],
+        "script_versions": ["echo v1"],
+    }
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())
+    assert not os.path.exists(traj_path)
+
+
+def test_record_trajectory_hook_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """Trajectory failure is logged but never blocks the pipeline."""
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    # Point at an unwritable path to force a failure.
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", bad_path)
+
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix",
+        "injected_lessons": [],
+        "script_versions": ["v1", "v2"],
+    }
+    # Should not raise.
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())
