@@ -41,6 +41,9 @@ recordings/
 .env
 .direnv/
 
+# Local AI runtime data (never committed)
+.localai/
+
 # Sandbox temporary artifacts
 .claude/
 .claude
