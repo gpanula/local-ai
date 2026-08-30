@@ -21,6 +21,7 @@ from mcp_core.extraction import (
 from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
+from mcp_core.trajectories import record_trajectory
 from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path
 from mcp_cli.base import BaseCommand, command
 
@@ -94,6 +95,9 @@ class PipelineRunCommand(BaseCommand):
         # Stage a lesson in the pending queue if rework occurred (never blocks).
         self._stage_lesson_if_rework(result, prompt_content, args)
 
+        # Phase 7.01: record a trajectory for multi-iteration runs (never blocks).
+        self._record_trajectory_if_rework(result, prompt_content, args)
+
         if not result["approved"]:
             if result["abort_reason"]:
                 transport.send_terminal_mcp(f"❌ [Pipeline Aborted] {result['abort_reason']}.")
@@ -126,6 +130,9 @@ class PipelineRunCommand(BaseCommand):
         write_file_call = None
         injected_lessons = []
         injected_lesson_dicts = []
+        # Phase 7.01: accumulate each iteration's script version (oldest->newest)
+        # so trajectories can capture rejected/approved pairs.
+        script_versions = []
 
         # Phase 6.05: prepend universal system rules to the Author prompt.
         # Never blocks the pipeline on failure (missing/empty file = no-op).
@@ -201,6 +208,10 @@ class PipelineRunCommand(BaseCommand):
                 preview_first_line = final_code_block.splitlines()[0] if final_code_block.splitlines() else ""
                 transport.send_terminal_mcp(f"📝 Synthesized Script ({len(final_code_block)} bytes) - {preview_first_line}")
 
+            # Phase 7.01: record this iteration's script version for trajectories.
+            if final_code_block:
+                script_versions.append(final_code_block)
+
             # Step 2: Pre-Flight Linting
             linter_output = "No linter run."
             linter_failed = False
@@ -265,6 +276,7 @@ class PipelineRunCommand(BaseCommand):
             "lesson_type": None,
             "injected_lessons": injected_lessons,
             "injected_lesson_dicts": injected_lesson_dicts,
+            "script_versions": script_versions,
         }
 
     # Path to the universal system rules store (relative to workspace root).
@@ -446,6 +458,25 @@ class PipelineRunCommand(BaseCommand):
             )
         except Exception as exc:  # noqa: BLE001 - staging must never block the pipeline
             logger.warning("Failed to stage lesson (type=%s): %s", lesson_type, exc)
+
+    def _record_trajectory_if_rework(self, result, prompt_content, args) -> None:
+        """Record a trajectory entry for multi-iteration runs (Phase 7.01).
+
+        Only records when ``iterations > 1`` (rework occurred). Iteration-1
+        passes produce no trajectory. Failures are logged but never block the
+        pipeline.
+        """
+        iterations = result.get("iterations", 0)
+        if iterations <= 1:
+            return
+        try:
+            record_trajectory(
+                result,
+                prompt_content,
+                task_file=getattr(args, "file", ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - trajectory must never block
+            logger.warning("Failed to record trajectory: %s", exc)
 
     @staticmethod
     def _extract_strategy(author_response: str) -> str:

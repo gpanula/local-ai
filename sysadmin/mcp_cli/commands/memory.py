@@ -14,6 +14,7 @@ from mcp_core.audit import cluster_lessons, flag_low_utility
 from mcp_core.lessons_writer import append_lesson_to_markdown
 from mcp_core.memory import MemoryStore
 from mcp_core.rules_writer import append_system_rule
+from mcp_core.wiki import generate_dashboard, generate_index, generate_log
 from mcp_core.workspace import WORKSPACE_ROOT
 from mcp_cli.base import BaseCommand, command
 
@@ -25,6 +26,9 @@ DEFAULT_SYSTEM_RULES_MD = os.path.join(WORKSPACE_ROOT, "sysadmin", "prompts", "S
 
 # Archive store for lessons promoted into universal rules (relative to workspace root).
 DEFAULT_LESSONS_ARCHIVE_MD = os.path.join(WORKSPACE_ROOT, "ollama_update", "lessons_archive.md")
+
+# Wiki output directory (relative to workspace root).
+DEFAULT_WIKI_DIR = os.path.join(WORKSPACE_ROOT, "ollama_update", "wiki")
 
 
 def _format_keywords(keywords) -> str:
@@ -337,3 +341,46 @@ class AuditLessonsCommand(BaseCommand):
         else:  # skip
             counts["skipped"] += 1
             print(f"  ⏭️  Skipped lesson {lesson['id']}.")
+
+
+@command
+class CompileWikiCommand(BaseCommand):
+    name = "compile-wiki"
+    help = "Generate the memory-health wiki (index.md, dashboard.md, log.md)"
+
+    def register_args(self, parser):
+        parser.add_argument(
+            "--wiki-dir",
+            default=DEFAULT_WIKI_DIR,
+            help="Output directory for wiki files (default: ollama_update/wiki)",
+        )
+
+    def run(self, args):
+        wiki_dir = args.wiki_dir
+        os.makedirs(wiki_dir, exist_ok=True)
+
+        index_path = os.path.join(wiki_dir, "index.md")
+        dashboard_path = os.path.join(wiki_dir, "dashboard.md")
+        log_path = os.path.join(wiki_dir, "log.md")
+
+        with MemoryStore() as store:
+            lessons = store.list_lessons()
+
+        generate_index(lessons, index_path)
+        generate_dashboard(lessons, dashboard_path)
+        # Log a compile event (append-only).
+        from datetime import datetime, timezone
+
+        generate_log(
+            [
+                {
+                    "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "message": f"Wiki compiled with {len(lessons)} active lessons.",
+                }
+            ],
+            log_path,
+        )
+
+        print(
+            f"📚 Wiki compiled: index.md ({len(lessons)} lessons), dashboard.md, log.md"
+        )

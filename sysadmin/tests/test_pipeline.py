@@ -534,3 +534,86 @@ def test_revision_loop_prepends_rules_to_author_prompt(fake_send_terminal_mcp, m
     PipelineRunCommand().revision_loop("Do something", make_args())
     assert "### Universal System Rules" in captured["task"]
     assert "Always use strict flags." in captured["task"]
+
+
+# --- trajectory recording hook (Phase 7.01) ---
+
+def test_revision_loop_tracks_script_versions(fake_send_terminal_mcp, monkeypatch):
+    """A 2-iteration run accumulates both script versions in the result."""
+    scripted_call_mcp(monkeypatch, author=(AUTHOR_OK, AUTHOR_OK), review=(REVIEW_REVISION, REVIEW_APPROVED))
+    result = PipelineRunCommand().revision_loop("Do something", make_args())
+    assert result["iterations"] == 2
+    assert len(result["script_versions"]) == 2
+    assert "echo hello" in result["script_versions"][0]
+    assert "echo hello" in result["script_versions"][1]
+
+
+def test_record_trajectory_hook_writes_for_rework(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """A multi-iteration run writes one trajectory line."""
+    import json
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    traj_path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", traj_path)
+    monkeypatch.setattr(traj_mod, "DEFAULT_RAW_DIR", str(tmp_path))
+
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix heredoc",
+        "injected_lessons": ["l1"],
+        "script_versions": ["echo v1", "echo v2"],
+    }
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())
+    with open(traj_path, encoding="utf-8") as f:
+        lines = [l for l in f if l.strip()]
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["iterations"] == 2
+    assert record["outcome"] == "approved"
+
+
+def test_record_trajectory_hook_noop_on_iteration_one(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """Iteration-1 passes produce no trajectory record."""
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    traj_path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", traj_path)
+
+    result = {
+        "approved": True,
+        "iterations": 1,
+        "abort_reason": "",
+        "last_critique": "",
+        "injected_lessons": [],
+        "script_versions": ["echo v1"],
+    }
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())
+    assert not os.path.exists(traj_path)
+
+
+def test_record_trajectory_hook_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    """Trajectory failure is logged but never blocks the pipeline."""
+    import os
+
+    from mcp_core import trajectories as traj_mod
+
+    # Point at an unwritable path to force a failure.
+    bad_path = os.path.join(str(tmp_path), "no_such_dir", "trajectories.jsonl")
+    monkeypatch.setattr(traj_mod, "DEFAULT_TRAJECTORIES_PATH", bad_path)
+
+    result = {
+        "approved": True,
+        "iterations": 2,
+        "abort_reason": "",
+        "last_critique": "- Fix",
+        "injected_lessons": [],
+        "script_versions": ["v1", "v2"],
+    }
+    # Should not raise.
+    PipelineRunCommand()._record_trajectory_if_rework(result, "prompt", make_args())

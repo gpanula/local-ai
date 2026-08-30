@@ -471,6 +471,8 @@
 
 ## Phase 7 — Trajectory Recording & Wiki Dashboard (~2 days)
 
+> **Status**: ✅ **COMPLETE** — implemented 2026-08-30. See [`phase7_completion.md`](./phase7_completion.md) for the full completion report.
+
 **Goal**: Record rejected/approved script pairs for future fine-tuning data, and generate a human-readable wiki dashboard of memory health.
 
 ### Phase 7.01 — Trajectory Recorder (Pipeline Hook)
@@ -484,9 +486,9 @@
 - Hook in `pipeline.py`: called alongside lesson staging (Phase 2.04) for any run with `iterations > 1`
 
 **Acceptance Criteria**:
-- [ ] After a 2-iteration pipeline run, `trajectories.jsonl` gains one new line
-- [ ] Record contains valid JSON parseable by `json.loads()`
-- [ ] Iteration-1 passes do not produce trajectory records
+- [x] After a 2-iteration pipeline run, `trajectories.jsonl` gains one new line
+- [x] Record contains valid JSON parseable by `json.loads()`
+- [x] Iteration-1 passes do not produce trajectory records
 
 ### Phase 7.02 — Tiered Schema (Inline vs. Diff+Ref)
 
@@ -500,9 +502,9 @@
 - `diff`: unified diff between rejected and chosen versions
 
 **Acceptance Criteria**:
-- [ ] A 50-line script stores inline (`payload_type="inline"`, `rejected` and `chosen` present)
-- [ ] A 200-line script stores diff+ref (`payload_type="diff_and_ref"`, `diff` and `focused_snippet` present, raw files in subdirectory)
-- [ ] Diff is a valid unified diff format
+- [x] A 50-line script stores inline (`payload_type="inline"`, `rejected` and `chosen` present)
+- [x] A 200-line script stores diff+ref (`payload_type="diff_and_ref"`, `diff` and `focused_snippet` present, raw files in subdirectory)
+- [x] Diff is a valid unified diff format
 
 ### Phase 7.03 — Wiki Index Generator
 
@@ -515,9 +517,9 @@
 - Links lesson IDs for Obsidian cross-referencing
 
 **Acceptance Criteria**:
-- [ ] 10 lessons across 3 categories produce a markdown file with 3 tables
-- [ ] Empty lesson list produces a valid file with "No lessons recorded" message
-- [ ] Output is valid markdown
+- [x] 10 lessons across 3 categories produce a markdown file with 3 tables
+- [x] Empty lesson list produces a valid file with "No lessons recorded" message
+- [x] Output is valid markdown
 
 ### Phase 7.04 — Wiki Dashboard Generator
 
@@ -530,9 +532,9 @@
 - `generate_log(events: list[dict], output_path) → None` — appends chronological entries to `ollama_update/wiki/log.md`
 
 **Acceptance Criteria**:
-- [ ] Dashboard with 10 lessons produces readable leaderboard tables
-- [ ] Log entries are append-only (running twice doesn't overwrite previous entries)
-- [ ] Valid markdown viewable in Obsidian
+- [x] Dashboard with 10 lessons produces readable leaderboard tables
+- [x] Log entries are append-only (running twice doesn't overwrite previous entries)
+- [x] Valid markdown viewable in Obsidian
 
 ### Phase 7.05 — `compile-wiki` CLI & Tests
 
@@ -545,9 +547,9 @@
 - Prints summary: `📚 Wiki compiled: index.md (10 lessons), dashboard.md, log.md`
 
 **Acceptance Criteria**:
-- [ ] `python3 sysadmin/mcp_client.py compile-wiki` generates all three files
-- [ ] Running twice updates files without corruption
-- [ ] Unit tests verify output file contents with synthetic lesson data
+- [x] `python3 sysadmin/mcp_client.py compile-wiki` generates all three files
+- [x] Running twice updates files without corruption
+- [x] Unit tests verify output file contents with synthetic lesson data
 
 ---
 
