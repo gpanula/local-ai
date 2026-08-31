@@ -74,3 +74,39 @@ localai-gpu() {
 
 # View current Antigravity MCP server configuration
 alias localai-mcp-config="cat ~/.gemini/config/mcp_config.json | python3 -m json.tool"
+
+# AI Memory & Lessons Management
+alias localai-lessons="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py review-lessons"
+alias localai-lessons-auto="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py review-lessons --auto"
+alias localai-audit="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py audit-lessons"
+alias localai-wiki="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compile-wiki"
+alias localai-compact="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compact-lessons"
+alias localai-compact-auto="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compact-lessons --auto"
+alias localai-compact-queue="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compact-lessons --queue-only"
+alias localai-compact-active="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compact-lessons --active-only"
+
+# Ollama Model & Pipeline Management
+alias localai-unload="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py unload-model"
+alias localai-pipeline="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py pipeline-run"
+alias localai-pipeline-8gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py pipeline-run --tier 8gb --keep-models"
+alias localai-pipeline-16gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py pipeline-run --tier 16gb --unload-models"
+alias localai-pipeline-24gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py pipeline-run --tier 24gb --unload-models"
+alias localai-build-models="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py build-models"
+alias localai-build-models-8gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py build-models 8gb"
+alias localai-build-models-16gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py build-models 16gb"
+alias localai-build-models-24gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py build-models 24gb"
+
+# Model Diagnostic & VRAM Verification
+alias localai-verify-vram="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py verify-vram"
+alias localai-verify-vram-8gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py verify-vram --tier 8gb"
+alias localai-verify-vram-16gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py verify-vram --tier 16gb"
+alias localai-verify-vram-24gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py verify-vram --tier 24gb"
+
+# Dataset Export & Fine-Tuning
+alias localai-export-dataset="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py export-dataset"
+alias localai-train="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train"
+alias localai-train-8gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --tier 8gb"
+alias localai-train-16gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --tier 16gb"
+alias localai-train-24gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --tier 24gb"
+alias localai-train-dpo="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --method dpo"
+alias localai-train-sft="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --method sft"

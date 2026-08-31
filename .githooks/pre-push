@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Git pre-push hook
+# Non-blocking reminder for staged pending AI lessons before pushing to remote.
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+MEMORY_DB="${REPO_ROOT}/.localai/memory.db"
+
+if [ -f "${MEMORY_DB}" ] && command -v python3 >/dev/null 2>&1; then
+    PENDING_COUNT=$(python3 -c "import sqlite3; c=sqlite3.connect('${MEMORY_DB}').cursor(); print(c.execute('SELECT count(*) FROM pending_lessons').fetchone()[0])" 2>/dev/null || echo 0)
+    if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
+        echo "💡 [Memory Guard] You have ${PENDING_COUNT} staged lesson(s) awaiting review in .localai/memory.db."
+        echo "   Tip: Run 'localai-lessons' (or 'python3 sysadmin/mcp_client.py review-lessons') to promote lessons to ollama_update/lessons.md."
+    fi
+fi
+
+
+# Check if memory wiki is up-to-date before push
+if [ -f "${REPO_ROOT}/sysadmin/mcp_client.py" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "${REPO_ROOT}/sysadmin/mcp_client.py" compile-wiki >/dev/null 2>&1 || true
+    WIKI_DIFF="$(git status --porcelain "${REPO_ROOT}/ollama_update/wiki" 2>/dev/null || true)"
+    if [ -n "${WIKI_DIFF}" ]; then
+        echo "⚠️  [Memory Wiki] ollama_update/wiki has uncommitted updates relative to active memory."
+        echo "   Please commit the updated wiki files before pushing: git add ollama_update/wiki/ && git commit"
+    fi
+fi
+
+exit 0

@@ -14,4 +14,26 @@ if [ "$branch" = "main" ]; then
     fi
 fi
 
+# Non-blocking reminder for staged pending AI lessons
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+MEMORY_DB="${REPO_ROOT}/.localai/memory.db"
+if [ -f "${MEMORY_DB}" ] && command -v python3 >/dev/null 2>&1; then
+    PENDING_COUNT=$(python3 -c "import sqlite3; c=sqlite3.connect('${MEMORY_DB}').cursor(); print(c.execute('SELECT count(*) FROM pending_lessons').fetchone()[0])" 2>/dev/null || echo 0)
+    if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
+        echo "💡 [Memory Guard] You have ${PENDING_COUNT} staged lesson(s) awaiting review in .localai/memory.db."
+        echo "   Run 'localai-lessons' (or 'python3 sysadmin/mcp_client.py review-lessons') to curate before merging."
+    fi
+fi
+
+# Auto-compile and stage memory wiki when lessons or system rules are committed
+STAGED_FILES="$(git diff --cached --name-only 2>/dev/null || true)"
+if echo "${STAGED_FILES}" | grep -qE '^ollama_update/lessons\.md$|^sysadmin/prompts/SYSTEM_RULES\.md$'; then
+    if [ -f "${REPO_ROOT}/sysadmin/mcp_client.py" ] && command -v python3 >/dev/null 2>&1; then
+        echo "📚 [Memory Wiki] Detected changes to lessons/rules; compiling memory-health wiki..."
+        python3 "${REPO_ROOT}/sysadmin/mcp_client.py" compile-wiki >/dev/null 2>&1 || true
+        git add "${REPO_ROOT}/ollama_update/wiki/index.md" "${REPO_ROOT}/ollama_update/wiki/dashboard.md" "${REPO_ROOT}/ollama_update/wiki/log.md" 2>/dev/null || true
+    fi
+fi
+
 exit 0
+

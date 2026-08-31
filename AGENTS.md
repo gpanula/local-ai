@@ -25,7 +25,9 @@
 ## 4. Execution & Boundaries
 - **No Polling**: No `sleep`/`ollama ps` polling loops. Launch async tasks, yield tool calls, wait for reactive notifications.
 - **Terminal MCP Visibility**: Output live progress and interactive script execution to the active `terminal-mcp` session.
-- **Human Gate**: Antigravity writes prompt specs (`sysadmin/prompts/*.md`); human must approve before delegating to Ollama.
-- **Role Split**:
-  - *Antigravity*: Orchestration, architecture, specs, git lifecycle. DO NOT write/patch Ollama implementation scripts directly.
-  - *Ollama*: Script synthesis via heredoc, execution, buffer analysis.
+- **Execution Modes**:
+  - ⚡ **Direct Dev Mode** *(Default for infrastructure, tooling, memory/lessons, modelfiles, scripts, and dataset engineering)*:
+    - Antigravity directly authors, patches, and tests code (`sysadmin/*.py`, `sysadmin/*.sh`, modelfiles, datasets, unit tests) for fast iteration.
+  - 🤖 **Pipeline Delegation Mode** *(Activated explicitly by keywords: `"run pipeline"`, `"delegate"`, `"test local ai"`)*:
+    - Antigravity writes the prompt spec (`sysadmin/prompts/*.md`); awaits human review approval; then delegates execution to the local Ollama multi-agent pipeline.
+

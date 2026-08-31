@@ -176,8 +176,12 @@ echo 'source ~/Projects/local-ai/sysadmin/shell_aliases.sh' >> ~/.bashrc
 * `localai-models` — Lists installed local Ollama models and quantization tags.
 * `localai-gpu` — Cross-platform hardware monitor (`nvidia-smi` on Linux, Metal / Displays on macOS).
 * `localai-mcp-config` — Views current Antigravity MCP server definitions.
+* `localai-lessons` — Interactively reviews staged pending lessons (Keep / Modify / Discard / Skip).
+* `localai-audit` — Clusters related lessons and promotes recurring patterns to `SYSTEM_RULES.md`.
+* `localai-wiki` — Compiles the human-readable memory-health wiki (`index.md`, `dashboard.md`, `log.md`).
 
 ---
+
 
 ## ⚠️ Known Gotchas & Troubleshooting
 
