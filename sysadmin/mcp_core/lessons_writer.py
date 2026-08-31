@@ -77,3 +77,35 @@ def append_lesson_to_markdown(lesson: dict, lessons_md_path: str) -> None:
     separator = "\n" if existing and not existing.endswith("\n\n") else ""
     with open(lessons_md_path, "a", encoding="utf-8") as f:
         f.write(f"{separator}{block}\n")
+
+
+def write_all_lessons_to_markdown(lessons: list[dict], lessons_md_path: str) -> None:
+    """Rewrite ``lessons.md`` with the complete list of active lessons."""
+    header = (
+        "# Lessons Learned — Episodic Memory Store\n\n"
+        "> **Purpose**: Git-canonical store of approved episodic lessons, promoted from the\n"
+        "> pending review queue via the `review-lessons` CLI. Each lesson is a YAML-frontmatter\n"
+        "> block followed by the rule text.\n"
+        ">\n"
+        "> **Format** (see `ai_memory_summary.md` §Canonical File Formats):\n"
+        ">\n"
+        "> ```markdown\n"
+        "> ---\n"
+        "> id: lesson-YYYYMMDD-NN\n"
+        "> category: <category>\n"
+        "> keywords: [kw1, kw2, kw3]\n"
+        "> created: YYYY-MM-DD\n"
+        "> source_task: <path/to/prompt.md>\n"
+        "> ---\n"
+        "> **Rule**: <rule text>\n"
+        "> ```\n\n"
+        "<!-- Lessons are appended below this line by the review-lessons promotion flow. -->\n\n"
+    )
+    blocks = [_format_lesson_block(l) for l in lessons]
+    content = header + "\n\n".join(blocks) + ("\n" if blocks else "")
+
+    parent = os.path.dirname(lessons_md_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(lessons_md_path, "w", encoding="utf-8") as f:
+        f.write(content)
