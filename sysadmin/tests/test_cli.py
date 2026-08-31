@@ -7,12 +7,14 @@ import pytest
 
 from mcp_cli.base import COMMAND_REGISTRY
 from mcp_cli.cli import build_parser
+from mcp_core.hardware import get_default_model
 
 EXPECTED_COMMANDS = {
     "list-models", "pull", "chat", "task", "task-file", "exec",
     "build-and-run", "pipeline-run", "type", "view", "ansible-check",
     "shellcheck", "service-status", "journal-logs", "write-file", "read-file",
-    "review-lessons", "audit-lessons", "compile-wiki",
+    "review-lessons", "audit-lessons", "compile-wiki", "compact-lessons",
+    "unload-model", "export-dataset", "verify-vram", "build-models", "train",
 }
 
 
@@ -41,7 +43,7 @@ def test_each_subcommand_parses_help(command):
 def test_chat_default_model():
     parser = build_parser()
     args = parser.parse_args(["chat", "hello"])
-    assert args.model == "qwen3:8b"
+    assert args.model == get_default_model("coder")
 
 
 def test_list_models_runs_with_mocked_transport(fake_call_mcp, capsys):
@@ -74,3 +76,31 @@ def test_write_file_requires_content(monkeypatch):
     args = parser.parse_args(["write-file", "some/path.txt"])
     with pytest.raises(ValueError, match="No content provided"):
         COMMAND_REGISTRY["write-file"].run(args)
+
+
+def test_review_lessons_auto(monkeypatch, tmp_path, capsys):
+    import os
+    from mcp_core.memory import MemoryStore
+    from mcp_cli.commands import memory as memory_mod
+
+    db_path = os.path.join(str(tmp_path), "memory.db")
+    lessons_md = os.path.join(str(tmp_path), "lessons.md")
+    wiki_dir = os.path.join(str(tmp_path), "wiki")
+    monkeypatch.setattr(memory_mod, "MemoryStore", lambda: MemoryStore(db_path))
+
+    with MemoryStore(db_path) as store:
+        store.stage_pending_lesson({
+            "proposed_rule": "Auto-accepted test rule",
+            "category": "Testing",
+            "keywords": ["pytest", "auto"],
+        })
+
+    parser = build_parser()
+    args = parser.parse_args(["review-lessons", "--auto", "--lessons-md", lessons_md, "--wiki-dir", wiki_dir])
+    COMMAND_REGISTRY["review-lessons"].run(args)
+
+    out = capsys.readouterr().out
+    assert "Automatically Kept: 1" in out
+    assert os.path.exists(lessons_md)
+    assert os.path.exists(os.path.join(wiki_dir, "index.md"))
+
