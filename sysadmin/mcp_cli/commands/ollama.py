@@ -1,6 +1,7 @@
 """Ollama model commands: list-models, pull, chat, task, task-file, exec."""
 
 from mcp_core import transport
+from mcp_core.hardware import get_default_model
 from mcp_core.workspace import validate_workspace_path
 from mcp_cli.base import BaseCommand, command
 
@@ -38,8 +39,9 @@ class ChatCommand(BaseCommand):
     help = "Send chat prompt"
 
     def register_args(self, parser):
+        default_model = get_default_model("coder")
         parser.add_argument("prompt", help="Prompt text")
-        parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+        parser.add_argument("--model", default=default_model, help=f"Model to use (default: {default_model})")
         parser.add_argument("--system", default=None, help="System prompt")
 
     def run(self, args):
@@ -57,8 +59,9 @@ class TaskCommand(BaseCommand):
     help = "Execute task agent prompt"
 
     def register_args(self, parser):
+        default_model = get_default_model("sysadmin")
         parser.add_argument("task", help="Task description")
-        parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+        parser.add_argument("--model", default=default_model, help=f"Model to use (default: {default_model})")
         parser.add_argument("--context", default=None, help="Context string")
         parser.add_argument("--type", default="sysadmin", help="Task category")
 
@@ -78,8 +81,9 @@ class TaskFileCommand(BaseCommand):
     help = "Execute task from a prompt file"
 
     def register_args(self, parser):
+        default_model = get_default_model("sysadmin")
         parser.add_argument("file", help="Path to prompt markdown/text file")
-        parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+        parser.add_argument("--model", default=default_model, help=f"Model to use (default: {default_model})")
         parser.add_argument("--type", default="sysadmin", help="Task category")
 
     def run(self, args):
@@ -100,10 +104,11 @@ class ExecCommand(BaseCommand):
     help = "Direct Ollama agent to execute a command/script and report verification"
 
     def register_args(self, parser):
+        default_model = get_default_model("sysadmin")
         parser.add_argument("cmd", help="Command or script to execute")
         parser.add_argument("--desc", default=None, help="Task description")
         parser.add_argument("--cwd", default=None, help="Working directory")
-        parser.add_argument("--model", default="qwen3:8b", help="Model to use for verification")
+        parser.add_argument("--model", default=default_model, help=f"Model to use for verification (default: {default_model})")
 
     def run(self, args):
         out = transport.call_mcp("ollama_execute_task", {
@@ -113,3 +118,19 @@ class ExecCommand(BaseCommand):
             "model": args.model,
         })
         print(out)
+
+
+@command
+class UnloadModelCommand(BaseCommand):
+    name = "unload-model"
+    help = "Immediately unload a model (or all models) from VRAM to free GPU memory"
+
+    def register_args(self, parser):
+        parser.add_argument("model", nargs="?", default=None, help="Model name to unload (omitted to unload all models)")
+
+    def run(self, args):
+        res = transport.call_mcp("ollama_unload_model", {
+            "model": args.model
+        })
+        print(f"🧹 {res}")
+

@@ -23,11 +23,11 @@ The script must execute 4 discrete test suites and report clear pass/fail diagno
 
 ### Suite 1: Python AST & PyYAML In-Memory Validation
 * Validate in-memory Python syntax parsing using `ast.parse()` and YAML parsing using `yaml.safe_load()`.
-* Validate negative error detection by verifying that invalid Python syntax and invalid YAML structures are properly caught and handled.
+* Validate negative error detection by verifying that invalid Python syntax and invalid YAML structures fail parsing and are properly handled.
 
 ### Suite 2: Ansible Syntax Check & Sandbox Isolation
 * Enforce sandbox isolation by directing Ansible runtime directories (`ANSIBLE_HOME`, `ANSIBLE_LOCAL_TEMP`) to a writable temporary directory in `/tmp`.
-* Validate positive syntax checking by running `ansible-playbook --syntax-check` against a valid minimal playbook.
+* Validate positive syntax checking by running `ansible-playbook --syntax-check` against a temporary valid minimal playbook.
 * Validate negative syntax checking by ensuring an invalid playbook syntax fails with a non-zero exit code.
 
 ### Suite 3: Ansible Lint Verification
@@ -54,9 +54,5 @@ All synthesized code must strictly adhere to the project's **Defensive Scripting
 
 ---
 
-## 4. Output Contract & Execution Requirements
-* Synthesize the complete script and write it to: `sysadmin/verify_code_quality_toolchain.sh`
-* Grant execute permissions: `chmod +x sysadmin/verify_code_quality_toolchain.sh`
-* Immediately execute the script: `./sysadmin/verify_code_quality_toolchain.sh`
-* Respond ONLY with the executable `bash` block containing the heredoc/write, chmod, and execution command.
-
+## 4. Output Contract
+The synthesized script must be a complete standalone Bash script starting with `#!/bin/bash` designed to reside at `sysadmin/verify_code_quality_toolchain.sh`. Emit the script code directly inside a ```bash code block or via a write_file tool call. (Do not generate wrapper installer functions or nested heredoc script-writers).

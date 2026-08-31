@@ -18,6 +18,7 @@ from mcp_core.extraction import (
     extract_lesson_from_critique,
     extract_lesson_from_stuck_loop,
 )
+from mcp_core.hardware import get_default_model, get_hardware_tier
 from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
@@ -34,9 +35,11 @@ class BuildAndRunCommand(BaseCommand):
     help = "Have Ollama generate code from a prompt file and execute it live in terminal-mcp"
 
     def register_args(self, parser):
+        default_model = get_default_model("sysadmin")
         parser.add_argument("file", help="Path to prompt markdown/text file")
-        parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+        parser.add_argument("--model", default=default_model, help=f"Model to use (default: {default_model})")
         parser.add_argument("--type", default="sysadmin", help="Task category")
+
         parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
 
     def run(self, args):
@@ -73,12 +76,20 @@ class PipelineRunCommand(BaseCommand):
     help = "Multi-agent pipeline: Author (qwen2.5-coder) -> Lint (Shellcheck) -> Review (qwen3) -> Live Execution"
 
     def register_args(self, parser):
+        default_orchestrator = get_default_model("orchestrator")
+        default_author = get_default_model("coder")
+        default_reviewer = get_default_model("reviewer")
         parser.add_argument("file", help="Path to prompt markdown/text file")
-        parser.add_argument("--author", default="qwen2.5-coder:7b", help="Model to synthesize code (default: qwen2.5-coder:7b)")
-        parser.add_argument("--reviewer", default="qwen3:8b", help="Model to review & verify code (default: qwen3:8b)")
+        parser.add_argument("--orchestrator", default=default_orchestrator, help=f"Model to plan & deconstruct task (default: {default_orchestrator})")
+        parser.add_argument("--author", default=default_author, help=f"Model to synthesize code (default: {default_author})")
+        parser.add_argument("--reviewer", default=default_reviewer, help=f"Model to review & verify code (default: {default_reviewer})")
+        parser.add_argument("--tier", choices=["8gb", "16gb", "24gb"], default=None, help="Model hardware tier to use for all roles (8gb, 16gb, 24gb)")
+        parser.add_argument("--keep-models", "--no-unload", dest="keep_models", action="store_true", default=False, help="Keep models loaded in VRAM between stages (defaults to true for 8gb tier)")
+        parser.add_argument("--unload-models", action="store_true", default=False, help="Force unloading models between stages (recommended for 24gb/32b models)")
+        parser.add_argument("--no-orchestrate", action="store_true", help="Skip the initial Orchestrator planning phase")
         parser.add_argument("--no-lint", action="store_true", help="Skip pre-flight linting step")
         parser.add_argument("--bootstrap", action="store_true", help="Flag task as bootstrap (tolerates missing host tools before installation)")
-        parser.add_argument("--max-retries", type=int, default=2, help="Max revision cycles if reviewer rejects (default: 2)")
+        parser.add_argument("--max-retries", type=int, default=3, help="Max revision cycles if reviewer rejects (default: 3)")
         parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
         parser.add_argument("--dry-run", action="store_true", help="Stop after review without executing")
 
@@ -120,6 +131,10 @@ class PipelineRunCommand(BaseCommand):
         ``abort_reason``, ``write_file_call``, ``iterations``.
         """
         current_prompt = prompt_content
+        if getattr(args, "tier", None):
+            args.orchestrator = get_default_model("orchestrator", tier=args.tier)
+            args.author = get_default_model("coder", tier=args.tier)
+            args.reviewer = get_default_model("reviewer", tier=args.tier)
         approved = False
         iteration = 0
         max_attempts = args.max_retries
@@ -156,6 +171,13 @@ class PipelineRunCommand(BaseCommand):
         except Exception as exc:  # noqa: BLE001 - injection must never block
             logger.warning("Lesson injection skipped: %s", exc)
 
+        # Step 0: Orchestrator Phase (Decompose high-level prompt into concrete implementation plan)
+        if not getattr(args, "no_orchestrate", False):
+            try:
+                current_prompt = self._orchestrate(current_prompt, args)
+            except Exception as exc:  # noqa: BLE001 - orchestration must never block pipeline
+                logger.warning("Orchestration pass skipped on error: %s", exc)
+
         while iteration < max_attempts and not approved:
             iteration += 1
             transport.send_terminal_mcp(
@@ -172,13 +194,15 @@ class PipelineRunCommand(BaseCommand):
 
             # Extract and format Author Analysis & Strategy
             strategy_text = self._extract_strategy(author_response)
+            author_stats = self._extract_stats(author_response)
             if strategy_text:
-                transport.send_terminal_mcp("─── [AUTHOR ANALYSIS & STRATEGY] ──────────────────────────")
-                transport.send_terminal_mcp(strategy_text)
-                author_stats = self._extract_stats(author_response)
-                if author_stats:
-                    transport.send_terminal_mcp(f"📊 {author_stats}")
-                transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+                strategy_body = self._strip_stats(strategy_text)
+                if strategy_body:
+                    transport.send_terminal_mcp("─── [AUTHOR ANALYSIS & STRATEGY] ──────────────────────────")
+                    transport.send_terminal_mcp(strategy_body)
+                    transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+            if author_stats:
+                transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(author_stats)}")
 
             tool_calls = self._extract_tool_calls(author_response)
             write_file_call = next(
@@ -244,6 +268,9 @@ class PipelineRunCommand(BaseCommand):
                 linter_history.append(None)
 
             # Step 3: Reviewer Evaluation
+            if args.author != args.reviewer and PipelineRunCommand._should_unload(args):
+                transport.call_mcp("ollama_unload_model", {"model": args.author})
+
             review_verdict = self._review(
                 args, prompt_content, final_code_block, linter_output, rules_section
             )
@@ -254,7 +281,10 @@ class PipelineRunCommand(BaseCommand):
             if abort_reason:
                 break
 
-        # Capture the last non-empty reviewer critique for lesson extraction.
+            if not approved and iteration < max_attempts and args.reviewer != args.author and PipelineRunCommand._should_unload(args):
+                transport.call_mcp("ollama_unload_model", {"model": args.reviewer})
+
+        # Capture the last non-empty reviewer critique or linter findings for lesson extraction.
         last_critique = ""
         for sig in reversed(reviewer_history):
             if sig:
@@ -263,6 +293,15 @@ class PipelineRunCommand(BaseCommand):
                 else:
                     last_critique = str(sig)
                 break
+
+        if not last_critique:
+            for sig in reversed(linter_history):
+                if sig:
+                    if isinstance(sig, (list, tuple)):
+                        last_critique = f"ShellCheck linter findings: {', '.join(str(p) for p in sig)}"
+                    else:
+                        last_critique = f"ShellCheck linter findings: {sig}"
+                    break
 
         return {
             "approved": approved,
@@ -302,6 +341,119 @@ class PipelineRunCommand(BaseCommand):
         except OSError as exc:  # noqa: BLE001 - rules load must never block
             logger.warning("Could not read system rules at %s: %s", path, exc)
             return ""
+
+    @staticmethod
+    def _orchestrate(prompt_content: str, args) -> str:
+        """Run the Orchestrator pass to deconstruct high-level prompt into a concrete implementation plan."""
+        orchestrator_model = getattr(args, "orchestrator", None)
+        if not orchestrator_model:
+            return prompt_content
+
+        transport.send_terminal_mcp(
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 [Orchestrator Planning] Decomposing task with `{orchestrator_model}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        system_prompt = (
+            "You are Winter Orchestrator, an autonomous task planning and multi-agent workflow coordinator.\n"
+            "Your goal is to produce a structured, high-level Implementation Plan and Architecture Guide for the Coder agent.\n\n"
+            "CRITICAL CONSTRAINT: DO NOT WRITE CODE. DO NOT write bash scripts, shell code, '#!/bin/bash', heredocs, or write_file snippets. The Coder agent writes the code; you design the architecture and strategy.\n\n"
+            "Structure your plan into exactly these sections:\n"
+            "### 1. Architectural Strategy & Path Resolution\n"
+            "- Specify deterministic path resolution requirements and required binary checks.\n"
+            "- Incorporate all Injected Lessons from Memory and Universal System Rules.\n"
+            "### 2. Functional Test Suite Specifications\n"
+            "- Describe the exact valid and invalid test cases to execute for each suite.\n"
+            "- Detail the error conditions, negative test behaviors, and directory isolation.\n"
+            "### 3. Defensive Standards & Acceptance Gates\n"
+            "- List all strict mode flags, trap handlers, cleanup requirements, and success conditions.\n"
+            "### 4. Output Contract\n"
+            "- Name the target file path (e.g. sysadmin/verify_code_quality_toolchain.sh).\n"
+            "- Instruct the Coder to output ONLY the clean, standalone Bash script starting directly with '#!/bin/bash' (never a wrapper function, nested heredoc installer, or write_file function).\n\n"
+            "Respond with ONLY the markdown architectural implementation plan."
+        )
+
+        plan = transport.call_mcp("ollama_chat", {
+            "prompt": (
+                f"### High-Level Task Specification:\n{prompt_content}\n\n"
+                f"Deconstruct this specification into a concrete, robust Implementation Plan for the Coder agent. Remember: DO NOT output executable script code; outline architectural specs and test case definitions."
+            ),
+            "model": orchestrator_model,
+            "system_prompt": system_prompt,
+            "temperature": 0.2,
+        })
+
+        stats = PipelineRunCommand._extract_stats(plan)
+        plan_body = PipelineRunCommand._strip_stats(plan)
+        transport.send_terminal_mcp("─── [ORCHESTRATOR IMPLEMENTATION PLAN] ───")
+        transport.send_terminal_mcp(plan_body)
+        if stats:
+            transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats)}")
+        transport.send_terminal_mcp("──────────────────────────────────────────")
+
+        # Free VRAM if authoring model is different from orchestrator
+        if orchestrator_model != args.author and PipelineRunCommand._should_unload(args):
+            transport.call_mcp("ollama_unload_model", {"model": orchestrator_model})
+
+        return (
+            f"{prompt_content}\n\n"
+            f"### Orchestrator Implementation Plan (Follow this strategy):\n"
+            f"{plan_body}"
+        )
+
+    @staticmethod
+    def _reorchestrate(prompt_content: str, current_prompt: str, final_code_block: str,
+                       critique: str, args) -> str:
+        """Re-evaluate and revise the Implementation Plan when a reviewer rejects code."""
+        orchestrator_model = getattr(args, "orchestrator", None)
+        if not orchestrator_model:
+            return current_prompt
+
+        transport.send_terminal_mcp(
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 [Orchestrator Plan Revision] Updating plan with `{orchestrator_model}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        system_prompt = (
+            "You are Winter Orchestrator, an autonomous task planning and multi-agent workflow coordinator.\n"
+            "An implementation attempt failed verification or review. Your goal is to diagnose the failure in the previous plan and generate a revised, concrete Implementation Plan for the Coder agent.\n\n"
+            "CRITICAL CONSTRAINT: DO NOT WRITE CODE. DO NOT write bash scripts, shell code, '#!/bin/bash', heredocs, or write_file snippets. Focus on diagnosing root cause and refining the test specifications.\n\n"
+            "Requirements for the Revised Plan:\n"
+            "1. Root Cause Analysis: Identify why the previous plan or code failed (e.g. invalid syntax assumptions, directory issues, lint violations).\n"
+            "2. Step-by-Step Corrective Strategy: Provide corrected test criteria, negative assertion designs, and directory sandboxes. Account for Injected Lessons from Memory and Universal System Rules.\n"
+            "3. Output Contract: State target path and instruction for the Coder.\n\n"
+            "Respond with ONLY the markdown Revised Implementation Plan."
+        )
+
+        revised_plan = transport.call_mcp("ollama_chat", {
+            "prompt": (
+                f"### High-Level Task Specification:\n{prompt_content}\n\n"
+                f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+                f"### Reviewer Critique & Diagnostic Findings:\n{critique}\n\n"
+                "Diagnose the failure and provide a revised, corrected Implementation Plan for the Coder. DO NOT output executable script code."
+            ),
+            "model": orchestrator_model,
+            "system_prompt": system_prompt,
+            "temperature": 0.2,
+        })
+
+        stats = PipelineRunCommand._extract_stats(revised_plan)
+        revised_plan_body = PipelineRunCommand._strip_stats(revised_plan)
+        transport.send_terminal_mcp("─── [REVISED ORCHESTRATOR IMPLEMENTATION PLAN] ───")
+        transport.send_terminal_mcp(revised_plan_body)
+        if stats:
+            transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats)}")
+        transport.send_terminal_mcp("──────────────────────────────────────────────────")
+
+        return (
+            f"{prompt_content}\n\n"
+            f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+            f"### Reviewer Critique & Diagnostics:\n{critique}\n\n"
+            f"### Revised Orchestrator Implementation Plan (Follow this corrected strategy):\n"
+            f"{revised_plan_body}"
+        )
 
     # Stop-words filtered out of the prompt-derived keyword query.
     _INJECTION_STOPWORDS = {
@@ -493,9 +645,79 @@ class PipelineRunCommand(BaseCommand):
 
     @staticmethod
     def _extract_stats(author_response: str) -> str:
-        """Extract the '*Generated by `model`: N tokens in Xs (Y t/s)*' footer."""
-        match = re.search(r"(\*Generated by `[^`]+`: \d+ tokens in [\d\.]+s \([\d\.]+ t/s\)\*)", author_response)
+        """Extract the '*Generated by `model`: N tokens in Xs (Y t/s) | Context: ...*' footer."""
+        match = re.search(r"(\*Generated by `[^`]+`: [^*]+\*)", author_response)
         return match.group(1) if match else ""
+
+    @staticmethod
+    def _strip_stats(text: str) -> str:
+        """Strips the trailing '--- \n*Generated by ...*' footer from response text."""
+        return re.sub(r"\n*---\s*\n\*Generated by `[^`]+`: [^*]+\*\s*$", "", text).strip()
+
+    @staticmethod
+    def _format_telemetry(raw_stats: str) -> str:
+        """Formats raw telemetry with threshold alerts for low TPS, high context window usage, and model residency."""
+        if not raw_stats:
+            return ""
+        pattern = (
+            r"\*Generated by `(?P<model>[^`]+)`: (?P<tokens>\d+) tokens in (?P<duration>[\d\.]+)s \((?P<tps>[\d\.]+) t/s\)(?: \[(?P<residency>[^\]]+)\])?"
+            r" \| Context: (?P<ctx_used>[\d,]+) / (?P<ctx_max>[\d,]+) tokens \((?P<pct>[\d\.]+)%\)\*"
+        )
+        match = re.search(pattern, raw_stats)
+        if not match:
+            return raw_stats
+
+        model = match.group("model")
+        tokens = match.group("tokens")
+        duration = match.group("duration")
+        tps = float(match.group("tps"))
+        residency = match.group("residency") or ""
+        ctx_used = match.group("ctx_used")
+        ctx_max = match.group("ctx_max")
+        pct = float(match.group("pct"))
+
+        # TPS formatting (< 26 critical alert, < 51 warning, >= 51 normal)
+        if tps < 26.0:
+            tps_str = f"🚨 {tps:.1f} t/s (CRITICAL LOW)"
+        elif tps < 51.0:
+            tps_str = f"⚠️ {tps:.1f} t/s"
+        else:
+            tps_str = f"{tps:.1f} t/s"
+
+        # Context formatting (> 82% critical alert, > 55% warning, <= 55% normal)
+        if pct > 82.0:
+            ctx_str = f"🚨 Context: {ctx_used} / {ctx_max} tokens ({pct:.1f}% - HIGH USAGE)"
+        elif pct > 55.0:
+            ctx_str = f"⚠️ Context: {ctx_used} / {ctx_max} tokens ({pct:.1f}%)"
+        else:
+            ctx_str = f"Context: {ctx_used} / {ctx_max} tokens ({pct:.1f}%)"
+
+        # Format residency badge
+        if residency == "resident":
+            res_str = " [⚡ resident]"
+        elif "cold load" in residency:
+            res_str = f" [⏳ {residency}]"
+        else:
+            res_str = ""
+
+        return (
+            f"*Generated by `{model}`: {tokens} tokens in {duration}s ({tps_str}){res_str}"
+            f" | {ctx_str}*"
+        )
+
+    @staticmethod
+    def _should_unload(args) -> bool:
+        """Determine whether models should be purged from VRAM between stage transitions."""
+        if getattr(args, "unload_models", False):
+            return True
+        if getattr(args, "keep_models", False):
+            return False
+        # If all configured models are 8gb tier, keep in memory by default for speed
+        models = [getattr(args, "orchestrator", ""), getattr(args, "author", ""), getattr(args, "reviewer", "")]
+        all_small = all((":8gb" in m or ":7b" in m or ":8b" in m or "olmoe" in m) for m in models if m)
+        if all_small:
+            return False
+        return True
 
     @staticmethod
     def _extract_tool_calls(author_response: str):
@@ -515,13 +737,16 @@ class PipelineRunCommand(BaseCommand):
             except json.JSONDecodeError:
                 pass
 
-        # Also inspect raw lines for un-fenced JSON tool calls
-        for line in author_response.splitlines():
-            line_str = line.strip()
-            if line_str.startswith("{") and ("write_file" in line_str or "read_file" in line_str):
+        # Also inspect for un-fenced JSON objects (single-line or multi-line)
+        if not tool_calls:
+            matches = list(re.finditer(r'\{\s*"name"\s*:\s*"(?:write_file|read_file)"', author_response))
+            decoder = json.JSONDecoder()
+            for m in matches:
                 try:
-                    tc_obj = json.loads(line_str)
+                    tc_obj, _ = decoder.raw_decode(author_response[m.start():])
                     if isinstance(tc_obj, dict) and "name" in tc_obj:
+                        if "arguments" not in tc_obj:
+                            tc_obj = {"name": tc_obj["name"], "arguments": tc_obj}
                         tool_calls.append(tc_obj)
                 except json.JSONDecodeError:
                     pass
@@ -587,13 +812,13 @@ class PipelineRunCommand(BaseCommand):
             f"### Synthesized Script Code:\n```bash\n{final_code_block}\n```\n\n"
             f"### Pre-Flight Linter Output:\n{linter_output}\n\n"
             f"### System & Environment Facts:\n"
-            f"- Virtual Environment Isolation: All project tooling must be invoked via explicit paths (`${{VENV_DIR}}/bin/<binary>`). Never rely on bare ambient PATH binaries.\n"
+            f"- Virtual Environment Resolution: Resolve REPO_ROOT and default VENV_DIR to `${{REPO_ROOT}}/sysadmin/venv`.\n"
             f"- Package Mapping: `shellcheck-py` installs the native CLI binary at `${{VENV_DIR}}/bin/shellcheck`. Testing `[ -x ${{VENV_DIR}}/bin/shellcheck ]` and `shellcheck --version` is the correct and expected verification.\n"
-            f"- Library Mapping: `pyyaml` provides the `yaml` Python module tested via `python -c 'import yaml'`.\n\n"
+            f"- Library Mapping: `pyyaml` provides the `yaml` Python module tested via `python -c 'import yaml'`. `ast` is a built-in Python standard library module and must NEVER be installed via pip.\n\n"
             f"### Verification Checklist:\n"
             f"1. Requirements: Are all technical specifications and packages met?\n"
             f"2. Pre-Flight Linters: Are there zero unhandled ShellCheck errors or warnings?\n"
-            f"3. Explicit Virtual Environment: Are binaries invoked explicitly via `${{VENV_DIR}}/bin/<tool>` rather than bare ambient PATH commands?\n"
+            f"3. Explicit Virtual Environment: Are binaries invoked explicitly via `${{VENV_DIR}}/bin/<tool>` with VENV_DIR defaulting to `${{REPO_ROOT}}/sysadmin/venv`?\n"
             f"4. Defensive Standards: Are strict flags (`set -euo pipefail`), diagnostic `ERR` trap with line number, `EXIT` cleanup trap, binary existence assertions (`[ -x ...]`), and functional smoke tests implemented?\n"
             f"5. Temporary Directory Resilience: Does the script safely handle temporary directories without assuming $TMPDIR exists (e.g. ensuring `mkdir -p \"${{TMPDIR:-/tmp}}\"` or using `mktemp -d -p /tmp`)?\n"
             f"6. Sandbox & Safety: Does Ansible use a temporary directory in `/tmp` to avoid read-only permissions errors?\n"
@@ -621,7 +846,6 @@ class PipelineRunCommand(BaseCommand):
             "model": args.reviewer,
             "system_prompt": "You are a strict, uncompromising code verifier and systems engineer.",
             "temperature": 0.1,
-            "num_ctx": 4096,
         })
 
     @staticmethod
@@ -633,7 +857,7 @@ class PipelineRunCommand(BaseCommand):
         verdict_decision = "DECISION: APPROVED" if "DECISION: APPROVED" in review_verdict else "DECISION: REVISION_REQUESTED"
         transport.send_terminal_mcp(f"📋 [Reviewer Verdict ({args.reviewer})]: {verdict_decision}")
         if review_stats:
-            transport.send_terminal_mcp(f"📊 {review_stats}")
+            transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(review_stats)}")
 
         if "DECISION: REVISION_REQUESTED" in review_verdict:
             critique_points = []
@@ -671,12 +895,26 @@ class PipelineRunCommand(BaseCommand):
             transport.send_terminal_mcp(f"✅ [Pipeline Approved] Script passed all verification gates!")
         else:
             transport.send_terminal_mcp(f"⚠️ [Revision Requested] Feedback loop initiated for `{args.author}`...")
-            current_prompt = (
-                f"{prompt_content}\n\n"
-                f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
-                f"### Reviewer Feedback & Required Fixes:\n{review_verdict}\n\n"
-                f"Please rewrite and fix the script addressing all reviewer critique points."
-            )
+            if not getattr(args, "no_orchestrate", False) and getattr(args, "orchestrator", None):
+                try:
+                    current_prompt = PipelineRunCommand._reorchestrate(
+                        prompt_content, current_prompt, final_code_block, review_verdict, args
+                    )
+                except Exception as exc:  # noqa: BLE001 - reorchestration must never block
+                    logger.warning("Re-orchestration pass skipped on error: %s", exc)
+                    current_prompt = (
+                        f"{prompt_content}\n\n"
+                        f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+                        f"### Reviewer Feedback & Required Fixes:\n{review_verdict}\n\n"
+                        f"Please rewrite and fix the script addressing all reviewer critique points."
+                    )
+            else:
+                current_prompt = (
+                    f"{prompt_content}\n\n"
+                    f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
+                    f"### Reviewer Feedback & Required Fixes:\n{review_verdict}\n\n"
+                    f"Please rewrite and fix the script addressing all reviewer critique points."
+                )
         return approved, abort_reason, current_prompt, reviewer_history
 
     def execute(self, result, args):
@@ -684,14 +922,27 @@ class PipelineRunCommand(BaseCommand):
         final_code_block = result["final_code_block"]
         write_file_call = result.get("write_file_call")
 
+        target_path = ""
+        is_exec = True
         if write_file_call:
             wf_args = write_file_call.get("arguments", {})
             target_path = wf_args.get("path", "")
-            is_exec = wf_args.get("make_executable", False)
+            is_exec = wf_args.get("make_executable", True)
+        else:
+            prompt_file = getattr(args, "file", "")
+            if "prompts/" in prompt_file and prompt_file.endswith(".md"):
+                target_path = prompt_file.replace("prompts/", "").replace(".md", ".sh")
+            elif prompt_file.endswith(".md"):
+                target_path = prompt_file.replace(".md", ".sh")
 
+        if target_path:
             # 1. Execute write_file natively via MCP
             transport.send_terminal_mcp(f"📝 [Native Tool Execution] Writing `{target_path}` via MCP...")
-            wf_res = transport.call_mcp("write_file", wf_args)
+            wf_res = transport.call_mcp("write_file", {
+                "path": target_path,
+                "content": final_code_block,
+                "make_executable": is_exec,
+            })
             transport.send_terminal_mcp(f"✅ {wf_res}")
 
             # 2. Run execution command in terminal-mcp
@@ -717,3 +968,7 @@ class PipelineRunCommand(BaseCommand):
                 "timeout": args.timeout,
             })
             print(f"\n{report}")
+
+        # Cleanly release GPU VRAM on pipeline completion if unloading enabled
+        if PipelineRunCommand._should_unload(args):
+            transport.call_mcp("ollama_unload_model", {})

@@ -20,6 +20,7 @@ import struct
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
+from mcp_core.audit import normalize_category
 from mcp_core.workspace import WORKSPACE_ROOT
 
 # sqlite-vec is optional: if importable, vector/hybrid search is enabled; otherwise
@@ -611,9 +612,16 @@ class MemoryStore:
         ``lesson`` may include an explicit ``id`` or omit it to auto-generate a
         ``pending-YYYYMMDD-NN`` ID. ``keywords`` may be a list or JSON string.
         """
-        pending_id = lesson.get("id") or self._next_pending_id()
+        pending_id = lesson.get("id")
+        if not pending_id or pending_id.endswith("-00") or self.get_pending_lesson(pending_id) is not None:
+            pending_id = self._next_pending_id()
         keywords = lesson.get("keywords", [])
         keywords_json = json.dumps(keywords) if not isinstance(keywords, str) else keywords
+
+        raw_category = lesson.get("category", "unknown")
+        normalized_category = normalize_category(
+            lesson.get("keywords", []), raw_category
+        )
 
         self.conn.execute(
             """
@@ -627,7 +635,7 @@ class MemoryStore:
                 lesson.get("staged_at", _now_iso()),
                 lesson.get("task_file", ""),
                 lesson["proposed_rule"],
-                lesson.get("category", "unknown"),
+                normalized_category,
                 keywords_json,
                 lesson.get("reviewer_critique", ""),
                 lesson.get("lesson_type", "solved_pattern"),
