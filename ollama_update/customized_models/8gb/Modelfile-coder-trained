@@ -1,7 +1,7 @@
 # Auto-generated Modelfile for fine-tuned Winter Model: winter-coder:8gb-trained
-# Created from LoRA adapter in: /tmp/tmp_qry6o3h
+# Created from LoRA adapter in: /tmp/tmp4r46l8bn
 FROM qwen2.5-coder:7b
-ADAPTER /tmp/tmp_qry6o3h/adapter_model.safetensors
+ADAPTER /tmp/tmp4r46l8bn/adapter_model.safetensors
 
 PARAMETER num_ctx 16384
 PARAMETER num_predict 4096
