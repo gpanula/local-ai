@@ -60,6 +60,19 @@ CATEGORY_TAXONOMY: Dict[str, List[str]] = {
         "code quality", "pre-flight linters", "toolchain", "functional test suites",
         "linter toolchain", "verification script",
     ],
+    "Security & Hardening": [
+        "security", "stride", "privilege", "seccomp", "socket isolation",
+        "bubblewrap", "sandbox", "permissions", "vulnerability", "exploit",
+        "path traversal", "hardening", "attack surface",
+    ],
+    "Multi-Agent Orchestration": [
+        "orchestration", "orchestrator", "workflow", "decomposition",
+        "acceptance gates", "multi-agent", "pipeline", "revision loop", "role dispatch",
+    ],
+    "System Architecture": [
+        "architecture", "topology", "modular design", "component boundaries",
+        "scalability", "interface contract", "data model", "system design",
+    ],
 }
 
 # Aliases: raw LLM category strings (lowercased) → canonical name.
@@ -77,6 +90,15 @@ _CATEGORY_ALIASES: Dict[str, str] = {
     "ansible": "Ansible",
     "python quality": "Python Quality",
     "code quality toolchain": "Code Quality Toolchain",
+    "threat modeling": "Security & Hardening",
+    "privilege escalation": "Security & Hardening",
+    "sandboxing": "Security & Hardening",
+    "security hardening": "Security & Hardening",
+    "workflow coordination": "Multi-Agent Orchestration",
+    "task planning": "Multi-Agent Orchestration",
+    "pipeline orchestration": "Multi-Agent Orchestration",
+    "system design": "System Architecture",
+    "architectural specification": "System Architecture",
 }
 
 
