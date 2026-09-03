@@ -197,6 +197,8 @@ echo 'source ~/Projects/local-ai/sysadmin/shell_aliases.sh' >> ~/.bashrc
   "network": {
     "mode": "allowlist",
     "allowedDomains": [
+      "localhost",
+      "127.0.0.1",
       "github.com",
       "api.github.com",
       "raw.githubusercontent.com",
