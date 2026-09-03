@@ -340,73 +340,56 @@ def handle_unload_model(model: Optional[str] = None) -> str:
     return "No models were loaded in VRAM."
 
 
-def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: int = 180) -> Tuple[str, int, str]:
-    """Executes a command inside the active terminal-mcp session and captures the terminal buffer."""
-    import subprocess
+def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: int = 180, socket_path: Optional[str] = None) -> Tuple[str, int, str]:
+    """Executes a command inside the active terminal-mcp session via Unix socket and captures the terminal buffer."""
+    import socket
     import time
-    
+
+    sock_path = socket_path or os.environ.get("TERMINAL_MCP_SOCKET", "/tmp/terminal-mcp.sock")
     exec_command = f"cd {shlex.quote(cwd)} && (\n{command}\n)" if cwd else command
 
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        p = subprocess.Popen(
-            ["npx", "-y", "github:gpanula/terminal-mcp"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        init_req = {
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "ollama-mcp", "version": "1.0"}}
-        }
-        p.stdin.write(json.dumps(init_req) + "\n")
-        p.stdin.flush()
-        p.stdout.readline()
-        
-        p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
-        p.stdin.flush()
-        
-        type_req = {
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "type", "arguments": {"text": exec_command.rstrip("\n") + "\n"}}
-        }
-        p.stdin.write(json.dumps(type_req) + "\n")
-        p.stdin.flush()
-        p.stdout.readline()
-        
+        s.connect(sock_path)
+        s_file = s.makefile("r", encoding="utf-8")
+
+        # Send type command directly to terminal-mcp tool proxy
+        type_req = {"id": 1, "method": "type", "params": {"text": exec_command.rstrip("\n") + "\n"}}
+        s.sendall(json.dumps(type_req).encode("utf-8") + b"\n")
+        s_file.readline()
+
         start_time = time.time()
         last_text = ""
-        req_id = 3
-        
-        time.sleep(1.5)
+        req_id = 2
+
+        time.sleep(1.0)
         while time.time() - start_time < timeout:
-            get_req = {
-                "jsonrpc": "2.0", "id": req_id, "method": "tools/call",
-                "params": {"name": "getContent", "arguments": {"visibleOnly": False}}
-            }
+            get_req = {"id": req_id, "method": "getContent", "params": {"visibleOnly": False}}
             req_id += 1
+            s.sendall(json.dumps(get_req).encode("utf-8") + b"\n")
+            res_line = s_file.readline()
+            if not res_line:
+                break
             try:
-                p.stdin.write(json.dumps(get_req) + "\n")
-                p.stdin.flush()
-                res_line = p.stdout.readline()
-                if not res_line:
-                    break
                 res = json.loads(res_line)
                 last_text = res.get("result", {}).get("content", [{}])[0].get("text", "")
                 lines = [l.strip() for l in last_text.strip().splitlines() if l.strip()]
                 if lines and (lines[-1].endswith("$") or lines[-1].endswith("#") or "⚡ mcp" in lines[-1]):
                     if len(lines) > 1 and command.strip() not in lines[-1]:
                         break
-            except (BrokenPipeError, OSError):
-                break
-            time.sleep(1.5)
-            
-        p.terminate()
+            except json.JSONDecodeError:
+                pass
+            time.sleep(1.0)
+
+        s.close()
         lines = last_text.strip().splitlines()
         tail = "\n".join(lines[-40:]) if len(lines) > 40 else last_text
         return tail, 0, "terminal-mcp PTY"
     except Exception as e:
+        try:
+            s.close()
+        except Exception:
+            pass
         raise RuntimeError(f"terminal-mcp PTY execution failed: {e}") from e
 
 
@@ -426,10 +409,16 @@ def handle_execute_task(
     execution_target = "host subprocess"
 
     terminal_sock = os.environ.get("TERMINAL_MCP_SOCKET", "/tmp/terminal-mcp.sock")
+    used_socket = False
     if _is_valid_mcp_socket(terminal_sock):
-        stdout, exit_code, execution_target = _execute_in_terminal_mcp(command, cwd=work_dir, timeout=timeout)
-        stderr = ""
-    else:
+        try:
+            stdout, exit_code, execution_target = _execute_in_terminal_mcp(command, cwd=work_dir, timeout=timeout)
+            stderr = ""
+            used_socket = True
+        except Exception:
+            used_socket = False
+
+    if not used_socket:
         try:
             proc = subprocess.run(
                 command,

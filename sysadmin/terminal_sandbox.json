@@ -8,7 +8,8 @@
       "~/.cache",
       "~/.local",
       "~/.npm",
-      "~/.direnv"
+      "~/.direnv",
+      "~/.ollama"
     ],
     "readOnly": [
       "/usr",
@@ -19,6 +20,7 @@
       "/etc/ssl",
       "/etc/resolv.conf",
       "/etc/hosts",
+      "/opt/ollama",
       "~"
     ],
     "blocked": [
@@ -34,6 +36,8 @@
   "network": {
     "mode": "allowlist",
     "allowedDomains": [
+      "localhost",
+      "127.0.0.1",
       "github.com",
       "api.github.com",
       "raw.githubusercontent.com",

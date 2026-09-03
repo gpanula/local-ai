@@ -17,6 +17,7 @@ from mcp_core.embeddings import get_embedding
 from mcp_core.extraction import (
     extract_lesson_from_critique,
     extract_lesson_from_stuck_loop,
+    extract_lesson_from_success,
 )
 from mcp_core.hardware import get_default_model, get_hardware_tier
 from mcp_core.injection import format_lessons_for_prompt
@@ -52,22 +53,82 @@ class BuildAndRunCommand(BaseCommand):
             "model": args.model,
             "task_type": args.type,
         })
-        print(f"✅ [Ollama {args.model}] Strategy & Commands Generated. Extracting execution block...")
-        code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", plan)
-        if not code_blocks:
-            print("❌ No executable code blocks found in Ollama output. Raw plan:\n", plan)
-        else:
+        print(f"✅ [Ollama {args.model}] Strategy & Commands Generated:")
+        print(f"\n{plan}\n")
+        tool_calls = PipelineRunCommand._extract_tool_calls(plan)
+        write_file_call = next(
+            (tc for tc in tool_calls if tc.get("name") == "write_file"),
+            None,
+        )
+        target_path = None
+        if write_file_call:
+            wf_args = write_file_call.get("arguments", {})
+            if isinstance(wf_args, str):
+                try:
+                    wf_args = json.loads(wf_args)
+                except Exception:
+                    wf_args = {}
+            target_path = wf_args.get("path")
+            target_content = wf_args.get("content")
+            is_exec = wf_args.get("make_executable", True)
+            if target_path and target_content:
+                print(f"📝 Writing `{target_path}` via native MCP tool call...")
+                wf_res = transport.call_mcp("write_file", {
+                    "path": target_path,
+                    "content": target_content,
+                    "make_executable": is_exec,
+                })
+                print(f"✅ {wf_res}")
+
+        code_blocks = re.findall(r"```(?:bash|sh)\s*\n([\s\S]*?)```", plan)
+        if target_path:
+            exec_cmd = f"./{target_path}"
+        elif code_blocks:
             exec_cmd = sanitize_script_code(max(code_blocks, key=len))
-            # Send status banner into terminal-mcp interactive window
-            banner_cmd = f"echo '🤖 [Ollama {args.model}] Executing prompt: {args.file}'; {exec_cmd}"
-            print(f"🚀 [Ollama {args.model}] Executing build & run commands live in terminal-mcp...")
-            report = transport.call_mcp("ollama_execute_task", {
-                "command": banner_cmd,
-                "task_description": f"Build & Execute task from {args.file}",
-                "model": args.model,
-                "timeout": args.timeout,
-            })
-            print(report)
+        else:
+            print("❌ No executable code blocks or tool calls found in Ollama output. Raw plan:\n", plan)
+            return
+
+        # Send status banner into terminal-mcp interactive window
+        banner_cmd = f"echo '🤖 [Ollama {args.model}] Executing prompt: {args.file}'; {exec_cmd}"
+        print(f"🚀 [Ollama {args.model}] Executing build & run commands live in terminal-mcp...")
+        report = transport.call_mcp("ollama_execute_task", {
+            "command": banner_cmd,
+            "task_description": f"Build & Execute task from {args.file}",
+            "model": args.model,
+            "timeout": args.timeout,
+        })
+        print(report)
+
+        # Record trajectory with full reasoning for future CoT training
+        try:
+            reasoning = PipelineRunCommand._extract_reasoning_bundle(plan)
+            author_stats = PipelineRunCommand._extract_stats(plan)
+            roles = {
+                "coder": {
+                    "model": args.model,
+                    "strategy": reasoning.get("strategy", ""),
+                    "risks": reasoning.get("risks", ""),
+                    "solution": exec_cmd,
+                    "verification": reasoning.get("verification_plan", ""),
+                }
+            }
+            record_trajectory(
+                {
+                    "approved": True,
+                    "final_code_block": exec_cmd,
+                    "iterations": 1,
+                    "script_versions": [exec_cmd],
+                    "reasoning": reasoning,
+                    "roles": roles,
+                    "author_model": args.model,
+                    "author_stats": author_stats,
+                },
+                task_content,
+                task_file=args.file,
+            )
+        except Exception as exc:
+            logger.warning("Trajectory recording skipped in build-and-run: %s", exc)
 
 
 @command
@@ -148,6 +209,8 @@ class PipelineRunCommand(BaseCommand):
         # Phase 7.01: accumulate each iteration's script version (oldest->newest)
         # so trajectories can capture rejected/approved pairs.
         script_versions = []
+        reasoning = {}
+        author_stats = ""
 
         # Phase 6.05: prepend universal system rules to the Author prompt.
         # Never blocks the pipeline on failure (missing/empty file = no-op).
@@ -171,10 +234,12 @@ class PipelineRunCommand(BaseCommand):
         except Exception as exc:  # noqa: BLE001 - injection must never block
             logger.warning("Lesson injection skipped: %s", exc)
 
+        roles: dict[str, Any] = {}
+
         # Step 0: Orchestrator Phase (Decompose high-level prompt into concrete implementation plan)
         if not getattr(args, "no_orchestrate", False):
             try:
-                current_prompt = self._orchestrate(current_prompt, args)
+                current_prompt = self._orchestrate(current_prompt, args, roles=roles)
             except Exception as exc:  # noqa: BLE001 - orchestration must never block pipeline
                 logger.warning("Orchestration pass skipped on error: %s", exc)
 
@@ -193,6 +258,7 @@ class PipelineRunCommand(BaseCommand):
             })
 
             # Extract and format Author Analysis & Strategy
+            reasoning = self._extract_reasoning_bundle(author_response)
             strategy_text = self._extract_strategy(author_response)
             author_stats = self._extract_stats(author_response)
             if strategy_text:
@@ -201,8 +267,19 @@ class PipelineRunCommand(BaseCommand):
                     transport.send_terminal_mcp("─── [AUTHOR ANALYSIS & STRATEGY] ──────────────────────────")
                     transport.send_terminal_mcp(strategy_body)
                     transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+            if reasoning.get("risks"):
+                transport.send_terminal_mcp("─── [AUTHOR RISKS & EDGE CASES] ──────────────────────────")
+                transport.send_terminal_mcp(reasoning["risks"])
+                transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+            if reasoning.get("verification_plan"):
+                transport.send_terminal_mcp("─── [AUTHOR VERIFICATION PLAN] ───────────────────────────")
+                transport.send_terminal_mcp(reasoning["verification_plan"])
+                transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
             if author_stats:
                 transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(author_stats)}")
+
+            roles["coder"] = self._extract_role_bundle(author_response, "coder")
+            roles["coder"]["model"] = getattr(args, "author", "")
 
             tool_calls = self._extract_tool_calls(author_response)
             write_file_call = next(
@@ -277,6 +354,7 @@ class PipelineRunCommand(BaseCommand):
             approved, abort_reason, current_prompt, reviewer_history = self._handle_review(
                 args, review_verdict, prompt_content, final_code_block,
                 reviewer_history, iteration, max_attempts, current_prompt, approved, abort_reason,
+                roles=roles,
             )
             if abort_reason:
                 break
@@ -316,6 +394,10 @@ class PipelineRunCommand(BaseCommand):
             "injected_lessons": injected_lessons,
             "injected_lesson_dicts": injected_lesson_dicts,
             "script_versions": script_versions,
+            "reasoning": reasoning,
+            "roles": roles,
+            "author_model": getattr(args, "author", ""),
+            "author_stats": author_stats,
         }
 
     # Path to the universal system rules store (relative to workspace root).
@@ -343,8 +425,8 @@ class PipelineRunCommand(BaseCommand):
             return ""
 
     @staticmethod
-    def _orchestrate(prompt_content: str, args) -> str:
-        """Run the Orchestrator pass to deconstruct high-level prompt into a concrete implementation plan."""
+    def _orchestrate(prompt_content: str, args, roles: dict | None = None) -> str:
+        """Run an initial task decomposition pass using the orchestrator model."""
         orchestrator_model = getattr(args, "orchestrator", None)
         if not orchestrator_model:
             return prompt_content
@@ -359,25 +441,24 @@ class PipelineRunCommand(BaseCommand):
             "You are Winter Orchestrator, an autonomous task planning and multi-agent workflow coordinator.\n"
             "Your goal is to produce a structured, high-level Implementation Plan and Architecture Guide for the Coder agent.\n\n"
             "CRITICAL CONSTRAINT: DO NOT WRITE CODE. DO NOT write bash scripts, shell code, '#!/bin/bash', heredocs, or write_file snippets. The Coder agent writes the code; you design the architecture and strategy.\n\n"
-            "Structure your plan into exactly these sections:\n"
-            "### 1. Architectural Strategy & Path Resolution\n"
-            "- Specify deterministic path resolution requirements and required binary checks.\n"
-            "- Incorporate all Injected Lessons from Memory and Universal System Rules.\n"
-            "### 2. Functional Test Suite Specifications\n"
-            "- Describe the exact valid and invalid test cases to execute for each suite.\n"
-            "- Detail the error conditions, negative test behaviors, and directory isolation.\n"
-            "### 3. Defensive Standards & Acceptance Gates\n"
-            "- List all strict mode flags, trap handlers, cleanup requirements, and success conditions.\n"
-            "### 4. Output Contract\n"
-            "- Name the target file path (e.g. sysadmin/verify_code_quality_toolchain.sh).\n"
-            "- Instruct the Coder to output ONLY the clean, standalone Bash script starting directly with '#!/bin/bash' (never a wrapper function, nested heredoc installer, or write_file function).\n\n"
-            "Respond with ONLY the markdown architectural implementation plan."
+            "Structure your response into exactly these sections:\n"
+            "### 1. Analysis & Strategy\n"
+            "- Detail your step-by-step thinking: How did you analyze the prompt's requirements, edge cases, and constraints?\n"
+            "- Explain your design rationale, architectural tradeoffs, and how you incorporated Injected Lessons from Memory and Universal System Rules.\n"
+            "### 2. Risks & Constraints\n"
+            "- Detail potential threat models, environment traps, dependency deadlocks, or side-effects.\n"
+            "### 3. Architecture & Plan\n"
+            "- Specify deterministic path resolution requirements, required binary checks, and step-by-step roadmap.\n"
+            "- Target file path (e.g. sysadmin/verify_code_quality_toolchain.sh) and instruction for Coder.\n"
+            "### 4. Acceptance Gates & Tests\n"
+            "- Describe the exact valid and invalid test cases, strict mode flags, trap handlers, cleanup requirements, and success conditions.\n\n"
+            "Respond with ONLY the markdown architectural plan and analysis."
         )
 
         plan = transport.call_mcp("ollama_chat", {
             "prompt": (
                 f"### High-Level Task Specification:\n{prompt_content}\n\n"
-                f"Deconstruct this specification into a concrete, robust Implementation Plan for the Coder agent. Remember: DO NOT output executable script code; outline architectural specs and test case definitions."
+                f"Deconstruct this specification into a concrete, robust Implementation Plan for the Coder agent. Outline your cognitive reasoning, architectural specs, and test case definitions. DO NOT output executable script code."
             ),
             "model": orchestrator_model,
             "system_prompt": system_prompt,
@@ -386,11 +467,15 @@ class PipelineRunCommand(BaseCommand):
 
         stats = PipelineRunCommand._extract_stats(plan)
         plan_body = PipelineRunCommand._strip_stats(plan)
-        transport.send_terminal_mcp("─── [ORCHESTRATOR IMPLEMENTATION PLAN] ───")
+        transport.send_terminal_mcp("─── [ORCHESTRATOR PLANNING & ARCHITECTURE GUIDE] ───")
         transport.send_terminal_mcp(plan_body)
         if stats:
             transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats)}")
-        transport.send_terminal_mcp("──────────────────────────────────────────")
+        transport.send_terminal_mcp("───────────────────────────────────────────────────")
+
+        if roles is not None:
+            roles["orchestrator"] = PipelineRunCommand._extract_role_bundle(plan_body, "orchestrator")
+            roles["orchestrator"]["model"] = orchestrator_model
 
         # Free VRAM if authoring model is different from orchestrator
         if orchestrator_model != args.author and PipelineRunCommand._should_unload(args):
@@ -404,7 +489,7 @@ class PipelineRunCommand(BaseCommand):
 
     @staticmethod
     def _reorchestrate(prompt_content: str, current_prompt: str, final_code_block: str,
-                       critique: str, args) -> str:
+                       critique: str, args, roles: dict | None = None) -> str:
         """Re-evaluate and revise the Implementation Plan when a reviewer rejects code."""
         orchestrator_model = getattr(args, "orchestrator", None)
         if not orchestrator_model:
@@ -420,10 +505,16 @@ class PipelineRunCommand(BaseCommand):
             "You are Winter Orchestrator, an autonomous task planning and multi-agent workflow coordinator.\n"
             "An implementation attempt failed verification or review. Your goal is to diagnose the failure in the previous plan and generate a revised, concrete Implementation Plan for the Coder agent.\n\n"
             "CRITICAL CONSTRAINT: DO NOT WRITE CODE. DO NOT write bash scripts, shell code, '#!/bin/bash', heredocs, or write_file snippets. Focus on diagnosing root cause and refining the test specifications.\n\n"
-            "Requirements for the Revised Plan:\n"
-            "1. Root Cause Analysis: Identify why the previous plan or code failed (e.g. invalid syntax assumptions, directory issues, lint violations).\n"
-            "2. Step-by-Step Corrective Strategy: Provide corrected test criteria, negative assertion designs, and directory sandboxes. Account for Injected Lessons from Memory and Universal System Rules.\n"
-            "3. Output Contract: State target path and instruction for the Coder.\n\n"
+            "Structure your revised plan into exactly these sections:\n"
+            "### 1. Analysis & Strategy\n"
+            "- Root cause analysis: Why did the previous plan or code fail? Where was the misunderstanding, oversight, or mismatch with specifications?\n"
+            "- What principles or lessons from memory apply to permanently prevent this failure mode?\n"
+            "### 2. Risks & Constraints\n"
+            "- Identify regressions to avoid during the fix.\n"
+            "### 3. Architecture & Plan\n"
+            "- Corrective architecture, target file path, and updated implementation instructions.\n"
+            "### 4. Acceptance Gates & Tests\n"
+            "- Updated verification requirements and acceptance criteria for passing the next review.\n\n"
             "Respond with ONLY the markdown Revised Implementation Plan."
         )
 
@@ -432,7 +523,7 @@ class PipelineRunCommand(BaseCommand):
                 f"### High-Level Task Specification:\n{prompt_content}\n\n"
                 f"### Previous Implementation Attempt:\n```bash\n{final_code_block}\n```\n\n"
                 f"### Reviewer Critique & Diagnostic Findings:\n{critique}\n\n"
-                "Diagnose the failure and provide a revised, corrected Implementation Plan for the Coder. DO NOT output executable script code."
+                "Diagnose the failure, articulate your cognitive root-cause analysis, and provide a revised, corrected Implementation Plan for the Coder. DO NOT output executable script code."
             ),
             "model": orchestrator_model,
             "system_prompt": system_prompt,
@@ -441,11 +532,15 @@ class PipelineRunCommand(BaseCommand):
 
         stats = PipelineRunCommand._extract_stats(revised_plan)
         revised_plan_body = PipelineRunCommand._strip_stats(revised_plan)
-        transport.send_terminal_mcp("─── [REVISED ORCHESTRATOR IMPLEMENTATION PLAN] ───")
+        transport.send_terminal_mcp("─── [REVISED ORCHESTRATOR DIAGNOSIS & PLAN] ───")
         transport.send_terminal_mcp(revised_plan_body)
         if stats:
             transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats)}")
-        transport.send_terminal_mcp("──────────────────────────────────────────────────")
+        transport.send_terminal_mcp("───────────────────────────────────────────────")
+
+        if roles is not None:
+            roles["orchestrator"] = PipelineRunCommand._extract_role_bundle(revised_plan_body, "orchestrator")
+            roles["orchestrator"]["model"] = orchestrator_model
 
         return (
             f"{prompt_content}\n\n"
@@ -582,6 +677,8 @@ class PipelineRunCommand(BaseCommand):
         else:
             # Pass on iteration 1 (or any other no-op state).
             result["lesson_type"] = None
+            if approved and iterations == 1:
+                self._stage_positive_lesson_if_applicable(result, prompt_content, args)
             return
 
         result["lesson_type"] = lesson_type
@@ -610,6 +707,32 @@ class PipelineRunCommand(BaseCommand):
             )
         except Exception as exc:  # noqa: BLE001 - staging must never block the pipeline
             logger.warning("Failed to stage lesson (type=%s): %s", lesson_type, exc)
+
+    def _stage_positive_lesson_if_applicable(self, result, prompt_content, args) -> None:
+        """Stage a pre_emptive_defense lesson if iteration 1 identified proactive risks."""
+        reasoning = result.get("reasoning") or {}
+        risks = reasoning.get("risks", "")
+        strategy = reasoning.get("strategy", "")
+        if not risks:
+            return
+        task_file = getattr(args, "file", "")
+        try:
+            lesson = extract_lesson_from_success(
+                strategy=strategy,
+                risks=risks,
+                task_file=task_file,
+                prompt_content=prompt_content,
+                model=getattr(args, "reviewer", "qwen3:8b"),
+            )
+            if lesson:
+                with MemoryStore() as store:
+                    store.stage_pending_lesson(lesson)
+                result["lesson_type"] = lesson["lesson_type"]
+                transport.send_terminal_mcp(
+                    f"💡 1 proactive defense lesson staged in pending queue (type: {lesson['lesson_type']})"
+                )
+        except Exception as exc:  # noqa: BLE001 - staging must never block the pipeline
+            logger.warning("Failed to stage positive lesson: %s", exc)
 
     def _record_trajectory_if_rework(self, result, prompt_content, args) -> None:
         """Record a trajectory entry for multi-iteration runs (Phase 7.01).
@@ -642,6 +765,129 @@ class PipelineRunCommand(BaseCommand):
         else:
             strategy_text = author_response.strip()
         return strategy_text
+
+    @staticmethod
+    def _extract_section(text: str, patterns: list) -> str:
+        """Extract content under a markdown heading matching any regex pattern."""
+        for pattern in patterns:
+            regex = rf"###\s*(?:\d+\.\s*)?{pattern}\s*\n([\s\S]*?)(?=###|\*Generated by|\Z)"
+            match = re.search(regex, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _extract_role_bundle(text: str, role: str) -> dict:
+        """Extract the 4 standardized cognitive pillars for any of the 6 roles."""
+        clean_text = PipelineRunCommand._strip_stats(text or "")
+        bundle = {}
+
+        if role in ("coder", "architect"):
+            bundle["strategy"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Analysis\s*&\s*Strategy", r"Planning\s*Analysis"]
+            )
+            bundle["risks"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Risks\s*(?:&|and)\s*Edge\s*Cases", r"Risks\s*(?:&|and)\s*Constraints"]
+            )
+            if role == "coder":
+                code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", clean_text)
+                bundle["solution"] = code_blocks[0].strip() if code_blocks else ""
+                bundle["verification"] = PipelineRunCommand._extract_section(
+                    clean_text, [r"Verification\s*(?:&|and)\s*Testing"]
+                )
+            else:
+                bundle["design"] = PipelineRunCommand._extract_section(
+                    clean_text, [r"Architecture\s*(?:&|and)\s*Design\s*Specification", r"Architecture\s*(?:&|and)\s*Plan"]
+                )
+                bundle["acceptance"] = PipelineRunCommand._extract_section(
+                    clean_text, [r"Acceptance\s*Criteria\s*(?:&|and)\s*Verification", r"Acceptance\s*Gates\s*(?:&|and)\s*Tests"]
+                )
+
+        elif role == "orchestrator":
+            bundle["strategy"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Analysis\s*&\s*Strategy", r"Planning\s*Analysis", r"Root\s*Cause\s*Analysis"]
+            )
+            bundle["risks"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Risks\s*(?:&|and)\s*Constraints", r"Risks\s*(?:&|and)\s*Edge\s*Cases"]
+            )
+            bundle["plan"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Architecture\s*(?:&|and)\s*Plan", r"Architectural\s*Strategy", r"Workflow\s*(?:&|and)\s*Task"]
+            )
+            bundle["gates"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Acceptance\s*Gates\s*(?:&|and)\s*Tests", r"Functional\s*Test\s*Suite", r"Defensive\s*Standards"]
+            )
+
+        elif role == "reviewer":
+            bundle["audit"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Verification\s*Audit", r"Verification\s*Audit\s*(?:&|and)\s*Cognitive\s*Analysis"]
+            )
+            bundle["risks"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Risk\s*(?:&|and)\s*Regression\s*Check", r"Risks\s*(?:&|and)\s*Edge\s*Cases"]
+            )
+            bundle["decision"] = "APPROVED" if "DECISION: APPROVED" in clean_text else "REVISION_REQUESTED"
+            decision_part = clean_text.split("DECISION:", 1)[-1] if "DECISION:" in clean_text else clean_text
+            critique_lines = [
+                line.strip() for line in decision_part.splitlines()
+                if line.strip().startswith(("- ", "* "))
+            ]
+            bundle["fixes"] = "\n".join(critique_lines)
+            bundle["evidence"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Validation\s*Evidence"]
+            )
+
+        elif role == "security":
+            bundle["threat_model"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Threat\s*Modeling\s*(?:&|and)\s*Attack\s*Surface"]
+            )
+            bundle["vulnerabilities"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Vulnerabilities\s*(?:&|and)\s*Exploit\s*Scenarios"]
+            )
+            bundle["remediation"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Security\s*Remediation\s*(?:&|and)\s*Hardening"]
+            )
+            bundle["proof"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Security\s*Audit\s*(?:&|and)\s*Compliance\s*Proof"]
+            )
+
+        elif role == "sysadmin":
+            bundle["state_analysis"] = PipelineRunCommand._extract_section(
+                clean_text, [r"System\s*State\s*(?:&|and)\s*Root\s*Cause\s*Analysis"]
+            )
+            bundle["blast_radius"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Operational\s*Risks\s*(?:&|and)\s*Blast\s*Radius"]
+            )
+            bundle["remediation"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Automation\s*(?:&|and)\s*Remediation\s*Action"]
+            )
+            bundle["verification"] = PipelineRunCommand._extract_section(
+                clean_text, [r"Operational\s*Verification\s*(?:&|and)\s*Telemetry"]
+            )
+
+        return bundle
+
+    @staticmethod
+    def _extract_risks(author_response: str) -> str:
+        """Extract the '### Risks & Edge Cases' section from the model's response."""
+        return PipelineRunCommand._extract_section(
+            author_response, [r"Risks\s*(?:&|and)\s*Edge\s*Cases"]
+        )
+
+    @staticmethod
+    def _extract_verification(author_response: str) -> str:
+        """Extract the '### Verification & Testing' section from the model's response."""
+        return PipelineRunCommand._extract_section(
+            author_response, [r"Verification\s*(?:&|and)\s*Testing"]
+        )
+
+    @staticmethod
+    def _extract_reasoning_bundle(author_response: str) -> dict:
+        """Extract strategy, risks, and verification_plan into a structured dictionary."""
+        coder_bundle = PipelineRunCommand._extract_role_bundle(author_response, "coder")
+        return {
+            "strategy": coder_bundle.get("strategy", ""),
+            "risks": coder_bundle.get("risks", ""),
+            "verification_plan": coder_bundle.get("verification", ""),
+        }
 
     @staticmethod
     def _extract_stats(author_response: str) -> str:
@@ -825,8 +1071,17 @@ class PipelineRunCommand(BaseCommand):
             f"7. Success Gate: Is the final success message (`🎉 ...`) guarded so it cannot run if an earlier step fails?\n"
             f"8. Heredoc Delimiters: If shell heredocs are used, verify that delimiters are unindented on column 0.\n"
             f"9. Universal System Rules: Verify the script satisfies every rule in the Universal System Rules section below.{rules_block}\n\n"
-            f"### Decision Rule:\n"
-            f"Conclude your response with exactly `DECISION: APPROVED` if all criteria are satisfied, or `DECISION: REVISION_REQUESTED` followed by bullet points detailing the required fixes."
+            f"### Response Structure:\n"
+            f"Structure your response into exactly these sections:\n"
+            f"### 1. Verification Audit\n"
+            f"- Detail your step-by-step thinking as you audit the script against each checklist item and prompt requirements.\n"
+            f"- State the evidence found in the script (or what is missing) and analyze the reasoning behind your assessment.\n\n"
+            f"### 2. Risk & Regression Check\n"
+            f"- Evaluate potential side-effects, anti-patterns, or subtle bugs.\n\n"
+            f"### 3. Decision & Required Fixes\n"
+            f"Conclude with exactly `DECISION: APPROVED` if all criteria are satisfied, or `DECISION: REVISION_REQUESTED` followed by bullet points detailing the required fixes.\n\n"
+            f"### 4. Validation Evidence\n"
+            f"- Note specific line numbers and code references supporting your decision."
         )
 
     @staticmethod
@@ -850,9 +1105,33 @@ class PipelineRunCommand(BaseCommand):
 
     @staticmethod
     def _handle_review(args, review_verdict, prompt_content, final_code_block, reviewer_history,
-                       iteration, max_attempts, current_prompt, approved, abort_reason):
+                       iteration, max_attempts, current_prompt, approved, abort_reason,
+                       roles: dict | None = None):
         """Process the reviewer verdict: detect stuck loops, update history and prompt."""
         review_stats = PipelineRunCommand._extract_stats(review_verdict)
+
+        # Extract and stream Reviewer Verification Audit & Cognitive Analysis
+        clean_verdict = PipelineRunCommand._strip_stats(review_verdict)
+        audit_match = re.search(
+            r"###\s*(?:1\.\s*)?Verification\s*Audit(?:\s*&\s*Cognitive\s*Analysis)?\s*\n([\s\S]*?)(?=###\s*(?:2\.|3\.)|DECISION:|\Z)",
+            clean_verdict,
+            re.IGNORECASE,
+        )
+        audit_text = audit_match.group(1).strip() if audit_match else ""
+        if not audit_text and "DECISION:" in clean_verdict:
+            parts = clean_verdict.split("DECISION:", 1)
+            candidate = parts[0].strip()
+            if len(candidate) > 40:
+                audit_text = candidate
+
+        if audit_text:
+            transport.send_terminal_mcp("─── [REVIEWER VERIFICATION AUDIT & REASONING] ────────────")
+            transport.send_terminal_mcp(audit_text)
+            transport.send_terminal_mcp("──────────────────────────────────────────────────────────")
+
+        if roles is not None:
+            roles["reviewer"] = PipelineRunCommand._extract_role_bundle(clean_verdict, "reviewer")
+            roles["reviewer"]["model"] = args.reviewer
 
         verdict_decision = "DECISION: APPROVED" if "DECISION: APPROVED" in review_verdict else "DECISION: REVISION_REQUESTED"
         transport.send_terminal_mcp(f"📋 [Reviewer Verdict ({args.reviewer})]: {verdict_decision}")
@@ -898,7 +1177,7 @@ class PipelineRunCommand(BaseCommand):
             if not getattr(args, "no_orchestrate", False) and getattr(args, "orchestrator", None):
                 try:
                     current_prompt = PipelineRunCommand._reorchestrate(
-                        prompt_content, current_prompt, final_code_block, review_verdict, args
+                        prompt_content, current_prompt, final_code_block, review_verdict, args, roles=roles
                     )
                 except Exception as exc:  # noqa: BLE001 - reorchestration must never block
                     logger.warning("Re-orchestration pass skipped on error: %s", exc)
