@@ -31,3 +31,8 @@
   - 🤖 **Pipeline Delegation Mode** *(Activated explicitly by keywords: `"run pipeline"`, `"delegate"`, `"test local ai"`)*:
     - Antigravity writes the prompt spec (`sysadmin/prompts/*.md`); awaits human review approval; then delegates execution to the local Ollama multi-agent pipeline.
 
+## 5. Observability & Local AI Transparency
+- **Full Model Transparency**: When executing or querying local Ollama models (`ollama_chat`, `ollama_task_agent`, `build-and-run`, `pipeline-run`), prioritize full visibility. Never truncate, mute, or suppress the local model's reasoning, chain-of-thought, or structured tool calls.
+- **Local Learning & Dataset Research**: Local models run on self-hosted hardware for learning, evaluation, and fine-tuning. Unfiltered visibility into model outputs, reasoning traces, and error states is required for feedback collection and model improvement.
+- **PTY Streaming**: Always preserve model reasoning and diagnostic sections (`Analysis & Strategy`, `Verification & Testing`, `Risks & Edge Cases`) in stdout and active `terminal-mcp` logs.
+
