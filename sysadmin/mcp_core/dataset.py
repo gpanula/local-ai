@@ -89,7 +89,76 @@ def _build_task_prompt(record: dict) -> str:
     return "\n\n".join(prompt_parts)
 
 
-def export_dpo_records(records: List[dict], approved_only: bool = True) -> List[dict]:
+def _format_assistant_cot(
+    code: str,
+    reasoning: Optional[dict] = None,
+    role: str = "coder",
+    roles: Optional[dict] = None,
+) -> str:
+    """Format an assistant completion with structured Chain-of-Thought sections if reasoning is present."""
+    if roles and role in roles:
+        r_info = roles[role]
+        if role == "orchestrator":
+            sections = []
+            if r_info.get("strategy"):
+                sections.append(f"### Analysis & Strategy\n\n{r_info['strategy']}")
+            if r_info.get("risks"):
+                sections.append(f"### Risks & Constraints\n\n{r_info['risks']}")
+            if r_info.get("plan"):
+                sections.append(f"### Architecture & Plan\n\n{r_info['plan']}")
+            if r_info.get("gates"):
+                sections.append(f"### Acceptance Gates & Tests\n\n{r_info['gates']}")
+            return "\n\n".join(sections) if sections else code.strip()
+        elif role == "reviewer":
+            sections = []
+            if r_info.get("audit"):
+                sections.append(f"### Verification Audit\n\n{r_info['audit']}")
+            if r_info.get("risks"):
+                sections.append(f"### Risk & Regression Check\n\n{r_info['risks']}")
+            decision = r_info.get("decision", "APPROVED")
+            fixes = r_info.get("fixes", "")
+            fixes_block = f"\n{fixes}" if fixes else ""
+            sections.append(f"### Decision & Required Fixes\n\nDECISION: {decision}{fixes_block}")
+            if r_info.get("evidence"):
+                sections.append(f"### Validation Evidence\n\n{r_info['evidence']}")
+            return "\n\n".join(sections) if sections else code.strip()
+        elif role == "coder":
+            strategy = (r_info.get("strategy") or "").strip()
+            risks = (r_info.get("risks") or "").strip()
+            verification = (r_info.get("verification") or "").strip()
+            sections = []
+            if strategy:
+                sections.append(f"### Analysis & Strategy\n\n{strategy}")
+            if risks:
+                sections.append(f"### Risks & Edge Cases\n\n{risks}")
+            sections.append(f"### Implementation / Solution\n\n```bash\n{code.strip()}\n```")
+            if verification:
+                sections.append(f"### Verification & Testing\n\n{verification}")
+            return "\n\n".join(sections) if sections else code.strip()
+
+    if not reasoning or not isinstance(reasoning, dict):
+        return code.strip()
+
+    strategy = (reasoning.get("strategy") or "").strip()
+    risks = (reasoning.get("risks") or "").strip()
+    verification = (reasoning.get("verification_plan") or "").strip()
+
+    if not strategy and not risks and not verification:
+        return code.strip()
+
+    sections = []
+    if strategy:
+        sections.append(f"### Analysis & Strategy\n\n{strategy}")
+    if risks:
+        sections.append(f"### Risks & Edge Cases\n\n{risks}")
+    sections.append(f"### Implementation / Solution\n\n```bash\n{code.strip()}\n```")
+    if verification:
+        sections.append(f"### Verification & Testing\n\n{verification}")
+
+    return "\n\n".join(sections)
+
+
+def export_dpo_records(records: List[dict], approved_only: bool = True, include_cot: bool = True, role: str = "coder") -> List[dict]:
     """Convert trajectory records to standard DPO prompt/chosen/rejected triplets."""
     dpo_items = []
     for r in records:
@@ -101,10 +170,12 @@ def export_dpo_records(records: List[dict], approved_only: bool = True) -> List[
             continue
 
         prompt = _build_task_prompt(r)
+        chosen_content = _format_assistant_cot(chosen, r.get("reasoning"), role=role, roles=r.get("roles")) if include_cot else chosen.strip()
         dpo_items.append({
             "id": r.get("id", ""),
+            "category": r.get("canonical_category", ""),
             "prompt": prompt,
-            "chosen": chosen.strip(),
+            "chosen": chosen_content,
             "rejected": rejected.strip(),
             "critique": r.get("reviewer_critique", ""),
             "task_file": r.get("task_file", ""),
@@ -113,7 +184,7 @@ def export_dpo_records(records: List[dict], approved_only: bool = True) -> List[
     return dpo_items
 
 
-def export_sft_multiturn_records(records: List[dict], approved_only: bool = True) -> List[dict]:
+def export_sft_multiturn_records(records: List[dict], approved_only: bool = True, include_cot: bool = True, role: str = "coder") -> List[dict]:
     """Convert trajectory records to multi-turn self-correction conversation turns."""
     sft_items = []
     for r in records:
@@ -126,16 +197,18 @@ def export_sft_multiturn_records(records: List[dict], approved_only: bool = True
 
         critique = r.get("reviewer_critique", "Pre-flight linter findings detected syntax or defensive violations.")
         user_prompt = _build_task_prompt(r)
+        chosen_content = _format_assistant_cot(chosen, r.get("reasoning"), role=role, roles=r.get("roles")) if include_cot else chosen.strip()
 
         messages = [
             {"role": "system", "content": _DEFAULT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
             {"role": "assistant", "content": rejected.strip()},
             {"role": "user", "content": f"### Reviewer / Linter Findings:\n{critique}\n\nPlease fix all findings and output the clean, defensive script."},
-            {"role": "assistant", "content": chosen.strip()},
+            {"role": "assistant", "content": chosen_content},
         ]
         sft_items.append({
             "id": r.get("id", ""),
+            "category": r.get("canonical_category", ""),
             "messages": messages,
             "task_file": r.get("task_file", ""),
         })
@@ -196,7 +269,7 @@ def synthesize_lesson_contrastive_pairs() -> List[dict]:
     ]
 
 
-def export_sft_direct_records(records: List[dict], approved_only: bool = True) -> List[dict]:
+def export_sft_direct_records(records: List[dict], approved_only: bool = True, include_cot: bool = True, role: str = "coder") -> List[dict]:
     """Convert trajectory records to single-turn direct instruction-tuning examples."""
     sft_items = []
     for r in records:
@@ -208,13 +281,15 @@ def export_sft_direct_records(records: List[dict], approved_only: bool = True) -
             continue
 
         user_prompt = _build_task_prompt(r)
+        assistant_content = _format_assistant_cot(chosen, r.get("reasoning"), role=role, roles=r.get("roles")) if include_cot else chosen.strip()
         messages = [
             {"role": "system", "content": _DEFAULT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": chosen.strip()},
+            {"role": "assistant", "content": assistant_content},
         ]
         sft_items.append({
             "id": r.get("id", ""),
+            "category": r.get("canonical_category", ""),
             "messages": messages,
             "task_file": r.get("task_file", ""),
         })
@@ -228,6 +303,7 @@ def export_datasets(
     approved_only: bool = True,
     include_synthetic_lessons: bool = False,
     role: Optional[str] = None,
+    include_cot: bool = True,
 ) -> Dict[str, int]:
     """Export trajectories and synthetic lesson exemplars to formatted JSONL datasets.
 
@@ -238,16 +314,18 @@ def export_datasets(
 
     records = load_trajectories(trajectories_path)
     selected_formats = formats or ["dpo", "sft_multiturn", "sft_direct"]
+    target_role = role or "coder"
     counts = {}
 
     # Gather synthetic lesson pairs
     synth_pairs = synthesize_lesson_contrastive_pairs() if include_synthetic_lessons else []
 
     if "dpo" in selected_formats or "all" in selected_formats:
-        dpo_data = export_dpo_records(records, approved_only=approved_only)
+        dpo_data = export_dpo_records(records, approved_only=approved_only, include_cot=include_cot, role=target_role)
         for s in synth_pairs:
             dpo_data.append({
                 "id": s["id"],
+                "category": s.get("category", ""),
                 "prompt": f"### Applicable System Rules:\n- {s.get('category', 'Defensive Standard')}\n\nTask: {s['prompt']}\n\nPlease author the implementation script adhering to all defensive standards.",
                 "chosen": s["chosen"].strip(),
                 "rejected": s["rejected"].strip(),
@@ -262,10 +340,11 @@ def export_datasets(
         counts["dpo"] = len(dpo_data)
 
     if "sft_multiturn" in selected_formats or "all" in selected_formats:
-        sft_multi = export_sft_multiturn_records(records, approved_only=approved_only)
+        sft_multi = export_sft_multiturn_records(records, approved_only=approved_only, include_cot=include_cot, role=target_role)
         for s in synth_pairs:
             sft_multi.append({
                 "id": s["id"],
+                "category": s.get("category", ""),
                 "messages": [
                     {"role": "system", "content": _DEFAULT_SYSTEM_PROMPT},
                     {"role": "user", "content": s["prompt"]},
@@ -282,10 +361,11 @@ def export_datasets(
         counts["sft_multiturn"] = len(sft_multi)
 
     if "sft_direct" in selected_formats or "all" in selected_formats:
-        sft_direct = export_sft_direct_records(records, approved_only=approved_only)
+        sft_direct = export_sft_direct_records(records, approved_only=approved_only, include_cot=include_cot, role=target_role)
         for s in synth_pairs:
             sft_direct.append({
                 "id": s["id"],
+                "category": s.get("category", ""),
                 "messages": [
                     {"role": "system", "content": _DEFAULT_SYSTEM_PROMPT},
                     {"role": "user", "content": s["prompt"]},

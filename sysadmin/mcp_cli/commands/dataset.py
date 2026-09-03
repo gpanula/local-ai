@@ -41,6 +41,17 @@ class ExportDatasetCommand(BaseCommand):
             action="store_true",
             help="Include synthetic lesson exemplars synthesized from lessons.md",
         )
+        parser.add_argument(
+            "--no-cot",
+            action="store_true",
+            help="Exclude Chain-of-Thought reasoning (Analysis & Strategy, Risks) from exported completions",
+        )
+        parser.add_argument(
+            "--role",
+            choices=["coder", "orchestrator", "reviewer", "security", "sysadmin", "architect"],
+            default="coder",
+            help="Target role for Chain-of-Thought dataset export (default: coder)",
+        )
 
     def run(self, args):
         input_path = args.input
@@ -48,6 +59,8 @@ class ExportDatasetCommand(BaseCommand):
         format_type = args.format
         approved_only = not args.all_outcomes
         include_synthetic = getattr(args, "include_synthetic", False)
+        include_cot = not getattr(args, "no_cot", False)
+        target_role = getattr(args, "role", "coder")
 
         if not os.path.exists(input_path):
             print(f"❌ Trajectory file not found at '{input_path}'. Run pipeline tasks with rework to generate training data.")
@@ -61,6 +74,8 @@ class ExportDatasetCommand(BaseCommand):
         print(f"  Output Dir:   {output_dir}")
         print(f"  Filter:       {'Approved runs only' if approved_only else 'All outcomes'}")
         print(f"  Synthetic:    {'Included' if include_synthetic else 'Excluded'}")
+        print(f"  Role:         {target_role}")
+        print(f"  Reasoning:    {'Chain-of-Thought (CoT) enabled' if include_cot else 'Code-only'}")
         print("-" * 60)
 
         counts = export_datasets(
@@ -69,6 +84,8 @@ class ExportDatasetCommand(BaseCommand):
             formats=formats,
             approved_only=approved_only,
             include_synthetic_lessons=include_synthetic,
+            role=target_role,
+            include_cot=include_cot,
         )
 
         total_exported = sum(counts.values())

@@ -156,3 +156,68 @@ def test_export_dataset_cli(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Successfully exported 3 training sample(s)" in out
+
+
+def test_cot_reasoning_in_sft_and_dpo():
+    rec = _sample_inline_trajectory(id="traj-cot")
+    rec["reasoning"] = {
+        "strategy": "Deconstruct task requirements and quote variables.",
+        "risks": "Unquoted expansion leads to word splitting.",
+        "verification_plan": "Execute with mock input and check exit code.",
+    }
+    # Test SFT direct with CoT
+    sft_records = export_sft_direct_records([rec], include_cot=True)
+    assert len(sft_records) == 1
+    assistant_msg = sft_records[0]["messages"][-1]["content"]
+    assert "### Analysis & Strategy" in assistant_msg
+    assert "Deconstruct task requirements" in assistant_msg
+    assert "### Risks & Edge Cases" in assistant_msg
+    assert "### Implementation / Solution" in assistant_msg
+    assert "### Verification & Testing" in assistant_msg
+    assert 'echo "$foo"' in assistant_msg
+
+    # Test SFT direct without CoT
+    sft_no_cot = export_sft_direct_records([rec], include_cot=False)
+    assert "### Analysis & Strategy" not in sft_no_cot[0]["messages"][-1]["content"]
+    assert sft_no_cot[0]["messages"][-1]["content"] == '#!/bin/bash\nset -euo pipefail\necho "$foo"'
+
+    # Test DPO with CoT
+    dpo_records = export_dpo_records([rec], include_cot=True)
+    assert "### Analysis & Strategy" in dpo_records[0]["chosen"]
+    assert dpo_records[0]["rejected"] == "#!/bin/bash\necho $foo"
+
+
+def test_role_specific_cot_and_category_export():
+    rec = _sample_inline_trajectory(id="traj-role")
+    rec["canonical_category"] = "Multi-Agent Orchestration"
+    rec["roles"] = {
+        "orchestrator": {
+            "strategy": "Plan 3 phases",
+            "risks": "Contention deadlock",
+            "plan": "Deploy workers",
+            "gates": "Reviewer signoff",
+        },
+        "reviewer": {
+            "audit": "All rules verified",
+            "risks": "No side-effects",
+            "decision": "APPROVED",
+            "fixes": "",
+            "evidence": "Line 4 verified",
+        },
+    }
+
+    # Test Orchestrator role export
+    orch_dpo = export_dpo_records([rec], role="orchestrator", include_cot=True)
+    assert orch_dpo[0]["category"] == "Multi-Agent Orchestration"
+    assert "### Analysis & Strategy\n\nPlan 3 phases" in orch_dpo[0]["chosen"]
+    assert "### Architecture & Plan\n\nDeploy workers" in orch_dpo[0]["chosen"]
+    assert "### Acceptance Gates & Tests\n\nReviewer signoff" in orch_dpo[0]["chosen"]
+
+    # Test Reviewer role export
+    rev_sft = export_sft_direct_records([rec], role="reviewer", include_cot=True)
+    assert rev_sft[0]["category"] == "Multi-Agent Orchestration"
+    rev_msg = rev_sft[0]["messages"][-1]["content"]
+    assert "### Verification Audit\n\nAll rules verified" in rev_msg
+    assert "DECISION: APPROVED" in rev_msg
+    assert "Line 4 verified" in rev_msg
+
