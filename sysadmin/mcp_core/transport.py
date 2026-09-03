@@ -68,59 +68,52 @@ class TerminalMCPSession:
 
     @property
     def is_available(self) -> bool:
-        return self._proc is not None
+        return getattr(self, "_sock", None) is not None or self._proc is not None
 
     def __enter__(self) -> "TerminalMCPSession":
         if not is_valid_mcp_socket(self._socket_path):
             return self
+        import socket
         try:
-            self._proc = subprocess.Popen(
-                ["npx", "-y", "github:gpanula/terminal-mcp"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            self._write({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-                "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "client", "version": "1.0"},
-            }})
-            self._read_line()
-            self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        except OSError:
-            # Terminal-mcp binary unavailable (e.g. npx not installed): degrade to a safe no-op.
-            self._proc = None
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.connect(self._socket_path)
+            self._file = self._sock.makefile("r", encoding="utf-8")
+        except (OSError, socket.error):
+            self._sock = None
+            self._file = None
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._proc is not None:
+        if getattr(self, "_file", None) is not None:
             try:
-                self._proc.terminate()
+                self._file.close()
+            except Exception:
+                pass
+        if getattr(self, "_sock", None) is not None:
+            try:
+                self._sock.close()
             except Exception:
                 pass
 
-    def _write(self, payload: dict) -> None:
-        if self._proc is None:
-            return
-        self._proc.stdin.write(json.dumps(payload) + "\n")
-        self._proc.stdin.flush()
-
-    def _read_line(self) -> str:
-        if self._proc is None:
-            return ""
-        return self._proc.stdout.readline()
-
     def type(self, text: str) -> None:
-        self._write({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                     "params": {"name": "type", "arguments": {"text": text.rstrip("\n") + "\n"}}})
-        self._read_line()
+        if getattr(self, "_sock", None) is None:
+            return
+        payload = {"id": 1, "method": "type", "params": {"text": text.rstrip("\n") + "\n"}}
+        self._sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        if self._file:
+            self._file.readline()
 
     def get_content(self, visible_only: bool = False) -> str:
-        self._write({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                     "params": {"name": "getContent", "arguments": {"visibleOnly": visible_only}}})
-        res = json.loads(self._read_line())
-        return res.get("result", {}).get("content", [{}])[0].get("text", "")
+        if getattr(self, "_sock", None) is None:
+            return ""
+        payload = {"id": 2, "method": "getContent", "params": {"visibleOnly": visible_only}}
+        self._sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        if self._file:
+            line = self._file.readline()
+            if line:
+                res = json.loads(line)
+                return res.get("result", {}).get("content", [{}])[0].get("text", "")
+        return ""
 
 
 def send_terminal_mcp(text: str) -> None:

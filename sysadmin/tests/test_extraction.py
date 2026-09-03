@@ -100,3 +100,44 @@ def test_stuck_loop_empty_history_uses_abort_reason(monkeypatch):
     assert lesson["lesson_type"] == "intractable_pattern"
     assert lesson["outcome"] == "aborted"
     assert "Stuck loop" in lesson["proposed_rule"]
+
+
+def test_extract_lesson_from_success_json(monkeypatch):
+    from mcp_core.extraction import extract_lesson_from_success
+
+    def _fake(tool_name, arguments):
+        assert tool_name == "ollama_chat"
+        return (
+            '{"category": "sandbox_defense", "keywords": ["seccomp", "socket"], '
+            '"proposed_rule": "Fallback to subprocess when AF_UNIX is restricted."}'
+        )
+
+    monkeypatch.setattr(transport, "call_mcp", _fake)
+    lesson = extract_lesson_from_success(
+        strategy="Connect via Unix domain socket with robust fallback",
+        risks="Seccomp sandbox blocks AF_UNIX syscalls inside container",
+        task_file="sysadmin/prompts/hello.md",
+        prompt_content="Task context",
+        model="qwen3:8b",
+    )
+    assert lesson is not None
+    assert lesson["category"] == "sandbox_defense"
+    assert lesson["keywords"] == ["seccomp", "socket"]
+    assert "Fallback to subprocess" in lesson["proposed_rule"]
+    assert lesson["lesson_type"] == "pre_emptive_defense"
+    assert lesson["outcome"] == "approved"
+
+
+def test_extract_lesson_from_success_too_short():
+    from mcp_core.extraction import extract_lesson_from_success
+
+    # Too short risks string (< 30 chars) returns None
+    lesson = extract_lesson_from_success(
+        strategy="Simple echo",
+        risks="None",
+        task_file="sysadmin/prompts/hello.md",
+        prompt_content="Task context",
+        model="qwen3:8b",
+    )
+    assert lesson is None
+
