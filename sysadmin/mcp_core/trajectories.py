@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from mcp_core.audit import normalize_category
 from mcp_core.workspace import WORKSPACE_ROOT
 
 # Default trajectory store (relative to workspace root).
@@ -43,7 +44,7 @@ _STOPWORDS = {
 
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string (second precision)."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 def _new_trajectory_id() -> str:
@@ -58,10 +59,7 @@ def _critique_keywords(critique: str) -> set:
 
 
 def _focused_snippet(chosen: str, critique: str, radius: int = FOCUSED_SNIPPET_RADIUS) -> str:
-    """Return ±``radius`` lines of ``chosen`` around the first critique-keyword match.
-
-    Falls back to the first ``2*radius`` lines when no keyword matches.
-    """
+    """Return ±``radius`` lines of ``chosen`` around the first critique-keyword match."""
     lines = (chosen or "").splitlines()
     if not lines:
         return ""
@@ -122,12 +120,37 @@ def _build_record(
     else:
         outcome = "failed"
 
+    reasoning = pipeline_result.get("reasoning") or {}
+    roles = pipeline_result.get("roles") or {}
+    # Ensure coder reasoning is represented in roles["coder"]
+    if "coder" not in roles and reasoning:
+        roles["coder"] = {
+            "model": pipeline_result.get("author_model", ""),
+            "strategy": reasoning.get("strategy", ""),
+            "risks": reasoning.get("risks", ""),
+            "solution": chosen or rejected or "",
+            "verification": reasoning.get("verification_plan", ""),
+        }
+
+    raw_category = pipeline_result.get("category", "")
+    keywords = pipeline_result.get("keywords", [])
+    if not keywords and prompt_content:
+        words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", prompt_content)
+        keywords = [w.lower() for w in words if w.lower() not in _STOPWORDS][:10]
+    canonical_category = normalize_category(keywords, raw_category)
+
     record: Dict[str, Any] = {
         "id": _new_trajectory_id(),
         "timestamp": _now_iso(),
         "task_file": task_file,
+        "canonical_category": canonical_category,
+        "prompt": prompt_content,
+        "author_model": pipeline_result.get("author_model", ""),
         "injected_lessons": pipeline_result.get("injected_lessons", []),
         "reviewer_critique": pipeline_result.get("last_critique", ""),
+        "reasoning": reasoning,
+        "roles": roles,
+        "telemetry": pipeline_result.get("author_stats", {}),
         "iterations": iterations,
         "outcome": outcome,
         "payload_type": None,
