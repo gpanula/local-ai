@@ -22,8 +22,8 @@ create_venv() {
 
 # Function to install pip if not available
 install_pip() {
-    if ! command -v pip &> /dev/null; then
-        echo "Installing pip..."
+    if [ ! -x "${VENV_DIR}/bin/pip" ]; then
+        echo "Installing pip into virtual environment..."
         curl -sSL https://bootstrap.pypa.io/get-pip.py -o "${TEMP_DIR}/get-pip.py" -H "User-Agent: Python"
         "${VENV_DIR}/bin/python" "${TEMP_DIR}/get-pip.py"
     fi
@@ -36,7 +36,7 @@ upgrade_pip_tools() {
 
 # Function to install required packages
 install_packages() {
-    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml
+    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec
 }
 
 # Function to verify package installation
