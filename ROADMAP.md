@@ -79,8 +79,10 @@ This workspace organizes our local AI research, workflows, and experiments acros
 
 ```
 ~/Projects/local-ai/
+├── README.md               # Primary project documentation and Graphify setup guide
 ├── OLLAMA_SUMMARY.md       # Hardware baseline, driver specs, and verified offload metrics
 ├── ROADMAP.md              # This project roadmap and technical framework
+├── graphify-out/           # Generated knowledge graph, HTML maps, callflows, and wiki
 ├── loom/                   # Loom harness setup, configuration, and runs
 ├── sysadmin/               # Linux admin workflows, Ansible modules, and test environments
 ├── moe/                    # MoE benchmarks, routing analysis, and offload tests

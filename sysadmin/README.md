@@ -77,6 +77,15 @@ The architecture unites local models, sandboxed interactive terminals, a persist
 
 ---
 
+## 🛠️ Toolchain & Setup Scripts
+
+* **[`setup_graphify.sh`](setup_graphify.sh)**: Deterministic installer for [Graphify](https://github.com/Graphify-Labs/graphify) (`graphifyy`) into `sysadmin/venv` using standard `pip` (without `uv`).
+* **[`setup_p0_toolchain.sh`](setup_p0_toolchain.sh)**: P0 toolchain setup (Ansible, ansible-lint, ShellCheck, PyYAML, pytest, sqlite-vec).
+* **[`shell_aliases.sh`](shell_aliases.sh)**: Shell aliases including `localai-graphify`, terminal MCP launchers, and Ollama model controls.
+* **[`start_terminal_mcp.sh`](start_terminal_mcp.sh)**: Script to start sandboxed `terminal-mcp` with asciinema session recording.
+
+---
+
 ## ⚡ Execution Modes (per `AGENTS.md`)
 
 1. ⚡ **Direct Dev Mode** *(Default for infrastructure, tooling, memory, modelfiles, datasets)*:
