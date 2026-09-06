@@ -64,3 +64,8 @@ recordings/
 # roo / zoo code bits
 .roo/
 .roomodes
+
+# Graphify knowledge graph outputs
+graphify-out/
+.graphify_*.json
+.graphify_uncached.txt

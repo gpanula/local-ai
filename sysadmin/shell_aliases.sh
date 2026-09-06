@@ -110,3 +110,6 @@ alias localai-train-16gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train -
 alias localai-train-24gb="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --tier 24gb"
 alias localai-train-dpo="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --method dpo"
 alias localai-train-sft="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --method sft"
+
+# Codebase Knowledge Graph (Graphify)
+alias localai-graphify="${LOCAL_AI_DIR}/sysadmin/venv/bin/graphify"
