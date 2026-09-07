@@ -560,6 +560,10 @@ class PipelineRunCommand(BaseCommand):
             transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats, role='orchestrator')}")
         transport.send_terminal_mcp("───────────────────────────────────────────────────")
 
+        emitter = EventEmitter.get_current()
+        if emitter:
+            emitter.thinking_chunk(plan_body, stage="orchestrate", model=orchestrator_model, is_final=True)
+
         if roles is not None:
             roles["orchestrator"] = PipelineRunCommand._extract_role_bundle(plan_body, "orchestrator")
             roles["orchestrator"]["model"] = orchestrator_model
@@ -624,6 +628,10 @@ class PipelineRunCommand(BaseCommand):
         if stats:
             transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(stats, role='orchestrator')}")
         transport.send_terminal_mcp("───────────────────────────────────────────────")
+
+        emitter = EventEmitter.get_current()
+        if emitter:
+            emitter.thinking_chunk(revised_plan_body, stage="orchestrate", model=orchestrator_model, is_final=True)
 
         if roles is not None:
             roles["orchestrator"] = PipelineRunCommand._extract_role_bundle(revised_plan_body, "orchestrator")

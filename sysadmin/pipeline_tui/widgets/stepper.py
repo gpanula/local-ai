@@ -31,6 +31,7 @@ class PipelineStepper(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.current_stage = "idle"
+        self.selected_stage = "author"
         self.iteration = 1
         self.max_retries = 3
         self.outcome = "in_progress"
@@ -40,6 +41,7 @@ class PipelineStepper(Widget):
 
     def update_state(self, state) -> None:
         self.current_stage = state.current_stage
+        self.selected_stage = getattr(state, "selected_stage", self.selected_stage)
         self.iteration = state.active_iteration_idx
         self.max_retries = state.max_retries
         self.outcome = state.outcome
@@ -62,16 +64,28 @@ class PipelineStepper(Widget):
             if i > 0:
                 text.append(" ──> ", style="dim")
 
+            is_selected = (key == self.selected_stage)
+            prefix = "▶ " if is_selected else ""
+            suffix = " ◀" if is_selected else ""
+
             if is_finished:
                 if self.outcome in ("approved", "finished"):
-                    text.append(f"[✓ {label}]", style="bold green")
+                    badge = f"{prefix}[✓ {label}]{suffix}"
+                    style = "bold black on green" if is_selected else "bold green"
                 else:
-                    text.append(f"[✗ {label}]", style="bold red")
+                    badge = f"{prefix}[✗ {label}]{suffix}"
+                    style = "bold white on red" if is_selected else "bold red"
             elif curr_idx == i:
-                text.append(f"[⟳ {label}]", style="bold black on yellow")
+                badge = f"{prefix}[⟳ {label}]{suffix}"
+                style = "bold white on dark_goldenrod" if is_selected else "bold black on yellow"
             elif curr_idx > i:
-                text.append(f"[✓ {label}]", style="green")
+                badge = f"{prefix}[✓ {label}]{suffix}"
+                style = "bold black on light_green" if is_selected else "green"
             else:
-                text.append(f"[  {label}]", style="dim")
+                badge = f"{prefix}[  {label}]{suffix}"
+                style = "bold white on blue" if is_selected else "dim"
 
+            text.append(badge, style=style)
+
+        text.append(" │ [←/→] Navigate Stages", style="dim cyan")
         content.update(text)

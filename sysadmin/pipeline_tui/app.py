@@ -42,6 +42,10 @@ class PipelineWatchApp(App):
         Binding("f", "snap_terminal", "Follow Console"),
         Binding("o", "open_picker", "Open Run"),
         Binding("r", "open_picker", "Open Run"),
+        Binding("left", "prev_stage", "Prev Stage", priority=True),
+        Binding("right", "next_stage", "Next Stage", priority=True),
+        Binding("h", "prev_stage", "Prev Stage", show=False, priority=True),
+        Binding("l", "next_stage", "Next Stage", show=False, priority=True),
         Binding("left_square_bracket", "prev_iteration", "Prev Iter"),
         Binding("right_square_bracket", "next_iteration", "Next Iter"),
     ]
@@ -194,35 +198,72 @@ class PipelineWatchApp(App):
                 pass
             await asyncio.sleep(0.2)
 
-    def _apply_single_event_ui(self, evt: Dict[str, Any]) -> None:
-        etype = evt.get("type")
-        self.query_one("#header", PipelineHeader).update_state(self.state)
+    def _update_stage_view(self) -> None:
+        """Update Stepper, Active Thinking, and Cognitive Pillars for the selected stage."""
         self.query_one("#stepper", PipelineStepper).update_state(self.state)
 
         cur_it = self.state.current_iteration()
-        if etype == "thinking_chunk":
-            self.query_one("#thinking-view", ActiveThinkingView).update_thinking(cur_it.thinking)
-        elif etype in ("reasoning_chunk", "code_synthesized", "linter_result", "review_result"):
+        st = self.state.selected_stage
+        model = self.state.get_stage_model(st)
+        thinking_text = self.state.get_stage_thinking(st)
+
+        self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking(st, model, thinking_text)
+
+        prev_it = self.state.iterations.get(cur_it.iteration - 1)
+        prev_code = prev_it.code if prev_it else ""
+        self.query_one("#pillars-view", CognitivePillarsView).update_state(
+            cur_it, prev_code=prev_code, selected_stage=st
+        )
+
+    def _apply_single_event_ui(self, evt: Dict[str, Any]) -> None:
+        etype = evt.get("type")
+        self.query_one("#header", PipelineHeader).update_state(self.state)
+
+        cur_it = self.state.current_iteration()
+        if etype in ("stage_transition", "pipeline_start"):
+            self._update_stage_view()
+        elif etype == "thinking_chunk":
+            st = evt.get("data", {}).get("stage") or self.state.current_stage
+            if st == self.state.selected_stage or (self.state.selected_stage == "author" and st not in ("orchestrate", "lint", "review", "execute")):
+                model = self.state.get_stage_model(self.state.selected_stage)
+                thinking = self.state.get_stage_thinking(self.state.selected_stage)
+                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking(
+                    self.state.selected_stage, model, thinking
+                )
+        elif etype in ("reasoning_chunk", "code_synthesized"):
             prev_it = self.state.iterations.get(cur_it.iteration - 1)
             prev_code = prev_it.code if prev_it else ""
-            self.query_one("#pillars-view", CognitivePillarsView).update_state(cur_it, prev_code=prev_code)
+            self.query_one("#pillars-view", CognitivePillarsView).update_state(
+                cur_it, prev_code=prev_code, selected_stage=self.state.selected_stage
+            )
+        elif etype in ("linter_result", "review_result"):
+            prev_it = self.state.iterations.get(cur_it.iteration - 1)
+            prev_code = prev_it.code if prev_it else ""
+            self.query_one("#pillars-view", CognitivePillarsView).update_state(
+                cur_it, prev_code=prev_code, selected_stage=self.state.selected_stage
+            )
+            if self.state.selected_stage in ("lint", "review"):
+                model = self.state.get_stage_model(self.state.selected_stage)
+                thinking = self.state.get_stage_thinking(self.state.selected_stage)
+                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking(
+                    self.state.selected_stage, model, thinking
+                )
         elif etype == "context_window":
             self.query_one("#context-drawer", ContextWindowDrawer).update_context(cur_it.context_window)
         elif etype == "terminal_chunk":
             text = evt.get("data", {}).get("text", "")
             self.query_one("#terminal-drawer", TerminalConsoleDrawer).append_line(text)
+            if self.state.selected_stage == "execute":
+                model = self.state.get_stage_model("execute")
+                thinking = self.state.get_stage_thinking("execute")
+                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking("execute", model, thinking)
 
     def _refresh_all_widgets(self) -> None:
         """Full refresh of all UI components to reflect current state."""
         self.query_one("#header", PipelineHeader).update_state(self.state)
-        self.query_one("#stepper", PipelineStepper).update_state(self.state)
+        self._update_stage_view()
 
         cur_it = self.state.current_iteration()
-        self.query_one("#thinking-view", ActiveThinkingView).update_thinking(cur_it.thinking)
-
-        prev_it = self.state.iterations.get(cur_it.iteration - 1)
-        prev_code = prev_it.code if prev_it else ""
-        self.query_one("#pillars-view", CognitivePillarsView).update_state(cur_it, prev_code=prev_code)
         self.query_one("#context-drawer", ContextWindowDrawer).update_context(cur_it.context_window)
 
         # Terminal lines
@@ -231,6 +272,14 @@ class PipelineWatchApp(App):
             term.append_line(line)
 
     # --- Actions ---
+
+    def action_prev_stage(self) -> None:
+        self.state.prev_stage()
+        self._update_stage_view()
+
+    def action_next_stage(self) -> None:
+        self.state.next_stage()
+        self._update_stage_view()
 
     def action_toggle_context(self) -> None:
         self.query_one("#context-drawer", ContextWindowDrawer).toggle()

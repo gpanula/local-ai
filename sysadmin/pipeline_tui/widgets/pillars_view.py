@@ -49,12 +49,26 @@ class CognitivePillarsView(Widget):
                 with VerticalScroll(classes="pillar-scroll"):
                     yield Static("No reviewer critique or linter findings.", id="critique-content")
 
-    def update_state(self, iteration_state, prev_code: str = "") -> None:
+    def update_state(self, iteration_state, prev_code: str = "", selected_stage: str = "author") -> None:
         reasoning = iteration_state.reasoning or {}
         strat = reasoning.get("strategy") or "No explicit strategy extracted."
         risks = reasoning.get("risks") or "No explicit risks extracted."
         verif = reasoning.get("verification_plan") or "No explicit verification plan extracted."
         code = iteration_state.code or ""
+
+        # Check for orchestrator role details if orchestrate stage is selected
+        roles = iteration_state.review.get("roles") or {}
+        orch = roles.get("orchestrator") or roles.get("architect") or {}
+        if selected_stage == "orchestrate" and orch:
+            orch_strat = orch.get("strategy") or orch.get("analysis")
+            orch_risks = orch.get("risks")
+            orch_sol = orch.get("solution") or orch.get("plan")
+            if orch_strat:
+                strat = f"─── Orchestrator Planning & Strategy ({orch.get('model', 'orchestrator')}) ───\n\n{orch_strat}"
+            if orch_risks:
+                risks = f"─── Orchestrator Architectural Risks ───\n\n{orch_risks}"
+            if orch_sol:
+                verif = f"─── Orchestrator Task DAG & Plan ───\n\n{orch_sol}"
 
         # Strategy
         try:
@@ -123,5 +137,22 @@ class CognitivePillarsView(Widget):
                 crit_text.append("Awaiting linter and reviewer stages...")
 
             critique_widget.update(crit_text)
+        except Exception:
+            pass
+
+        # Automatically bring up the corresponding pillar tab for the active stage
+        target_tab = "tab-code"
+        if selected_stage == "orchestrate":
+            target_tab = "tab-strategy"
+        elif selected_stage == "author":
+            target_tab = "tab-code"
+        elif selected_stage in ("lint", "review"):
+            target_tab = "tab-critique"
+        elif selected_stage == "execute":
+            target_tab = "tab-code"
+
+        try:
+            tabs = self.query_one("#pillars-tabs", TabbedContent)
+            tabs.active = target_tab
         except Exception:
             pass

@@ -208,6 +208,32 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         },
     })
 
+    # 2.5 stage: orchestrate
+    orch_info = roles.get("orchestrator") or roles.get("architect") or {}
+    orch_model = orch_info.get("model") or author_model
+    orch_analysis = orch_info.get("analysis") or orch_info.get("strategy") or "Analyzed prompt requirements and formulated execution plan."
+    orch_risks = orch_info.get("risks") or "No architectural blockers identified."
+    orch_solution = orch_info.get("solution") or "Decomposed into synthesis, static linting, reviewer verification, and execution."
+
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "stage_transition",
+        "data": {"stage": "orchestrate", "iteration": 1},
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "thinking_chunk",
+        "data": {
+            "iteration": 1,
+            "stage": "orchestrate",
+            "model": orch_model,
+            "chunk": f"Orchestrator Analysis:\n{orch_analysis}\n\nArchitectural Risks:\n{orch_risks}\n\nTask DAG Solution:\n{orch_solution}",
+            "is_final": True,
+        },
+    })
+
     # 3. stage: author
     events.append({
         "run_id": run_id,
@@ -228,6 +254,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "type": "thinking_chunk",
         "data": {
             "iteration": 1,
+            "stage": "author",
             "model": author_model,
             "chunk": f"Strategy:\n{strategy}\n\nRisks:\n{risks}" if (strategy or risks) else "Synthesized defensive implementation plan.",
             "is_final": True,

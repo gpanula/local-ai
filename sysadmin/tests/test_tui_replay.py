@@ -115,3 +115,79 @@ def test_app_pilot_live_watch_mode():
             await pilot.press("q")
 
     asyncio.run(_run())
+
+
+def test_app_pilot_stage_navigation_with_arrows():
+    """Verify navigating stages with left and right arrow keys updates thinking and pillars."""
+    import asyncio
+    from pipeline_tui.app import PipelineWatchApp
+    from textual.widgets import Static, TabbedContent
+
+    async def _run():
+        app = PipelineWatchApp(target_run_id="latest", is_replay=True)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+
+            thinking_view = app.query_one("#thinking-view")
+            header_widget = thinking_view.query_one("#thinking-header", Static)
+            pillars_tabs = app.query_one("#pillars-tabs", TabbedContent)
+
+            # Replay of latest ended at 'review' stage
+            assert app.state.selected_stage == "review"
+
+            # Move left: review -> lint
+            await pilot.press("left")
+            assert app.state.selected_stage == "lint"
+            assert "LINT" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-critique"
+
+            # Move left: lint -> author
+            await pilot.press("left")
+            assert app.state.selected_stage == "author"
+            assert "AUTHOR" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-code"
+
+            # Move left: author -> orchestrate
+            await pilot.press("left")
+            assert app.state.selected_stage == "orchestrate"
+            assert "ORCHESTRATE" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-strategy"
+
+            # Bound check: left again shouldn't go past orchestrate
+            await pilot.press("left")
+            assert app.state.selected_stage == "orchestrate"
+
+            # Move right: orchestrate -> author
+            await pilot.press("right")
+            assert app.state.selected_stage == "author"
+            assert "AUTHOR" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-code"
+
+            # Move right: author -> lint
+            await pilot.press("right")
+            assert app.state.selected_stage == "lint"
+            assert "LINT" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-critique"
+
+            # Move right: lint -> review
+            await pilot.press("right")
+            assert app.state.selected_stage == "review"
+            assert "REVIEW" in str(header_widget.content)
+            assert pillars_tabs.active == "tab-critique"
+
+            # Move right: review -> execute
+            await pilot.press("right")
+            assert app.state.selected_stage == "execute"
+            assert "EXECUTE" in str(header_widget.content)
+
+            # Bound check: right again shouldn't go past execute
+            await pilot.press("right")
+            assert app.state.selected_stage == "execute"
+
+            # Navigate back left to review
+            await pilot.press("left")
+            assert app.state.selected_stage == "review"
+
+            await pilot.press("q")
+
+    asyncio.run(_run())
