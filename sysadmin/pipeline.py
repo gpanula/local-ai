@@ -160,6 +160,7 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
 
     sys_prompt = load_role_prompt("architect")
     user_payload: Dict[str, Any] = {
+        "run_id": state.run_id,
         "original_prompt": state.original_prompt,
         "revision": state.architect_revisions_used,
     }
@@ -175,6 +176,10 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
         model=model,
     )
     plan = parse_llm_json(raw_response)
+    if not plan.get("run_id"):
+        plan["run_id"] = state.run_id
+    if not plan.get("original_prompt"):
+        plan["original_prompt"] = state.original_prompt
 
     # Anti-loop guard: identical plan check
     plan_tasks = plan.get("tasks", [])
@@ -206,6 +211,7 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
     sys_prompt = load_role_prompt("orchestrator")
     plan = state.messages.get("plan", {})
     user_payload: Dict[str, Any] = {
+        "run_id": state.run_id,
         "plan": plan,
         "revision": state.orchestrator_revisions_used,
     }
@@ -221,6 +227,10 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
         model=model,
     )
     annotated_plan = parse_llm_json(raw_response)
+    if not annotated_plan.get("run_id"):
+        annotated_plan["run_id"] = state.run_id
+    if not annotated_plan.get("original_prompt"):
+        annotated_plan["original_prompt"] = state.original_prompt
 
     # Save message
     state.messages["annotated_plan"] = annotated_plan
@@ -265,6 +275,8 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
         model=model,
     )
     verdict = parse_llm_json(raw_response)
+    if not verdict.get("run_id"):
+        verdict["run_id"] = state.run_id
 
     state.messages["review_verdict"] = verdict
     store.save_message(state.run_id, "review_verdict", verdict)
@@ -300,6 +312,8 @@ def run_security(state: PipelineState, store: ContextStore, model: str = "winter
         model=model,
     )
     verdict = parse_llm_json(raw_response)
+    if not verdict.get("run_id"):
+        verdict["run_id"] = state.run_id
 
     state.messages["security_verdict"] = verdict
     store.save_message(state.run_id, "security_verdict", verdict)
@@ -479,7 +493,11 @@ def main():
     if args.resume:
         result = resume_pipeline(args.resume, model=args.model)
     elif args.prompt:
-        result = run_pipeline(args.prompt, model=args.model)
+        prompt_content = args.prompt
+        if os.path.isfile(args.prompt):
+            with open(args.prompt, "r", encoding="utf-8") as f:
+                prompt_content = f.read().strip()
+        result = run_pipeline(prompt_content, model=args.model)
     else:
         parser.error("Provide a prompt or --resume <run_id>")
 
