@@ -133,70 +133,172 @@ def test_app_pilot_stage_navigation_with_arrows():
             pillars_tabs = app.query_one("#pillars-tabs", TabbedContent)
             ctx_meter = app.query_one("#ctx-meter", Static)
 
-            # Replay of latest ended at 'review' stage
-            assert app.state.selected_stage == "review"
-            assert "REVIEW" in str(ctx_meter.content)
+            # Replay of latest ended at 'dispatch' stage
+            assert app.state.selected_stage == "dispatch"
+            assert "DISPATCH" in str(ctx_meter.content)
 
-            # Move left: review -> lint
+            # Move left: dispatch -> security
             await pilot.press("left")
-            assert app.state.selected_stage == "lint"
-            assert "LINT" in str(header_widget.content)
-            assert "LINT" in str(ctx_meter.content)
+            assert app.state.selected_stage == "security"
+            assert "SECURITY" in str(header_widget.content)
+            assert "SECURITY" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-risks"
+
+            # Move left: security -> reviewer
+            await pilot.press("left")
+            assert app.state.selected_stage == "reviewer"
+            assert "REVIEWER" in str(header_widget.content)
+            assert "REVIEWER" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-critique"
 
-            # Move left: lint -> author
+            # Move left: reviewer -> orchestrator
             await pilot.press("left")
-            assert app.state.selected_stage == "author"
-            assert "AUTHOR" in str(header_widget.content)
-            assert "AUTHOR" in str(ctx_meter.content)
-            assert pillars_tabs.active == "tab-code"
-
-            # Move left: author -> orchestrate
-            await pilot.press("left")
-            assert app.state.selected_stage == "orchestrate"
-            assert "ORCHESTRATE" in str(header_widget.content)
-            assert "ORCHESTRATE" in str(ctx_meter.content)
+            assert app.state.selected_stage == "orchestrator"
+            assert "ORCHESTRATOR" in str(header_widget.content)
+            assert "ORCHESTRATOR" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-strategy"
 
-            # Bound check: left again shouldn't go past orchestrate
+            # Move left: orchestrator -> architect
             await pilot.press("left")
-            assert app.state.selected_stage == "orchestrate"
+            assert app.state.selected_stage == "architect"
+            assert "ARCHITECT" in str(header_widget.content)
+            assert "ARCHITECT" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-strategy"
 
-            # Move right: orchestrate -> author
-            await pilot.press("right")
-            assert app.state.selected_stage == "author"
-            assert "AUTHOR" in str(header_widget.content)
-            assert "AUTHOR" in str(ctx_meter.content)
-            assert pillars_tabs.active == "tab-code"
+            # Bound check: left again shouldn't go past architect
+            await pilot.press("left")
+            assert app.state.selected_stage == "architect"
 
-            # Move right: author -> lint
+            # Move right: architect -> orchestrator
             await pilot.press("right")
-            assert app.state.selected_stage == "lint"
-            assert "LINT" in str(header_widget.content)
-            assert "LINT" in str(ctx_meter.content)
+            assert app.state.selected_stage == "orchestrator"
+            assert "ORCHESTRATOR" in str(header_widget.content)
+            assert "ORCHESTRATOR" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-strategy"
+
+            # Move right: orchestrator -> reviewer
+            await pilot.press("right")
+            assert app.state.selected_stage == "reviewer"
+            assert "REVIEWER" in str(header_widget.content)
+            assert "REVIEWER" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-critique"
 
-            # Move right: lint -> review
+            # Move right: reviewer -> security
             await pilot.press("right")
-            assert app.state.selected_stage == "review"
-            assert "REVIEW" in str(header_widget.content)
-            assert "REVIEW" in str(ctx_meter.content)
-            assert pillars_tabs.active == "tab-critique"
+            assert app.state.selected_stage == "security"
+            assert "SECURITY" in str(header_widget.content)
+            assert "SECURITY" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-risks"
 
-            # Move right: review -> execute
+            # Move right: security -> dispatch
             await pilot.press("right")
-            assert app.state.selected_stage == "execute"
-            assert "EXECUTE" in str(header_widget.content)
-            assert "EXECUTE" in str(ctx_meter.content)
+            assert app.state.selected_stage == "dispatch"
+            assert "DISPATCH" in str(header_widget.content)
+            assert "DISPATCH" in str(ctx_meter.content)
 
-            # Bound check: right again shouldn't go past execute
+            # Bound check: right again shouldn't go past dispatch
             await pilot.press("right")
-            assert app.state.selected_stage == "execute"
+            assert app.state.selected_stage == "dispatch"
 
-            # Navigate back left to review
+            # Navigate back left to security
             await pilot.press("left")
-            assert app.state.selected_stage == "review"
-            assert "REVIEW" in str(ctx_meter.content)
+            assert app.state.selected_stage == "security"
+            assert "SECURITY" in str(ctx_meter.content)
+
+            await pilot.press("q")
+
+    asyncio.run(_run())
+
+
+def test_arc_orc_rev_live_event_stream_tracking():
+    """Verify live Arc-Orc-Rev pipeline transitions update stepper, thinking, context, and terminal."""
+    import asyncio
+    from pipeline_tui.app import PipelineWatchApp
+    from textual.widgets import Static
+
+    async def _run():
+        app = PipelineWatchApp(is_replay=False)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.05)
+
+            stepper = app.query_one("#stepper")
+            thinking_view = app.query_one("#thinking-view")
+            ctx_meter = app.query_one("#ctx-meter")
+            term_drawer = app.query_one("#terminal-drawer")
+
+            # 1. Pipeline start
+            app.state.handle_event({"type": "pipeline_start", "data": {"task_file": "test.md", "prompt": "build hello world"}})
+            app._apply_single_event_ui({"type": "pipeline_start"})
+
+            # 2. Stage: Architect
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "architect", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            assert app.state.current_stage == "architect"
+            assert app.state.selected_stage == "architect"
+
+            # Check Stepper display includes Architect as stage 1 with in-progress badge
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "Architect" in stepper_text
+            assert "⟳ Architect" in stepper_text
+
+            # Emit architect thinking
+            app.state.handle_event({
+                "type": "thinking_chunk",
+                "data": {"stage": "architect", "chunk": "Decomposing hello world architecture...", "model": "winter-prime"},
+            })
+            app._apply_single_event_ui({"type": "thinking_chunk", "data": {"stage": "architect"}})
+            thinking_body = str(thinking_view.query_one("#thinking-body", Static).content)
+            assert "Decomposing hello world" in thinking_body
+
+            # Emit architect context window
+            app.state.handle_event({
+                "type": "context_window",
+                "data": {"stage": "architect", "user_prompt": "build hello world", "token_breakdown": {"total": 1200, "limit": 8192}},
+            })
+            app._apply_single_event_ui({"type": "context_window", "data": {"stage": "architect"}})
+            assert "ARCHITECT" in str(ctx_meter.content)
+            assert "1,200" in str(ctx_meter.content)
+
+            # 3. Stage: Orchestrator
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "orchestrator", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            assert app.state.current_stage == "orchestrator"
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Architect" in stepper_text
+            assert "⟳ Orchestrator" in stepper_text
+
+            # 4. Stage: Reviewer
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "reviewer", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Architect" in stepper_text
+            assert "✓ Orchestrator" in stepper_text
+            assert "⟳ Reviewer" in stepper_text
+
+            # 5. Stage: Security
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "security", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Reviewer" in stepper_text
+            assert "⟳ Security" in stepper_text
+
+            # 6. Stage: Dispatch
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "dispatch", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Security" in stepper_text
+            assert "⟳ Execution" in stepper_text
+
+            # Terminal output streamed during dispatch
+            app.state.handle_event({"type": "terminal_chunk", "data": {"text": "Executing: echo 'hello world'"}})
+            app._apply_single_event_ui({"type": "terminal_chunk", "data": {"text": "Executing: echo 'hello world'"}})
+            assert term_drawer.line_count == 1
+
+            # 7. Pipeline complete
+            app.state.handle_event({"type": "pipeline_end", "data": {"outcome": "complete"}})
+            app._apply_single_event_ui({"type": "pipeline_end"})
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Execution" in stepper_text
 
             await pilot.press("q")
 

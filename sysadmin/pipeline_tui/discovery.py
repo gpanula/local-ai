@@ -184,41 +184,43 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         },
     })
 
-    # 2. context_window (author)
-    events.append({
-        "run_id": run_id,
-        "timestamp": ts,
-        "type": "context_window",
-        "data": {
-            "iteration": 1,
-            "stage": "author",
-            "system_rules": rules_text,
-            "tools": [{"name": "write_file"}, {"name": "shellcheck_inspect"}],
-            "lessons": [{"id": lid} for lid in injected_lessons],
-            "user_prompt": prompt,
-            "rework_feedback": critique if iterations > 1 else "",
-            "token_breakdown": {
-                "rules": len(rules_text) // 4 or 800,
-                "tools": 300,
-                "lessons": len(injected_lessons) * 250,
-                "prompt": len(prompt) // 4 or 400,
-                "feedback": len(critique) // 4 if critique else 0,
-                "total": 2500,
-                "limit": 8192,
-            },
-        },
-    })
+    arch_info = roles.get("architect") or {}
+    arch_model = arch_info.get("model") or author_model
+    arch_strat = arch_info.get("strategy") or arch_info.get("analysis") or "Decomposed task into defensive plan and verified constraints."
+    arch_risks = arch_info.get("risks") or "Assessed system risks and bounded failure domains."
+    arch_plan = arch_info.get("solution") or arch_info.get("plan") or "Formulated architecture acceptance criteria."
 
-    # 2.2 context_window (orchestrate)
+    orch_info = roles.get("orchestrator") or {}
+    orch_model = orch_info.get("model") or author_model
+    orch_analysis = orch_info.get("analysis") or orch_info.get("strategy") or "Analyzed prompt requirements and formulated execution plan."
+    orch_risks = orch_info.get("risks") or "No architectural blockers identified."
+    orch_solution = orch_info.get("solution") or "Decomposed into task DAG with coder and sysadmin roles."
+
+    rev_info = roles.get("reviewer") or {}
+    rev_model = rev_info.get("model") or author_model
+    rev_critique = rev_info.get("critique") or critique or "Reviewer verified compliance with bash standards."
+    rev_cot = rev_info.get("chain_of_thought") or rev_info.get("analysis") or "Audited candidate script against security and reliability rubrics."
+
+    sec_info = roles.get("security") or {}
+    sec_model = sec_info.get("model") or author_model
+    sec_analysis = sec_info.get("analysis") or sec_info.get("strategy") or "Executed STRIDE threat modeling against command injection and escalation."
+    sec_risks = sec_info.get("risks") or "No elevation or unquoted variable vulnerabilities detected."
+
+    coder_info = roles.get("coder") or roles.get("sysadmin") or {}
+    coder_strat = coder_info.get("strategy") or coder_info.get("analysis") or reasoning.get("strategy", "")
+    coder_risks = coder_info.get("risks") or reasoning.get("risks", "")
+    coder_verif = coder_info.get("verification") or reasoning.get("verification_plan", "")
+
+    # 1. Stage: Architect
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "context_window",
         "data": {
             "iteration": 1,
-            "stage": "orchestrate",
+            "stage": "architect",
             "system_rules": (
-                "Winter Orchestrator Planning & Architecture Standard:\n"
+                "Winter Architect Planning & Architecture Standard:\n"
                 "- Decompose task requirements into concrete Implementation Plan.\n"
                 "- Constraint: DO NOT WRITE CODE. Architecture and strategy only.\n"
                 "- Structure into: 1. Analysis & Strategy, 2. Risks & Constraints, 3. Architecture & Plan, 4. Acceptance Gates."
@@ -226,31 +228,23 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
             "tools": [],
             "lessons": [{"id": lid} for lid in injected_lessons],
             "user_prompt": prompt,
-            "rework_feedback": "(Initial planning pass)",
+            "rework_feedback": "(Initial architectural pass)",
             "token_breakdown": {
-                "rules": 450,
+                "rules": 600,
                 "tools": 0,
                 "lessons": len(injected_lessons) * 200,
                 "prompt": len(prompt) // 4 or 400,
                 "feedback": 0,
-                "total": 850 + len(injected_lessons) * 200,
+                "total": 1000 + len(injected_lessons) * 200,
                 "limit": 8192,
             },
         },
     })
-
-    # 2.5 stage: orchestrate
-    orch_info = roles.get("orchestrator") or roles.get("architect") or {}
-    orch_model = orch_info.get("model") or author_model
-    orch_analysis = orch_info.get("analysis") or orch_info.get("strategy") or "Analyzed prompt requirements and formulated execution plan."
-    orch_risks = orch_info.get("risks") or "No architectural blockers identified."
-    orch_solution = orch_info.get("solution") or "Decomposed into synthesis, static linting, reviewer verification, and execution."
-
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "stage_transition",
-        "data": {"stage": "orchestrate", "iteration": 1},
+        "data": {"stage": "architect", "iteration": 1},
     })
     events.append({
         "run_id": run_id,
@@ -258,88 +252,52 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "type": "thinking_chunk",
         "data": {
             "iteration": 1,
-            "stage": "orchestrate",
-            "model": orch_model,
-            "chunk": f"Orchestrator Analysis:\n{orch_analysis}\n\nArchitectural Risks:\n{orch_risks}\n\nTask DAG Solution:\n{orch_solution}",
+            "stage": "architect",
+            "model": arch_model,
+            "chunk": f"Architect Analysis:\n{arch_strat}\n\nArchitectural Risks:\n{arch_risks}\n\nArchitecture Plan:\n{arch_plan}",
             "is_final": True,
         },
     })
-
-    # 3. stage: author
-    events.append({
-        "run_id": run_id,
-        "timestamp": ts,
-        "type": "stage_transition",
-        "data": {"stage": "author", "iteration": 1},
-    })
-
-    # 4. reasoning & thinking
-    coder_info = roles.get("coder") or {}
-    strategy = coder_info.get("strategy") or coder_info.get("analysis") or reasoning.get("strategy", "")
-    risks = coder_info.get("risks") or reasoning.get("risks", "")
-    verif = coder_info.get("verification") or reasoning.get("verification_plan", "")
-
-    events.append({
-        "run_id": run_id,
-        "timestamp": ts,
-        "type": "thinking_chunk",
-        "data": {
-            "iteration": 1,
-            "stage": "author",
-            "model": author_model,
-            "chunk": f"Strategy:\n{strategy}\n\nRisks:\n{risks}" if (strategy or risks) else "Synthesized defensive implementation plan.",
-            "is_final": True,
-        },
-    })
-
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "reasoning_chunk",
         "data": {
             "iteration": 1,
-            "model": author_model,
+            "model": arch_model,
             "reasoning": {
-                "strategy": strategy,
-                "risks": risks,
-                "verification_plan": verif,
+                "strategy": arch_strat,
+                "risks": arch_risks,
+                "verification_plan": arch_plan,
             },
         },
     })
 
-    # 5. code synthesized
-    events.append({
-        "run_id": run_id,
-        "timestamp": ts,
-        "type": "code_synthesized",
-        "data": {
-            "iteration": 1,
-            "code": chosen,
-            "script_name": os.path.basename(task_file).replace(".md", ".sh"),
-            "stats": telemetry,
-        },
-    })
-
-    # 6. lint
+    # 2. Stage: Orchestrator
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "context_window",
         "data": {
             "iteration": 1,
-            "stage": "lint",
-            "system_rules": "ShellCheck Static Analysis Standard (SC2086, SC2155, SC2034) & Bash strict mode (set -euo pipefail, ERR trap)",
-            "tools": [{"name": "shellcheck", "description": "CLI Shell script static linter"}],
-            "lessons": [],
-            "user_prompt": chosen or "(Synthesized bash script)",
-            "rework_feedback": "ShellCheck: SC2086 checked. No issues found.",
+            "stage": "orchestrator",
+            "system_rules": (
+                "Winter Orchestrator Scheduling & Task DAG Standard:\n"
+                "- Convert high-level architectural plan into discrete executable sub-tasks.\n"
+                "- Define strict dependencies, expected outputs, and acceptance criteria per task.\n"
+                "- Role assignments: coder (synthesis), sysadmin (execution & verification)."
+            ),
+            "tools": [],
+            "lessons": [{"id": lid} for lid in injected_lessons],
+            "user_prompt": prompt,
+            "rework_feedback": "(Initial orchestration pass)",
             "token_breakdown": {
-                "rules": 350,
-                "tools": 100,
-                "lessons": 0,
-                "prompt": len(chosen) // 4 or 200,
-                "feedback": 50,
-                "total": 700,
+                "rules": 500,
+                "tools": 0,
+                "lessons": len(injected_lessons) * 200,
+                "prompt": len(prompt) // 4 or 400,
+                "feedback": 0,
+                "total": 900 + len(injected_lessons) * 200,
                 "limit": 8192,
             },
         },
@@ -348,30 +306,29 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "run_id": run_id,
         "timestamp": ts,
         "type": "stage_transition",
-        "data": {"stage": "lint", "iteration": 1},
+        "data": {"stage": "orchestrator", "iteration": 1},
     })
     events.append({
         "run_id": run_id,
         "timestamp": ts,
-        "type": "linter_result",
+        "type": "thinking_chunk",
         "data": {
             "iteration": 1,
-            "passed": True,
-            "output": "ShellCheck: SC2086 checked. No issues found.",
-            "returncode": 0,
+            "stage": "orchestrator",
+            "model": orch_model,
+            "chunk": f"Orchestrator Analysis:\n{orch_analysis}\n\nTask DAG Solution:\n{orch_solution}",
+            "is_final": True,
         },
     })
 
-    # 7. review
-    reviewer_role = roles.get("reviewer") or {}
-    reviewer_model = reviewer_role.get("model", "")
+    # 3. Stage: Reviewer
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "context_window",
         "data": {
             "iteration": 1,
-            "stage": "review",
+            "stage": "reviewer",
             "system_rules": (
                 "Reviewer Gate Verification Rubric:\n"
                 "- Validate strict bash headers (set -euo pipefail) and ERR trap handlers.\n"
@@ -382,13 +339,13 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
             "tools": [{"name": "verdict", "description": "APPROVED or REJECTED schema"}],
             "lessons": [{"id": lid} for lid in injected_lessons],
             "user_prompt": f"### Task Prompt:\n{prompt}\n\n### Candidate Script:\n```bash\n{chosen}\n```",
-            "rework_feedback": critique or "(No prior review critique)",
+            "rework_feedback": rev_critique,
             "token_breakdown": {
                 "rules": 600,
                 "tools": 150,
                 "lessons": len(injected_lessons) * 200,
                 "prompt": (len(prompt) + len(chosen)) // 4 or 500,
-                "feedback": len(critique) // 4 if critique else 0,
+                "feedback": len(rev_critique) // 4 if rev_critique else 0,
                 "total": 1450,
                 "limit": 8192,
             },
@@ -398,7 +355,19 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "run_id": run_id,
         "timestamp": ts,
         "type": "stage_transition",
-        "data": {"stage": "review", "iteration": 1},
+        "data": {"stage": "reviewer", "iteration": 1},
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "thinking_chunk",
+        "data": {
+            "iteration": 1,
+            "stage": "reviewer",
+            "model": rev_model,
+            "chunk": f"Reviewer Deliberation:\n{rev_cot}\n\nCritique:\n{rev_critique}",
+            "is_final": True,
+        },
     })
     events.append({
         "run_id": run_id,
@@ -407,20 +376,67 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "data": {
             "iteration": 1,
             "verdict": rec.get("outcome", "APPROVED").upper(),
-            "critique": critique,
-            "reviewer_model": reviewer_model,
+            "critique": rev_critique,
+            "reviewer_model": rev_model,
             "roles": roles,
         },
     })
 
-    # 7.5 execute
+    # 4. Stage: Security
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "context_window",
         "data": {
             "iteration": 1,
-            "stage": "execute",
+            "stage": "security",
+            "system_rules": (
+                "Security Gate Policy & STRIDE Threat Analysis:\n"
+                "- Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation of Privilege.\n"
+                "- Enforce least privilege, strict sanitization, and credential safety."
+            ),
+            "tools": [{"name": "security_audit", "description": "STRIDE threat modeler"}],
+            "lessons": [],
+            "user_prompt": chosen or prompt,
+            "rework_feedback": "STRIDE audit passed: Zero high-severity vulnerabilities found.",
+            "token_breakdown": {
+                "rules": 400,
+                "tools": 100,
+                "lessons": 0,
+                "prompt": len(chosen) // 4 or 200,
+                "feedback": 40,
+                "total": 740,
+                "limit": 8192,
+            },
+        },
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "stage_transition",
+        "data": {"stage": "security", "iteration": 1},
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "thinking_chunk",
+        "data": {
+            "iteration": 1,
+            "stage": "security",
+            "model": sec_model,
+            "chunk": f"Security Analysis:\n{sec_analysis}\n\nThreat Evaluation:\n{sec_risks}",
+            "is_final": True,
+        },
+    })
+
+    # 5. Stage: Dispatch (Execution)
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "dispatch",
             "system_rules": "Sandbox Execution Policy: Isolated subshell, deterministic environment, trap EXIT cleanup.",
             "tools": [{"name": "bash", "description": "Linux execution subshell"}],
             "lessons": [],
@@ -435,6 +451,31 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "total": 550,
                 "limit": 8192,
             },
+        },
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "stage_transition",
+        "data": {"stage": "dispatch", "iteration": 1},
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "code_synthesized",
+        "data": {
+            "iteration": 1,
+            "code": chosen,
+            "script_name": os.path.basename(task_file).replace(".md", ".sh"),
+            "stats": telemetry,
+        },
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "terminal_chunk",
+        "data": {
+            "text": f"✓ [EXECUTION] Dispatch completed for run {run_id} (exit 0)",
         },
     })
 

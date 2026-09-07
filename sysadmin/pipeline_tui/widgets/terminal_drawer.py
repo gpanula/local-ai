@@ -72,6 +72,19 @@ class TerminalConsoleDrawer(Widget):
         except Exception:
             pass
 
+    def set_lines(self, lines: list[str]) -> None:
+        """Replace all log content with the provided lines."""
+        try:
+            log_widget = self.query_one("#console-log", RichLog)
+            log_widget.clear()
+            self.line_count = 0
+            for line in lines:
+                self.line_count += 1
+                log_widget.write(line)
+            self._update_title()
+        except Exception:
+            pass
+
     def append_line(self, line: str) -> None:
         self.line_count += 1
         try:

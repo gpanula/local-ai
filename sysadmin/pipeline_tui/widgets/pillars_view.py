@@ -60,10 +60,22 @@ class CognitivePillarsView(Widget):
         verif = reasoning.get("verification_plan") or "No explicit verification plan extracted."
         code = iteration_state.code or ""
 
-        # Check for orchestrator role details if orchestrate stage is selected
+        # Check for role details
         roles = iteration_state.review.get("roles") or {}
-        orch = roles.get("orchestrator") or roles.get("architect") or {}
-        if selected_stage == "orchestrate" and orch:
+        if selected_stage in ("architect", "author"):
+            arch = roles.get("architect") or roles.get("coder") or {}
+            arch_strat = arch.get("strategy") or arch.get("analysis")
+            arch_risks = arch.get("risks")
+            arch_sol = arch.get("solution") or arch.get("plan")
+            arch_verif = arch.get("verification")
+            if arch_strat:
+                strat = f"─── Architect Strategy & Analysis ({arch.get('model', 'architect')}) ───\n\n{arch_strat}"
+            if arch_risks:
+                risks = f"─── Architect Risks & Constraints ───\n\n{arch_risks}"
+            if arch_verif or arch_sol:
+                verif = f"─── Architect Verification Plan ───\n\n{arch_verif or arch_sol}"
+        elif selected_stage in ("orchestrator", "orchestrate"):
+            orch = roles.get("orchestrator") or {}
             orch_strat = orch.get("strategy") or orch.get("analysis")
             orch_risks = orch.get("risks")
             orch_sol = orch.get("solution") or orch.get("plan")
@@ -73,6 +85,14 @@ class CognitivePillarsView(Widget):
                 risks = f"─── Orchestrator Architectural Risks ───\n\n{orch_risks}"
             if orch_sol:
                 verif = f"─── Orchestrator Task DAG & Plan ───\n\n{orch_sol}"
+        elif selected_stage == "security":
+            sec = roles.get("security") or {}
+            sec_analysis = sec.get("analysis") or sec.get("strategy")
+            sec_risks = sec.get("risks")
+            if sec_analysis:
+                strat = f"─── Security STRIDE Threat Model ({sec.get('model', 'security')}) ───\n\n{sec_analysis}"
+            if sec_risks:
+                risks = f"─── Security Vulnerability Assessment ───\n\n{sec_risks}"
 
         # Strategy
         try:
@@ -145,15 +165,15 @@ class CognitivePillarsView(Widget):
             pass
 
         # Automatically bring up the corresponding pillar tab for the active stage
-        target_tab = "tab-code"
-        if selected_stage == "orchestrate":
+        target_tab = "tab-strategy"
+        if selected_stage in ("architect", "orchestrate", "orchestrator"):
             target_tab = "tab-strategy"
-        elif selected_stage == "author":
+        elif selected_stage in ("author", "dispatch", "execute"):
             target_tab = "tab-code"
-        elif selected_stage in ("lint", "review"):
+        elif selected_stage in ("lint", "review", "reviewer"):
             target_tab = "tab-critique"
-        elif selected_stage == "execute":
-            target_tab = "tab-code"
+        elif selected_stage == "security":
+            target_tab = "tab-risks"
 
         try:
             tabs = self.query_one("#pillars-tabs", TabbedContent)

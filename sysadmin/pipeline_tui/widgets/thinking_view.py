@@ -52,6 +52,11 @@ class ActiveThinkingView(Widget):
     def update_stage_thinking(self, stage: str, model: str, text: str) -> None:
         if not text:
             placeholders = {
+                "architect": "(Awaiting Architect high-level system decomposition & design)",
+                "orchestrator": "(Awaiting Orchestrator task DAG formulation & specification)",
+                "reviewer": "(Awaiting Reviewer gate contract evaluation)",
+                "security": "(Awaiting Security gate STRIDE analysis & vulnerability assessment)",
+                "dispatch": "(Awaiting Execution sandbox & tool dispatch)",
                 "orchestrate": "(No deliberation recorded for orchestrator planning)",
                 "author": "(No deliberation recorded for author agent)",
                 "lint": "(Pre-flight linter ShellCheck awaiting execution or clear)",

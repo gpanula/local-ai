@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from mcp_core.workspace import WORKSPACE_ROOT
 from mcp_core.context_store import ContextStore
 from mcp_core.transport import send_terminal_mcp
+from mcp_core.events import EventEmitter, generate_run_id
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
 from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.extraction import extract_lesson_from_critique
@@ -200,6 +201,20 @@ def stage_chat(
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
+    emitter = EventEmitter.get_current()
+    if emitter:
+        try:
+            emitter.context_window(
+                iteration=1,
+                system_rules=system_prompt,
+                tools=tools or [],
+                lessons=[],
+                user_prompt=user_content,
+                stage=role,
+            )
+        except Exception:
+            pass
+
     response = handle_chat(
         model=model,
         prompt=user_content,
@@ -217,6 +232,11 @@ def stage_chat(
         cot = think_match.group(1).strip()
         if cot:
             send_terminal_mcp(f"\n💭 [{role.upper()} CHAIN-OF-THOUGHT]\n{cot}")
+            if emitter:
+                try:
+                    emitter.thinking_chunk(iteration=1, model=model, chunk=cot, stage=role, is_final=True)
+                except Exception:
+                    pass
 
     # Echo agent thinking & reasoning (4 pillars) to console and terminal-mcp
     try:
@@ -236,8 +256,38 @@ def stage_chat(
                 reasoning_banner.append(f"🧪 [Pillar 4: Verification & Testing]\n{cognition['verification']}")
             reasoning_banner.append("──────────────────────────────────────────────────────────")
             send_terminal_mcp("\n".join(reasoning_banner))
+
+            if emitter:
+                try:
+                    emitter.emit("reasoning_chunk", {
+                        "iteration": 1,
+                        "stage": role,
+                        "model": model,
+                        "reasoning": {
+                            "strategy": cognition.get("analysis", ""),
+                            "risks": cognition.get("risks", ""),
+                            "solution": cognition.get("solution", ""),
+                            "verification_plan": cognition.get("verification", ""),
+                        },
+                    })
+                except Exception:
+                    pass
     except Exception:
         pass
+
+    # Check for synthesized code in clean_body
+    code_match = re.search(r"```(?:bash|sh)?\n([\s\S]*?)```", clean_body)
+    if code_match and role in ("coder", "dispatch", "sysadmin"):
+        code_str = code_match.group(1).strip()
+        if emitter:
+            try:
+                emitter.emit("code_synthesized", {
+                    "iteration": 1,
+                    "code": code_str,
+                    "stage": role,
+                })
+            except Exception:
+                pass
 
     # Print full response body without truncation
     send_terminal_mcp(f"\n✅ [{role.upper()}] Complete:\n{clean_body}")
@@ -1352,7 +1402,7 @@ def run_pipeline(
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
     if not run_id:
-        run_id = uuid.uuid4().hex
+        run_id = generate_run_id()
 
     if store is None:
         store = ContextStore()
@@ -1360,19 +1410,54 @@ def run_pipeline(
     state = PipelineState(run_id=run_id, original_prompt=prompt)
     store.save_state(run_id, state.to_dict())
 
-    while state.current_phase not in ("complete", "aborted"):
-        phase_fn = PHASE_DISPATCH.get(state.current_phase)
-        if not phase_fn:
-            state.status = "aborted"
-            state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
-            break
+    emitter = None
+    try:
+        emitter = EventEmitter(run_id=run_id)
+        EventEmitter.set_current(emitter)
+        emitter.pipeline_start(
+            task_file=prompt if prompt.endswith(".md") else "prompt",
+            prompt=prompt,
+            tier=None,
+            models={"default": model},
+            max_retries=3,
+        )
+    except Exception:
+        pass
 
-        next_phase = phase_fn(state, store, model=model)
-        state.current_phase = next_phase
-        store.save_state(run_id, state.to_dict())
+    try:
+        while state.current_phase not in ("complete", "aborted"):
+            if emitter:
+                try:
+                    emitter.stage_transition(state.current_phase)
+                except Exception:
+                    pass
 
-    if state.status in ("complete", "aborted"):
-        _finalize_pipeline_run(state, store, model)
+            phase_fn = PHASE_DISPATCH.get(state.current_phase)
+            if not phase_fn:
+                state.status = "aborted"
+                state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
+                break
+
+            next_phase = phase_fn(state, store, model=model)
+            state.current_phase = next_phase
+            store.save_state(run_id, state.to_dict())
+
+        if state.status in ("complete", "aborted"):
+            _finalize_pipeline_run(state, store, model)
+            if emitter:
+                try:
+                    emitter.pipeline_end(
+                        outcome=state.status,
+                        iterations=1 + state.architect_revisions_used + state.orchestrator_revisions_used,
+                        abort_reason=state.events[-1]["detail"] if state.status == "aborted" and state.events else "",
+                    )
+                except Exception:
+                    pass
+    finally:
+        try:
+            EventEmitter.set_current(None)
+        except Exception:
+            pass
 
     return state.to_dict()
 
@@ -1389,19 +1474,47 @@ def resume_pipeline(
     state_dict = store.load(f"runs/{run_id}/state.json")
     state = PipelineState.from_dict(state_dict)
 
-    while state.current_phase not in ("complete", "aborted"):
-        phase_fn = PHASE_DISPATCH.get(state.current_phase)
-        if not phase_fn:
-            state.status = "aborted"
-            state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
-            break
+    emitter = None
+    try:
+        emitter = EventEmitter(run_id=run_id)
+        EventEmitter.set_current(emitter)
+    except Exception:
+        pass
 
-        next_phase = phase_fn(state, store, model=model)
-        state.current_phase = next_phase
-        store.save_state(run_id, state.to_dict())
+    try:
+        while state.current_phase not in ("complete", "aborted"):
+            if emitter:
+                try:
+                    emitter.stage_transition(state.current_phase)
+                except Exception:
+                    pass
 
-    if state.status in ("complete", "aborted"):
-        _finalize_pipeline_run(state, store, model)
+            phase_fn = PHASE_DISPATCH.get(state.current_phase)
+            if not phase_fn:
+                state.status = "aborted"
+                state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
+                break
+
+            next_phase = phase_fn(state, store, model=model)
+            state.current_phase = next_phase
+            store.save_state(run_id, state.to_dict())
+
+        if state.status in ("complete", "aborted"):
+            _finalize_pipeline_run(state, store, model)
+            if emitter:
+                try:
+                    emitter.pipeline_end(
+                        outcome=state.status,
+                        iterations=1 + state.architect_revisions_used + state.orchestrator_revisions_used,
+                        abort_reason=state.events[-1]["detail"] if state.status == "aborted" and state.events else "",
+                    )
+                except Exception:
+                    pass
+    finally:
+        try:
+            EventEmitter.set_current(None)
+        except Exception:
+            pass
 
     return state.to_dict()
 
