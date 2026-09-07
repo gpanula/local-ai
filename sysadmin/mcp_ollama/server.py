@@ -206,6 +206,7 @@ def handle_chat(
     system_prompt: Optional[str] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     temperature: float = 0.7,
+    top_p: Optional[float] = None,
     num_ctx: Optional[int] = None
 ) -> str:
     """Sends a chat request to local Ollama with optional native tool definitions."""
@@ -221,6 +222,8 @@ def handle_chat(
         raise ValueError("Either 'prompt' or 'messages' must be provided.")
     
     options: Dict[str, Any] = {"temperature": temperature}
+    if top_p is not None:
+        options["top_p"] = top_p
     if num_ctx is not None and num_ctx > 0:
         options["num_ctx"] = num_ctx
 

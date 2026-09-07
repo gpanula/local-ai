@@ -9,7 +9,8 @@ venv/
 test_venv/
 sysadmin/venv/
 sysadmin/train_venv/
-sysadmin/data/
+sysadmin/data/*
+!sysadmin/data/registries/
 ENV/
 env/
 *.egg-info/

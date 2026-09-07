@@ -1,0 +1,14 @@
+{
+  "version": "2.0",
+  "tools": [
+    {
+      "name": "run_bash",
+      "description": "Execute a bash command",
+      "parameters": {"command": "string"},
+      "safe_for_dry_run": false,
+      "requires_approval": true,
+      "allowed_roles": ["coder", "sysadmin"],
+      "domain_tags": ["Defensive Bash Scripting", "Binary Isolation"]
+    }
+  ]
+}
