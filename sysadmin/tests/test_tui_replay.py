@@ -93,3 +93,25 @@ def test_app_pilot_replay_and_toggles():
             await pilot.press("q")
 
     asyncio.run(_run())
+
+
+def test_app_pilot_live_watch_mode():
+    """Test mounting the Textual PipelineWatchApp in live watch mode (default)."""
+    import asyncio
+    from pipeline_tui.app import PipelineWatchApp
+
+    async def _run():
+        app = PipelineWatchApp(is_replay=False)
+        async with app.run_test() as pilot:
+            await pilot.pause(0.1)
+
+            # Check that app entered live watch mode and initialized widgets
+            header = app.query_one("#header")
+            assert header is not None
+            thinking = app.query_one("#thinking-view")
+            assert thinking is not None
+
+            # Can quit with 'q'
+            await pilot.press("q")
+
+    asyncio.run(_run())

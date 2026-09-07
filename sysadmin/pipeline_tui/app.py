@@ -11,6 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 
+from mcp_core.workspace import WORKSPACE_ROOT
 from pipeline_tui.discovery import find_run, list_runs, load_events_for_run
 from pipeline_tui.state import PipelineState
 from pipeline_tui.widgets.context_drawer import ContextWindowDrawer
@@ -69,9 +70,10 @@ class PipelineWatchApp(App):
             yield TerminalConsoleDrawer(id="terminal-drawer")
 
     async def on_mount(self) -> None:
-        if self.is_replay or self.target_run_id:
-            # Replay or specific run mode
-            run_match = find_run(self.target_run_id)
+        if self.is_replay:
+            # Explicit replay mode
+            target = self.target_run_id or "latest"
+            run_match = find_run(target)
             if run_match:
                 self._load_and_apply_run(run_match)
             else:
@@ -80,12 +82,8 @@ class PipelineWatchApp(App):
             # Watch specific event file
             self._tail_task = asyncio.create_task(self._tail_events(self.event_file))
         else:
-            # Try to find latest active run, or prompt with picker
-            latest = find_run("latest")
-            if latest:
-                self._load_and_apply_run(latest)
-            else:
-                self.action_open_picker()
+            # Real-Time Live Watch Mode (Default for localai-tui / localai-watch)
+            self._tail_task = asyncio.create_task(self._watch_live_runs())
 
     def _load_and_apply_run(self, run_info: Dict[str, Any]) -> None:
         """Load and apply all events from a selected run."""
@@ -94,6 +92,83 @@ class PipelineWatchApp(App):
         for evt in events:
             self.state.handle_event(evt)
         self._refresh_all_widgets()
+
+    async def _watch_live_runs(self) -> None:
+        """Watch for active and incoming pipeline runs in real-time."""
+        runs_dir = os.path.join(WORKSPACE_ROOT, ".localai", "runs")
+        latest_link = os.path.join(runs_dir, "latest.jsonl")
+        current_target_file: Optional[str] = None
+        last_finished_file: Optional[str] = None
+        pos = 0
+
+        # Check if an existing latest run is currently active
+        is_active = False
+        if os.path.exists(latest_link):
+            resolved = os.path.realpath(latest_link)
+            try:
+                with open(resolved, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    if lines and not any('"pipeline_end"' in line for line in lines):
+                        is_active = True
+                        current_target_file = resolved
+                        for line in lines:
+                            line = line.strip()
+                            if line:
+                                evt = json.loads(line)
+                                self.state.handle_event(evt)
+                        pos = f.tell()
+                        self._refresh_all_widgets()
+                    else:
+                        last_finished_file = resolved
+            except Exception:
+                pass
+
+        if not is_active:
+            # Set waiting state
+            self.state.run_id = "waiting"
+            self.state.current_stage = "waiting for run"
+            self.query_one("#header", PipelineHeader).update_state(self.state)
+            self.query_one("#stepper", PipelineStepper).update_state(self.state)
+            self.query_one("#thinking-view", ActiveThinkingView).update_thinking(
+                "⏳ Observer ready. Watching for live pipeline executions in real-time...\n\n"
+                "Run in another terminal:\n"
+                "  localai-pipeline <prompt.md>\n"
+                "or press 'o' / 'r' to browse and replay past runs."
+            )
+
+        while True:
+            try:
+                if os.path.exists(latest_link):
+                    target_file = os.path.realpath(latest_link)
+
+                    # Detect new run startup
+                    if target_file != current_target_file and target_file != last_finished_file:
+                        current_target_file = target_file
+                        pos = 0
+                        self.state = PipelineState()
+                        self._refresh_all_widgets()
+
+                    # Tail events from current run
+                    if current_target_file and os.path.exists(current_target_file):
+                        with open(current_target_file, "r", encoding="utf-8") as f:
+                            f.seek(pos)
+                            new_lines = f.readlines()
+                            pos = f.tell()
+
+                        for line in new_lines:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    evt = json.loads(line)
+                                    self.state.handle_event(evt)
+                                    self._apply_single_event_ui(evt)
+                                    if evt.get("type") == "pipeline_end":
+                                        last_finished_file = current_target_file
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
 
     async def _tail_events(self, file_path: str) -> None:
         """Tail JSONL events from active run file."""
