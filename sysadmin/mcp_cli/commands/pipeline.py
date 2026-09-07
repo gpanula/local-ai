@@ -10,11 +10,13 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 from mcp_core import transport
 from mcp_core.attribution import attribute_lessons
 from mcp_core.embeddings import get_embedding
+from mcp_core.events import EventEmitter
 from mcp_core.extraction import (
     extract_lesson_from_critique,
     extract_lesson_from_stuck_loop,
@@ -160,38 +162,67 @@ class PipelineRunCommand(BaseCommand):
         with open(valid_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()
 
-        result = self.revision_loop(prompt_content, args)
+        emitter = EventEmitter()
+        EventEmitter.set_current(emitter)
+        start_time = time.time()
+        emitter.pipeline_start(
+            task_file=args.file,
+            prompt=prompt_content,
+            tier=getattr(args, "tier", None),
+            models={
+                "orchestrator": getattr(args, "orchestrator", ""),
+                "author": getattr(args, "author", ""),
+                "reviewer": getattr(args, "reviewer", ""),
+            },
+            max_retries=args.max_retries,
+        )
 
-        # Phase 5: record retrieval + attribution telemetry (never blocks).
-        self._apply_telemetry(result)
+        try:
+            result = self.revision_loop(prompt_content, args, emitter=emitter)
 
-        # Stage a lesson in the pending queue if rework occurred (never blocks).
-        self._stage_lesson_if_rework(result, prompt_content, args)
+            # Phase 5: record retrieval + attribution telemetry (never blocks).
+            self._apply_telemetry(result)
 
-        # Phase 7.01: record a trajectory for multi-iteration runs (never blocks).
-        self._record_trajectory_if_rework(result, prompt_content, args)
+            # Stage a lesson in the pending queue if rework occurred (never blocks).
+            self._stage_lesson_if_rework(result, prompt_content, args)
 
-        if not result["approved"]:
-            if result["abort_reason"]:
-                transport.send_terminal_mcp(f"❌ [Pipeline Aborted] {result['abort_reason']}.")
-            else:
-                transport.send_terminal_mcp(f"❌ [Pipeline Failed] Maximum iterations ({args.max_retries}) reached without approval.")
-            return
+            # Phase 7.01: record a trajectory for multi-iteration runs (never blocks).
+            self._record_trajectory_if_rework(result, prompt_content, args)
 
-        if args.dry_run:
-            transport.send_terminal_mcp("🏁 [Dry-Run] Pipeline completed verification. Skipping execution.")
-            return
+            duration = time.time() - start_time
+            outcome = "approved" if result.get("approved") else ("aborted" if result.get("abort_reason") else "failed")
+            emitter.pipeline_end(
+                outcome=outcome,
+                iterations=result.get("iterations", 1),
+                duration_sec=round(duration, 2),
+                abort_reason=result.get("abort_reason", ""),
+            )
 
-        self.execute(result, args)
+            if not result["approved"]:
+                if result["abort_reason"]:
+                    transport.send_terminal_mcp(f"❌ [Pipeline Aborted] {result['abort_reason']}.")
+                else:
+                    transport.send_terminal_mcp(f"❌ [Pipeline Failed] Maximum iterations ({args.max_retries}) reached without approval.")
+                return
+
+            if args.dry_run:
+                transport.send_terminal_mcp("🏁 [Dry-Run] Pipeline completed verification. Skipping execution.")
+                return
+
+            self.execute(result, args)
+        finally:
+            EventEmitter.set_current(None)
 
     # --- testable pipeline internals ---
 
-    def revision_loop(self, prompt_content, args):
+    def revision_loop(self, prompt_content, args, emitter=None):
         """Author → Lint → Review cycle.
 
         Returns a dict with keys: ``approved``, ``final_code_block``,
         ``abort_reason``, ``write_file_call``, ``iterations``.
         """
+        if emitter is None:
+            emitter = EventEmitter.get_current()
         current_prompt = prompt_content
         if getattr(args, "tier", None):
             args.orchestrator = get_default_model("orchestrator", tier=args.tier)
@@ -239,6 +270,8 @@ class PipelineRunCommand(BaseCommand):
 
         # Step 0: Orchestrator Phase (Decompose high-level prompt into concrete implementation plan)
         if not getattr(args, "no_orchestrate", False):
+            if emitter:
+                emitter.stage_transition("orchestrate", iteration=1)
             try:
                 current_prompt = self._orchestrate(current_prompt, args, roles=roles)
             except Exception as exc:  # noqa: BLE001 - orchestration must never block pipeline
@@ -246,6 +279,24 @@ class PipelineRunCommand(BaseCommand):
 
         while iteration < max_attempts and not approved:
             iteration += 1
+            if emitter:
+                emitter.stage_transition("author", iteration=iteration)
+                last_fb = ""
+                if reviewer_history and reviewer_history[-1]:
+                    last_fb = "\n".join(str(p) for p in reviewer_history[-1]) if isinstance(reviewer_history[-1], (list, tuple)) else str(reviewer_history[-1])
+                elif linter_history and linter_history[-1]:
+                    last_fb = "\n".join(str(p) for p in linter_history[-1]) if isinstance(linter_history[-1], (list, tuple)) else str(linter_history[-1])
+                emitter.context_window(
+                    iteration=iteration,
+                    system_rules=rules_section,
+                    tools=[
+                        {"name": "write_file", "description": "Write sanitized executable code to workspace"},
+                        {"name": "shellcheck_inspect", "description": "Inspect shell scripts for syntax and SC issues"},
+                    ],
+                    lessons=injected_lesson_dicts,
+                    user_prompt=prompt_content,
+                    rework_feedback=last_fb,
+                )
             transport.send_terminal_mcp(
                 f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🤖 [Pipeline Iteration {iteration}/{max_attempts}] Authoring with `{args.author}`\n"
@@ -279,6 +330,11 @@ class PipelineRunCommand(BaseCommand):
             if author_stats:
                 transport.send_terminal_mcp(f"📊 {PipelineRunCommand._format_telemetry(author_stats, role='coder')}")
 
+            if emitter:
+                raw_monologue = strategy_body or author_response
+                emitter.thinking_chunk(iteration, getattr(args, "author", ""), raw_monologue)
+                emitter.reasoning_chunk(iteration, getattr(args, "author", ""), reasoning)
+
             roles["coder"] = self._extract_role_bundle(author_response, "coder")
             roles["coder"]["model"] = getattr(args, "author", "")
 
@@ -310,11 +366,21 @@ class PipelineRunCommand(BaseCommand):
                 preview_first_line = final_code_block.splitlines()[0] if final_code_block.splitlines() else ""
                 transport.send_terminal_mcp(f"📝 Synthesized Script ({len(final_code_block)} bytes) - {preview_first_line}")
 
+            if emitter and final_code_block:
+                emitter.code_synthesized(
+                    iteration,
+                    final_code_block,
+                    script_name=target_path if write_file_call else None,
+                    stats=author_stats if isinstance(author_stats, dict) else {},
+                )
+
             # Phase 7.01: record this iteration's script version for trajectories.
             if final_code_block:
                 script_versions.append(final_code_block)
 
             # Step 2: Pre-Flight Linting
+            if emitter:
+                emitter.stage_transition("lint", iteration=iteration)
             linter_output = "No linter run."
             linter_failed = False
             if not args.no_lint:
@@ -333,6 +399,9 @@ class PipelineRunCommand(BaseCommand):
                     if "ShellCheck Analysis Findings (exit 1)" in raw_linter or "exit 1" in raw_linter:
                         linter_failed = True
 
+            if emitter:
+                emitter.linter_result(iteration, passed=(not linter_failed), output=linter_output)
+
             # Auto-reject on pre-flight linter failure (unless explicitly flagged as bootstrap task)
             if linter_failed:
                 current_prompt, abort_reason = self._handle_linter_failure(
@@ -346,6 +415,8 @@ class PipelineRunCommand(BaseCommand):
                 linter_history.append(None)
 
             # Step 3: Reviewer Evaluation
+            if emitter:
+                emitter.stage_transition("review", iteration=iteration)
             if args.author != args.reviewer and PipelineRunCommand._should_unload(args):
                 transport.call_mcp("ollama_unload_model", {"model": args.author})
 
@@ -357,6 +428,16 @@ class PipelineRunCommand(BaseCommand):
                 reviewer_history, iteration, max_attempts, current_prompt, approved, abort_reason,
                 roles=roles,
             )
+            if emitter:
+                last_crit = reviewer_history[-1] if reviewer_history else ""
+                crit_str = "\n".join(str(p) for p in last_crit) if isinstance(last_crit, (list, tuple)) else str(last_crit)
+                emitter.review_result(
+                    iteration,
+                    verdict=str(review_verdict),
+                    critique=crit_str,
+                    reviewer_model=getattr(args, "reviewer", ""),
+                    roles=roles,
+                )
             if abort_reason:
                 break
 
@@ -399,6 +480,11 @@ class PipelineRunCommand(BaseCommand):
             "roles": roles,
             "author_model": getattr(args, "author", ""),
             "author_stats": author_stats,
+            "context_breakdown": {
+                "rules": rules_section,
+                "lessons": injected_lessons,
+                "prompt": prompt_content,
+            },
         }
 
     # Path to the universal system rules store (relative to workspace root).

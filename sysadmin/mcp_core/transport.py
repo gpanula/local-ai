@@ -120,6 +120,13 @@ def send_terminal_mcp(text: str) -> None:
     """Prints to local stdout (or stderr in MCP server context) and streams clean formatted comment banners directly into the active terminal-mcp PTY."""
     target_stream = sys.stderr if (len(sys.argv) > 0 and "server.py" in sys.argv[0]) else sys.stdout
     print(text, file=target_stream, flush=True)
+    try:
+        from mcp_core.events import EventEmitter
+        emitter = EventEmitter.get_current()
+        if emitter:
+            emitter.terminal_chunk(text)
+    except Exception:
+        pass
     with TerminalMCPSession() as session:
         if not session.is_available:
             return

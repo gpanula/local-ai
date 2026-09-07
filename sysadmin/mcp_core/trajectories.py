@@ -151,6 +151,7 @@ def _build_record(
         "reasoning": reasoning,
         "roles": roles,
         "telemetry": pipeline_result.get("author_stats", {}),
+        "context_breakdown": pipeline_result.get("context_breakdown"),
         "iterations": iterations,
         "outcome": outcome,
         "payload_type": None,
