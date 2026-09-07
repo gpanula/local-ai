@@ -113,3 +113,9 @@ alias localai-train-sft="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py train --
 
 # Codebase Knowledge Graph (Graphify)
 alias localai-graphify="${LOCAL_AI_DIR}/sysadmin/venv/bin/graphify"
+
+# Pipeline Watch TUI Observer
+alias localai-watch="${LOCAL_AI_DIR}/bin/pipeline-watch"
+alias localai-tui="${LOCAL_AI_DIR}/bin/pipeline-watch"
+alias localai-watch-list="${LOCAL_AI_DIR}/bin/pipeline-watch --list"
+alias localai-watch-replay="${LOCAL_AI_DIR}/bin/pipeline-watch --replay"
