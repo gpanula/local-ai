@@ -131,26 +131,31 @@ def test_app_pilot_stage_navigation_with_arrows():
             thinking_view = app.query_one("#thinking-view")
             header_widget = thinking_view.query_one("#thinking-header", Static)
             pillars_tabs = app.query_one("#pillars-tabs", TabbedContent)
+            ctx_meter = app.query_one("#ctx-meter", Static)
 
             # Replay of latest ended at 'review' stage
             assert app.state.selected_stage == "review"
+            assert "REVIEW" in str(ctx_meter.content)
 
             # Move left: review -> lint
             await pilot.press("left")
             assert app.state.selected_stage == "lint"
             assert "LINT" in str(header_widget.content)
+            assert "LINT" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-critique"
 
             # Move left: lint -> author
             await pilot.press("left")
             assert app.state.selected_stage == "author"
             assert "AUTHOR" in str(header_widget.content)
+            assert "AUTHOR" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-code"
 
             # Move left: author -> orchestrate
             await pilot.press("left")
             assert app.state.selected_stage == "orchestrate"
             assert "ORCHESTRATE" in str(header_widget.content)
+            assert "ORCHESTRATE" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-strategy"
 
             # Bound check: left again shouldn't go past orchestrate
@@ -161,24 +166,28 @@ def test_app_pilot_stage_navigation_with_arrows():
             await pilot.press("right")
             assert app.state.selected_stage == "author"
             assert "AUTHOR" in str(header_widget.content)
+            assert "AUTHOR" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-code"
 
             # Move right: author -> lint
             await pilot.press("right")
             assert app.state.selected_stage == "lint"
             assert "LINT" in str(header_widget.content)
+            assert "LINT" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-critique"
 
             # Move right: lint -> review
             await pilot.press("right")
             assert app.state.selected_stage == "review"
             assert "REVIEW" in str(header_widget.content)
+            assert "REVIEW" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-critique"
 
             # Move right: review -> execute
             await pilot.press("right")
             assert app.state.selected_stage == "execute"
             assert "EXECUTE" in str(header_widget.content)
+            assert "EXECUTE" in str(ctx_meter.content)
 
             # Bound check: right again shouldn't go past execute
             await pilot.press("right")
@@ -187,6 +196,7 @@ def test_app_pilot_stage_navigation_with_arrows():
             # Navigate back left to review
             await pilot.press("left")
             assert app.state.selected_stage == "review"
+            assert "REVIEW" in str(ctx_meter.content)
 
             await pilot.press("q")
 

@@ -78,7 +78,7 @@ class ContextWindowDrawer(Widget):
             except Exception:
                 pass
 
-    def update_context(self, ctx_data: dict) -> None:
+    def update_context(self, ctx_data: dict, stage: str = "author", model: str = "") -> None:
         self.raw_data = ctx_data or {}
         tb = self.raw_data.get("token_breakdown", {})
         tot = tb.get("total", 0)
@@ -87,7 +87,11 @@ class ContextWindowDrawer(Widget):
 
         # Update Meter
         meter = Text()
-        meter.append(f"📦 Context Window [{tot:,} / {lim:,} tk ({pct}%)] (Toggle: 'c') │ ", style="bold yellow")
+        meter.append("📦 Context Window ", style="bold yellow")
+        meter.append(f"── [Stage: {stage.upper()}] ", style="bold cyan")
+        if model:
+            meter.append(f"[{model}] ", style="bold green")
+        meter.append(f"[{tot:,} / {lim:,} tk ({pct}%)] (Toggle: 'c') │ ", style="bold yellow")
         meter.append(f"Rules: {tb.get('rules', 0):,}  ", style="cyan")
         meter.append(f"Tools: {tb.get('tools', 0):,}  ", style="blue")
         meter.append(f"Lessons: {tb.get('lessons', 0):,}  ", style="magenta")

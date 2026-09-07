@@ -199,7 +199,7 @@ class PipelineWatchApp(App):
             await asyncio.sleep(0.2)
 
     def _update_stage_view(self) -> None:
-        """Update Stepper, Active Thinking, and Cognitive Pillars for the selected stage."""
+        """Update Stepper, Active Thinking, Cognitive Pillars, and Context Window for the selected stage."""
         self.query_one("#stepper", PipelineStepper).update_state(self.state)
 
         cur_it = self.state.current_iteration()
@@ -213,6 +213,11 @@ class PipelineWatchApp(App):
         prev_code = prev_it.code if prev_it else ""
         self.query_one("#pillars-view", CognitivePillarsView).update_state(
             cur_it, prev_code=prev_code, selected_stage=st
+        )
+
+        stage_ctx = self.state.get_stage_context(st)
+        self.query_one("#context-drawer", ContextWindowDrawer).update_context(
+            stage_ctx, stage=st, model=model
         )
 
     def _apply_single_event_ui(self, evt: Dict[str, Any]) -> None:
@@ -248,8 +253,18 @@ class PipelineWatchApp(App):
                 self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking(
                     self.state.selected_stage, model, thinking
                 )
+                stage_ctx = self.state.get_stage_context(self.state.selected_stage)
+                self.query_one("#context-drawer", ContextWindowDrawer).update_context(
+                    stage_ctx, stage=self.state.selected_stage, model=model
+                )
         elif etype == "context_window":
-            self.query_one("#context-drawer", ContextWindowDrawer).update_context(cur_it.context_window)
+            st = evt.get("data", {}).get("stage") or "author"
+            if st == self.state.selected_stage:
+                model = self.state.get_stage_model(st)
+                stage_ctx = self.state.get_stage_context(st)
+                self.query_one("#context-drawer", ContextWindowDrawer).update_context(
+                    stage_ctx, stage=st, model=model
+                )
         elif etype == "terminal_chunk":
             text = evt.get("data", {}).get("text", "")
             self.query_one("#terminal-drawer", TerminalConsoleDrawer).append_line(text)
@@ -262,9 +277,6 @@ class PipelineWatchApp(App):
         """Full refresh of all UI components to reflect current state."""
         self.query_one("#header", PipelineHeader).update_state(self.state)
         self._update_stage_view()
-
-        cur_it = self.state.current_iteration()
-        self.query_one("#context-drawer", ContextWindowDrawer).update_context(cur_it.context_window)
 
         # Terminal lines
         term = self.query_one("#terminal-drawer", TerminalConsoleDrawer)

@@ -381,6 +381,14 @@ class PipelineRunCommand(BaseCommand):
             # Step 2: Pre-Flight Linting
             if emitter:
                 emitter.stage_transition("lint", iteration=iteration)
+                emitter.context_window(
+                    iteration=iteration,
+                    system_rules="ShellCheck Static Analysis Rules & Bash Coding Standard (SC2086, SC2155, SC2034)",
+                    tools=[{"name": "shellcheck_inspect", "description": "Inspect shell scripts for syntax and SC issues"}],
+                    lessons=[],
+                    user_prompt=final_code_block,
+                    stage="lint",
+                )
             linter_output = "No linter run."
             linter_failed = False
             if not args.no_lint:
@@ -417,6 +425,14 @@ class PipelineRunCommand(BaseCommand):
             # Step 3: Reviewer Evaluation
             if emitter:
                 emitter.stage_transition("review", iteration=iteration)
+                emitter.context_window(
+                    iteration=iteration,
+                    system_rules="Reviewer Gate Verification Rubric: Strict bash headers, deterministic paths, zero hardcoded user paths",
+                    tools=[{"name": "verdict", "description": "APPROVED or REJECTED with critique"}],
+                    lessons=injected_lesson_dicts,
+                    user_prompt=f"Task:\n{prompt_content}\n\nCandidate Code:\n{final_code_block}\n\nLinter Output:\n{linter_output}",
+                    stage="review",
+                )
             if args.author != args.reviewer and PipelineRunCommand._should_unload(args):
                 transport.call_mcp("ollama_unload_model", {"model": args.author})
 
@@ -541,6 +557,17 @@ class PipelineRunCommand(BaseCommand):
             "- Describe the exact valid and invalid test cases, strict mode flags, trap handlers, cleanup requirements, and success conditions.\n\n"
             "Respond with ONLY the markdown architectural plan and analysis."
         )
+
+        emitter = EventEmitter.get_current()
+        if emitter:
+            emitter.context_window(
+                iteration=1,
+                system_rules=system_prompt,
+                tools=[],
+                lessons=[],
+                user_prompt=prompt_content,
+                stage="orchestrate",
+            )
 
         plan = transport.call_mcp("ollama_chat", {
             "prompt": (

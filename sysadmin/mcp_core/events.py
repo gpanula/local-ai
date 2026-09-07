@@ -123,6 +123,7 @@ class EventEmitter:
         user_prompt: str,
         rework_feedback: str = "",
         context_limit: int = 8192,
+        stage: str = "author",
     ) -> None:
         """Emit the broken-down context window payload and token estimates."""
         # Simple heuristic: ~4 chars per token estimate
@@ -140,6 +141,7 @@ class EventEmitter:
 
         self.emit("context_window", {
             "iteration": iteration,
+            "stage": stage,
             "system_rules": system_rules,
             "tools": tools,
             "lessons": lessons,

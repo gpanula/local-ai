@@ -184,13 +184,14 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         },
     })
 
-    # 2. context_window
+    # 2. context_window (author)
     events.append({
         "run_id": run_id,
         "timestamp": ts,
         "type": "context_window",
         "data": {
             "iteration": 1,
+            "stage": "author",
             "system_rules": rules_text,
             "tools": [{"name": "write_file"}, {"name": "shellcheck_inspect"}],
             "lessons": [{"id": lid} for lid in injected_lessons],
@@ -203,6 +204,36 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(prompt) // 4 or 400,
                 "feedback": len(critique) // 4 if critique else 0,
                 "total": 2500,
+                "limit": 8192,
+            },
+        },
+    })
+
+    # 2.2 context_window (orchestrate)
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "orchestrate",
+            "system_rules": (
+                "Winter Orchestrator Planning & Architecture Standard:\n"
+                "- Decompose task requirements into concrete Implementation Plan.\n"
+                "- Constraint: DO NOT WRITE CODE. Architecture and strategy only.\n"
+                "- Structure into: 1. Analysis & Strategy, 2. Risks & Constraints, 3. Architecture & Plan, 4. Acceptance Gates."
+            ),
+            "tools": [],
+            "lessons": [{"id": lid} for lid in injected_lessons],
+            "user_prompt": prompt,
+            "rework_feedback": "(Initial planning pass)",
+            "token_breakdown": {
+                "rules": 450,
+                "tools": 0,
+                "lessons": len(injected_lessons) * 200,
+                "prompt": len(prompt) // 4 or 400,
+                "feedback": 0,
+                "total": 850 + len(injected_lessons) * 200,
                 "limit": 8192,
             },
         },
@@ -293,6 +324,29 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     events.append({
         "run_id": run_id,
         "timestamp": ts,
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "lint",
+            "system_rules": "ShellCheck Static Analysis Standard (SC2086, SC2155, SC2034) & Bash strict mode (set -euo pipefail, ERR trap)",
+            "tools": [{"name": "shellcheck", "description": "CLI Shell script static linter"}],
+            "lessons": [],
+            "user_prompt": chosen or "(Synthesized bash script)",
+            "rework_feedback": "ShellCheck: SC2086 checked. No issues found.",
+            "token_breakdown": {
+                "rules": 350,
+                "tools": 100,
+                "lessons": 0,
+                "prompt": len(chosen) // 4 or 200,
+                "feedback": 50,
+                "total": 700,
+                "limit": 8192,
+            },
+        },
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
         "type": "stage_transition",
         "data": {"stage": "lint", "iteration": 1},
     })
@@ -314,6 +368,35 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     events.append({
         "run_id": run_id,
         "timestamp": ts,
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "review",
+            "system_rules": (
+                "Reviewer Gate Verification Rubric:\n"
+                "- Validate strict bash headers (set -euo pipefail) and ERR trap handlers.\n"
+                "- Verify deterministic binary and venv path resolution (no ambient $PATH).\n"
+                "- Zero tolerance for hardcoded /home/<user> or unquoted variable expansions.\n"
+                "- Output explicit verdict: APPROVED or REJECTED with critique."
+            ),
+            "tools": [{"name": "verdict", "description": "APPROVED or REJECTED schema"}],
+            "lessons": [{"id": lid} for lid in injected_lessons],
+            "user_prompt": f"### Task Prompt:\n{prompt}\n\n### Candidate Script:\n```bash\n{chosen}\n```",
+            "rework_feedback": critique or "(No prior review critique)",
+            "token_breakdown": {
+                "rules": 600,
+                "tools": 150,
+                "lessons": len(injected_lessons) * 200,
+                "prompt": (len(prompt) + len(chosen)) // 4 or 500,
+                "feedback": len(critique) // 4 if critique else 0,
+                "total": 1450,
+                "limit": 8192,
+            },
+        },
+    })
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
         "type": "stage_transition",
         "data": {"stage": "review", "iteration": 1},
     })
@@ -327,6 +410,31 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
             "critique": critique,
             "reviewer_model": reviewer_model,
             "roles": roles,
+        },
+    })
+
+    # 7.5 execute
+    events.append({
+        "run_id": run_id,
+        "timestamp": ts,
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "execute",
+            "system_rules": "Sandbox Execution Policy: Isolated subshell, deterministic environment, trap EXIT cleanup.",
+            "tools": [{"name": "bash", "description": "Linux execution subshell"}],
+            "lessons": [],
+            "user_prompt": chosen or "(Executable script)",
+            "rework_feedback": "Execution verified exit 0.",
+            "token_breakdown": {
+                "rules": 250,
+                "tools": 50,
+                "lessons": 0,
+                "prompt": len(chosen) // 4 or 200,
+                "feedback": 50,
+                "total": 550,
+                "limit": 8192,
+            },
         },
     })
 

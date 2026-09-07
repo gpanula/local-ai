@@ -18,6 +18,13 @@ class IterationState:
     def __init__(self, iteration_num: int):
         self.iteration = iteration_num
         self.context_window: Dict[str, Any] = {}
+        self.stage_contexts: Dict[str, Dict[str, Any]] = {
+            "orchestrate": {},
+            "author": {},
+            "lint": {},
+            "review": {},
+            "execute": {},
+        }
         self.thinking: str = ""
         self.stage_thinking: Dict[str, str] = {
             "orchestrate": "",
@@ -121,6 +128,169 @@ class PipelineState:
             return "\n".join(self.terminal_lines[-50:])
         return ""
 
+    def get_stage_context(self, stage: str) -> Dict[str, Any]:
+        """Resolve the context window for a given stage/role."""
+        cur_it = self.current_iteration()
+        ctx = cur_it.stage_contexts.get(stage)
+        if ctx and ctx.get("system_rules"):
+            return ctx
+        return self._derive_stage_context(stage, cur_it)
+
+    def _derive_stage_context(self, stage: str, it: IterationState) -> Dict[str, Any]:
+        """Synthesize a structured context window for stages lacking explicit events."""
+        base_ctx = it.context_window or {}
+        task_prompt = self.prompt or base_ctx.get("user_prompt", "")
+        script_code = it.code or ""
+        rules_text = base_ctx.get("system_rules") or "[Universal System Rules Active]"
+        injected_lessons = base_ctx.get("lessons") or []
+
+        def est(t: str) -> int:
+            return max(1, len(t) // 4) if t else 0
+
+        if stage == "orchestrate":
+            orch_rules = (
+                "Winter Orchestrator Planning & Architecture Standard:\n"
+                "- Decompose task requirements into concrete Implementation Plan.\n"
+                "- Constraint: DO NOT WRITE CODE. Architecture and strategy only.\n"
+                "- Structure into: 1. Analysis & Strategy, 2. Risks & Constraints, 3. Architecture & Plan, 4. Acceptance Gates."
+            )
+            rework_fb = it.stage_thinking.get("orchestrate", "") if it.iteration > 1 else ""
+            rules_tk = est(orch_rules)
+            prompt_tk = est(task_prompt)
+            fb_tk = est(rework_fb)
+            return {
+                "stage": "orchestrate",
+                "system_rules": orch_rules,
+                "tools": [],
+                "lessons": injected_lessons,
+                "user_prompt": task_prompt,
+                "rework_feedback": rework_fb or "(Initial planning pass)",
+                "token_breakdown": {
+                    "rules": rules_tk,
+                    "tools": 0,
+                    "lessons": len(injected_lessons) * 200,
+                    "prompt": prompt_tk,
+                    "feedback": fb_tk,
+                    "total": rules_tk + prompt_tk + fb_tk + (len(injected_lessons) * 200),
+                    "limit": 8192,
+                },
+            }
+
+        elif stage == "author":
+            if it.context_window:
+                return it.context_window
+            return {
+                "stage": "author",
+                "system_rules": rules_text,
+                "tools": [
+                    {"name": "write_file", "description": "Write sanitized executable code"},
+                    {"name": "shellcheck_inspect", "description": "Inspect shell scripts"},
+                ],
+                "lessons": injected_lessons,
+                "user_prompt": task_prompt,
+                "rework_feedback": it.review.get("critique", "") if it.iteration > 1 else "",
+                "token_breakdown": {
+                    "rules": est(rules_text),
+                    "tools": 250,
+                    "lessons": len(injected_lessons) * 250,
+                    "prompt": est(task_prompt),
+                    "feedback": est(it.review.get("critique", "")),
+                    "total": est(rules_text) + 250 + (len(injected_lessons) * 250) + est(task_prompt),
+                    "limit": 8192,
+                },
+            }
+
+        elif stage == "lint":
+            lint_rules = (
+                "ShellCheck Static Analysis Rules & Standards:\n"
+                "- SC2086: Double-quote to prevent globbing/word-splitting.\n"
+                "- SC2155: Declare and assign separately to avoid masking return values.\n"
+                "- Strict bash standard: set -euo pipefail and ERR trap."
+            )
+            linter_out = it.linter.get("output", "") if it.linter else ""
+            rules_tk = est(lint_rules)
+            prompt_tk = est(script_code)
+            fb_tk = est(linter_out)
+            return {
+                "stage": "lint",
+                "system_rules": lint_rules,
+                "tools": [{"name": "shellcheck", "description": "CLI Shell script static linter"}],
+                "lessons": [],
+                "user_prompt": script_code or "(No script synthesized to lint)",
+                "rework_feedback": linter_out or "(ShellCheck analysis pending)",
+                "token_breakdown": {
+                    "rules": rules_tk,
+                    "tools": 100,
+                    "lessons": 0,
+                    "prompt": prompt_tk,
+                    "feedback": fb_tk,
+                    "total": rules_tk + 100 + prompt_tk + fb_tk,
+                    "limit": 8192,
+                },
+            }
+
+        elif stage == "review":
+            rev_rules = (
+                "Reviewer Gate Verification Rubric:\n"
+                "- Validate strict bash headers and ERR trap handlers.\n"
+                "- Verify deterministic binary and venv path resolution (no ambient $PATH).\n"
+                "- Zero tolerance for hardcoded /home/<user> or unquoted variable expansions.\n"
+                "- Output explicit verdict: APPROVED or REJECTED with critique."
+            )
+            rev_prompt = f"### Task Prompt:\n{task_prompt}\n\n### Candidate Script:\n```bash\n{script_code}\n```"
+            rev_fb = it.review.get("critique", "") if it.review else ""
+            rules_tk = est(rev_rules)
+            prompt_tk = est(rev_prompt)
+            fb_tk = est(rev_fb)
+            return {
+                "stage": "review",
+                "system_rules": rev_rules,
+                "tools": [{"name": "verdict", "description": "APPROVED or REJECTED schema"}],
+                "lessons": injected_lessons,
+                "user_prompt": rev_prompt,
+                "rework_feedback": rev_fb or "(Reviewer deliberation pending)",
+                "token_breakdown": {
+                    "rules": rules_tk,
+                    "tools": 150,
+                    "lessons": len(injected_lessons) * 200,
+                    "prompt": prompt_tk,
+                    "feedback": fb_tk,
+                    "total": rules_tk + 150 + (len(injected_lessons) * 200) + prompt_tk + fb_tk,
+                    "limit": 8192,
+                },
+            }
+
+        elif stage == "execute":
+            exec_rules = (
+                "Sandbox Execution Policy:\n"
+                "- Isolated subshell execution with strict environment variables.\n"
+                "- Execution timeout and memory bounds enforced.\n"
+                "- Auto-cleanup of temporary scratch files on exit trap."
+            )
+            term_text = "\n".join(self.terminal_lines[-30:]) if self.terminal_lines else ""
+            rules_tk = est(exec_rules)
+            prompt_tk = est(script_code)
+            fb_tk = est(term_text)
+            return {
+                "stage": "execute",
+                "system_rules": exec_rules,
+                "tools": [{"name": "bash", "description": "Linux execution subshell"}],
+                "lessons": [],
+                "user_prompt": script_code or "(No script available to execute)",
+                "rework_feedback": term_text or "(Execution pending reviewer approval)",
+                "token_breakdown": {
+                    "rules": rules_tk,
+                    "tools": 50,
+                    "lessons": 0,
+                    "prompt": prompt_tk,
+                    "feedback": fb_tk,
+                    "total": rules_tk + 50 + prompt_tk + fb_tk,
+                    "limit": 8192,
+                },
+            }
+
+        return base_ctx
+
     def handle_event(self, event: Dict[str, Any]) -> None:
         """Apply an incoming event dictionary to update state."""
         etype = event.get("type")
@@ -148,7 +318,10 @@ class PipelineState:
         elif etype == "context_window":
             iter_num = data.get("iteration", self.active_iteration_idx)
             it = self.get_iteration(iter_num)
-            it.context_window = data
+            st = data.get("stage") or "author"
+            it.stage_contexts[st] = data
+            if st == "author" or not it.context_window:
+                it.context_window = data
 
         elif etype == "thinking_chunk":
             iter_num = data.get("iteration", self.active_iteration_idx)
