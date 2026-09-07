@@ -5,6 +5,7 @@ Provides a Model Context Protocol (MCP) interface over stdio to delegate tasks,
 chat, code generation, and model management to a local Ollama instance.
 """
 
+import contextlib
 import json
 import os
 import shlex
@@ -480,6 +481,59 @@ def handle_execute_task(
         ollama_analysis
     ])
     return "\n".join(report)
+
+
+def handle_run_pipeline(
+    prompt: str,
+    model: Optional[str] = None,
+    resume: Optional[str] = None
+) -> str:
+    """
+    Executes the full Arc-Orc-Rev multi-agent pipeline (Architect -> Orchestrator ->
+    Reviewer Gate -> Security Gate -> Multi-Tier Code Verification -> Live PTY Execution ->
+    Continuous Memory & Trajectory Persistence).
+    """
+    prompt_raw = (prompt or "").strip()
+    resume_raw = (resume or "").strip()
+
+    if prompt_raw.lower() in ("--help", "-h", "help"):
+        return (
+            "### Arc-Orc-Rev Multi-Agent Pipeline Runner (`run_pipeline`)\n\n"
+            "Executes the autonomous multi-agent pipeline:\n"
+            "Architect -> Orchestrator -> Reviewer Gate -> Security Gate -> Multi-Tier Code Verification -> Live PTY Execution -> Memory & Trajectory Persistence.\n\n"
+            "**Parameters:**\n"
+            "- `prompt` (str): Task prompt text or workspace path to a prompt file (e.g. 'sysadmin/prompts/task.md'). Required unless `resume` is specified.\n"
+            "- `model` (str, optional): Ollama model to use across all pipeline stages (default: 'winter-prime:latest').\n"
+            "- `resume` (str, optional): Run ID to resume an aborted run from state.json.\n\n"
+            "**Examples:**\n"
+            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md')`\n"
+            "- `run_pipeline(prompt='Write a python script to check service health', model='winter-prime:latest')`\n"
+            "- `run_pipeline(prompt='', resume='run-20260907-...')`"
+        )
+
+    if not resume_raw and not prompt_raw:
+        raise ValueError("A non-empty 'prompt' (or prompt file path) or a 'resume' Run ID is required.")
+
+    prompt_content = prompt_raw
+    if prompt_content:
+        target_path = os.path.join(WORKSPACE_ROOT, prompt_content) if not os.path.isabs(prompt_content) else prompt_content
+        if os.path.isfile(target_path):
+            with open(target_path, "r", encoding="utf-8") as f:
+                prompt_content = f.read().strip()
+        elif os.path.isfile(prompt_content):
+            with open(prompt_content, "r", encoding="utf-8") as f:
+                prompt_content = f.read().strip()
+
+    selected_model = model or "winter-prime:latest"
+
+    from pipeline import run_pipeline, resume_pipeline
+    with contextlib.redirect_stdout(sys.stderr):
+        if resume_raw:
+            result = resume_pipeline(resume_raw, model=selected_model)
+        else:
+            result = run_pipeline(prompt_content, model=selected_model)
+
+    return json.dumps(result, indent=2)
 
 
 def _find_executable(name: str, venv_path: Optional[str] = None, bin_dir: Optional[str] = None) -> Optional[str]:
@@ -1042,6 +1096,50 @@ TOOLS = [
             },
             "required": []
         }
+    },
+    {
+        "name": "run_pipeline",
+        "description": "Executes the Arc-Orc-Rev multi-agent pipeline (Architect -> Orchestrator -> Reviewer Gate -> Security Gate -> Multi-Tier Code Verification -> Live PTY Execution -> Memory & Trajectory Persistence) on a task prompt or prompt file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/hello_world_test.md')."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional local Ollama model to use for all pipeline stages (default: 'winter-prime:latest')."
+                },
+                "resume": {
+                    "type": "string",
+                    "description": "Optional Run ID to resume an aborted run from state.json."
+                }
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "process_prompt",
+        "description": "Alias for run_pipeline: processes a task prompt through the autonomous Arc-Orc-Rev multi-agent pipeline.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/hello_world_test.md')."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional local Ollama model to use for all pipeline stages (default: 'winter-prime:latest')."
+                },
+                "resume": {
+                    "type": "string",
+                    "description": "Optional Run ID to resume an aborted run from state.json."
+                }
+            },
+            "required": ["prompt"]
+        }
     }
 ]
 
@@ -1160,6 +1258,12 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     priority=args.get("priority"),
                     since=args.get("since")
                 )
+            elif tool_name in ("run_pipeline", "process_prompt", "ollama_run_pipeline"):
+                text = handle_run_pipeline(
+                    prompt=args.get("prompt", ""),
+                    model=args.get("model"),
+                    resume=args.get("resume")
+                )
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -1180,12 +1284,13 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         except Exception as e:
             sys.stderr.write(f"[ERROR] Tool execution failed for {tool_name}: {e}\n")
             sys.stderr.flush()
+            err_msg = str(e) if isinstance(e, ValueError) else "An internal error occurred. Check server logs."
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
                     "isError": True,
-                    "content": [{"type": "text", "text": f"Error executing {tool_name}: An internal error occurred. Check server logs."}]
+                    "content": [{"type": "text", "text": f"Error executing {tool_name}: {err_msg}"}]
                 }
             }
     
@@ -1202,7 +1307,6 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def main():
     """Main stdio loop for MCP server."""
-    # Ensure stdout/stderr encoding
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -1224,6 +1328,7 @@ def main():
         except Exception as e:
             sys.stderr.write(f"Unexpected error in MCP loop: {e}\n")
             sys.stderr.flush()
+
 
 
 if __name__ == "__main__":

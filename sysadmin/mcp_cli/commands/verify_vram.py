@@ -15,7 +15,7 @@ from mcp_core.hardware import get_default_model
 @command
 class VerifyVramCommand(BaseCommand):
     name = "verify-vram"
-    help = "Verify if models fit 100% in GPU VRAM or if layers/KV-cache offload to CPU/RAM"
+    help = "Verify if models fit 100%% in GPU VRAM or if layers/KV-cache offload to CPU/RAM"
 
     def register_args(self, parser):
         parser.add_argument(

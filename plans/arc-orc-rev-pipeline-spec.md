@@ -691,25 +691,36 @@ ExecutionResult.status == "failure":
 
 Events are tagged with `pillar` to enable post-run learning analysis by pillar weakness.
 
-### 6.2 Continuous Learning Hooks & Lesson Timing Policy
+### 6.2 Continuous Learning Hooks & Multi-Stage Lesson Lifecycle
 
-**Timing & Anti-Contamination Rules**:
-- **Intra-run task retries**: When a task fails with `status == "failure"`, its `cognition.risks`
-  is injected *only* into immediate retries of that exact task (`retries < 2`). It is NOT
-  injected into other tasks within the same run to prevent circular error propagation.
-- **Inter-run MemoryStore injection**: Extraction into global `MemoryStore` (via `extraction.py`)
-  occurs strictly at run completion (`status == "complete"` or `status == "aborted"`). Only lessons
-  from sealed runs become eligible for FTS5 retrieval in subsequent pipeline runs.
+The pipeline implements an end-to-end continuous learning lifecycle spanning all 6 roles, both planning and execution phases:
 
-On every `run_aborted` or `ExecutionResult.status == "failure"`:
-- Extract `cognition.risks` → **negative lesson** → MemoryStore (`extraction.py`)
+#### 1. Multi-Stage Dynamic Lesson Injection
+Lessons are retrieved from `MemoryStore` (`sysadmin/data/memory.db`) via hybrid FTS5/BM25 queries and injected into each phase:
+- **Architect Phase**: Injects `System Architecture` and `Decomposition` lessons into `user_payload["architectural_guidance"]`.
+- **Orchestrator Phase**: Injects `Multi-Agent Orchestration` and task domain lessons into `user_payload["orchestration_guidance"]`.
+- **Reviewer Phase**: Injects dynamic `Code Quality Toolchain` audit heuristics into `annotated_plan["audit_heuristics"]`.
+- **Security Phase**: Injects dynamic `Security & Hardening` STRIDE threat heuristics into `annotated_plan["security_heuristics"]`.
+- **Dispatch / Executor Phase**: Injects domain-tagged lessons (`Defensive Bash Scripting`, `Binary Isolation`) into `TaskMessage.description`.
 
-On every `ExecutionResult.status == "success"` with `iterations == 1`:
-- Extract `cognition.risks` (pre-emptive mitigations) → **positive lesson** → MemoryStore
+#### 2. Pre-Execution Multi-Tier Code Gates
+Before any created artifact is executed by a downstream executor (`sysadmin`), it must pass through three verification tiers:
+- **Tier 1 (Deterministic Linter Gate)**: `validator.py:validate_code_output` executes `shellcheck` (`SC2086`, `SC2164`, `SC2181`), Python AST validation (`ast.parse`), and path containment checks.
+- **Tier 2A (Reviewer Code Gate)**: `sysadmin/prompts/roles/reviewer_code.md` audits error handling, explicit trap line numbers, and deterministic venv binary resolution.
+- **Tier 2B (Security Behavioral Gate)**: `sysadmin/prompts/roles/security_code.md` evaluates behavioral side-effects, privilege escalation, sandbox boundaries, and file permission safety (`umask`, `chmod`).
 
-On run `complete` or `partial`:
-- Write trajectory to `sysadmin/data/trajectories.jsonl` (full 4-pillar cognition block preserved)
-- Feed into CoT SFT/DPO dataset pipeline via `dataset.py`
+#### 3. Extraction & Remediation Triggers
+- **Upstream Planning Remediation (`solved_pattern`)**: When a plan is rejected by Reviewer or Security (`architect_revisions_used > 0` or `orchestrator_revisions_used > 0`), and a subsequent revision clears the Security Gate, `extract_lesson_from_critique` converts the critique and remediated plan into a `solved_pattern` lesson staged in `MemoryStore`.
+- **Planning Budget Exhaustion (`hard_failure`)**: When the Architect or Orchestrator exhausts its revision budget (3 attempts), the pipeline aborts and stages a `hard_failure` lesson capturing the unresolvable planning conflict.
+- **Clean Plan Lesson Attribution**: When a plan clears the Security Gate on the first pass (0 revisions), +1 utility (`prevented_rework_count`) is credited to all injected planning lessons.
+- **Proactive Clean-Run Mining (`proven_pattern`)**: When a pipeline run completes cleanly (0 planning revisions, 0 task retries, status `complete`), proactive threat mitigations in `cognition.risks` and `cognition.solution` are mined into a `proven_pattern` lesson.
+- **Task Retry Anti-Contamination**: Intra-run task retries inject failure cognition *only* into immediate retries of that exact task (`retries < 2`). Lessons from sealed runs become globally retrievable via `MemoryStore` upon run completion.
+
+#### 4. Run Completion & Trajectory Persistence
+On every run termination (`status == "complete"` or `status == "aborted"`):
+- Append a full trajectory record to `sysadmin/data/trajectories.jsonl` via `record_trajectory` with multi-agent 4-pillar cognition blocks across all active roles (`architect`, `orchestrator`, `reviewer`, `security`, `coder`, `sysadmin`).
+- Seal the run to cold storage (`store.seal_run(run_id)`).
+- Feed recorded trajectories into the CoT SFT / DPO dataset pipeline (`dataset.py`).
 
 ---
 

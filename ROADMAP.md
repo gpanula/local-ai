@@ -40,15 +40,17 @@ This workspace organizes our local AI research, workflows, and experiments acros
 
 ---
 
-## 2. 🐧 Linux SysAdmin & Ansible Automation (`/sysadmin`)
-* **Purpose**: Directing local AI agents to perform Linux systems administration and infrastructure coding.
-* **Key Workflows**:
-  * **System Administration**: Diagnostic triage (`journalctl`, `dmesg`), system inspection, network troubleshooting (`iproute2`, `nftables`), and service management (`systemd`).
-  * **Safe Agent Execution**: Enforcing dry-run/check-mode steps and idempotency validation before committing system-level modifications.
-  * **Ansible Engineering**: Writing, testing, and debugging custom Python Ansible modules (`AnsibleModule` boilerplates, argument specs, `check_mode`, `exit_json`, `fail_json`), Jinja2 templates, and playbooks.
+## 2. 🐧 Linux SysAdmin, Arc-Orc-Rev Pipeline & Cognitive Learning (`/sysadmin`)
+* **Purpose**: Autonomous multi-agent pipeline directing local AI agents to perform Linux systems administration, defensive automation, and iterative self-correction.
+* **Key Architecture & Capabilities**:
+  * **Arc-Orc-Rev Multi-Agent State Machine (`pipeline.py`)**: 6 canonical horizontal cognitive roles (`architect`, `orchestrator`, `reviewer`, `security`, `coder`, `sysadmin`) adhering to the standard 4-pillar contract (`Analysis`, `Risks`, `Solution`, `Verification`).
+  * **Multi-Tier Pre-Execution Code Review Gates**: Zero uninspected execution via Tier 1 Linter (`validator.py`: ShellCheck, AST, path containment), Tier 2A Reviewer Code Gate (`reviewer_code.md`), and Tier 2B Security Behavioral Gate (`security_code.md`).
+  * **Multi-Stage Cognitive Memory (`MemoryStore`)**: SQLite-backed FTS5 memory engine with stage-specific guidance, upstream remediation capture (`solved_pattern`), budget exhaustion capture (`hard_failure`), and proactive clean-run mining (`proven_pattern`).
+  * **Fine-Tuning Dataset Pipeline (`dataset.py`)**: Trajectories recorded to `sysadmin/data/trajectories.jsonl` and exported to role-targeted Chain-of-Thought (CoT) SFT and DPO datasets.
+  * **Live PTY Execution**: Sandboxed interactive bash execution via `terminal-mcp` with full cognitive reasoning visible in stdout and terminal buffers.
 * **Recommended Models**:
-  * `qwen2.5-coder:7b` (4.7 GB) — High-fidelity code and YAML generation.
-  * `qwen3:8b` (5.2 GB) — Complex multi-step reasoning and root-cause analysis.
+  * `winter-prime:latest` / `qwen3:8b` (5.2 GB) — Complex multi-step reasoning, architecture, DAG construction, and threat modeling.
+  * `winter-coder:8gb-trained` / `qwen2.5-coder:7b` (4.7 GB) — High-fidelity defensive code, ShellCheck compliance, and Ansible engineering.
 
 ---
 

@@ -1,90 +1,110 @@
 # Local AI Multi-Agent Pipeline: Session Summary & Resume Guide
 
-**Date**: September 6, 2026  
-**Status**: Arc-Orc-Rev Pipeline Specification (RFC v7) Completed; Single-Model Multi-Persona (SMMP) Modelfiles Created for 8GB, 16GB, and 24GB Hardware Tiers
+**Date**: September 7, 2026  
+**Status**: Arc-Orc-Rev Pipeline Operational, Multi-Stage Memory Engine Integrated, Pre-Execution Code Gates Validated, MCP Server Pipeline Tools Registered (`run_pipeline` / `process_prompt`)  
+**Active Branch**: `feat/arc-orc-rev-pipeline`
 
 ---
 
 ## 📌 Executive Summary of Accomplishments
 
-### 1. Arc-Orc-Rev Pipeline Specification ([`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md) — RFC v7)
-- **Dual-Axis Taxonomy System**: Grounded the architecture directly in the Horizontal Cognitive Taxonomy (The 6 Roles from [`sysadmin/README.md`](./README.md)) and the Vertical Domain Taxonomy ([`ollama_update/taxonomy.json`](../ollama_update/taxonomy.json)).
-- **Mandatory Security Gate**: Promoted Security to a first-class validation phase between Reviewer and Dispatch, enforcing STRIDE threat modeling, dry-run dependency requirements (Rule `R-001`), and secret isolation (Rule `R-002`).
-- **Standard 4-Pillar Contract**: Replaced free-form rationale across all inter-agent messages with machine-checkable `cognition` blocks (`analysis`, `risks`, `solution`, `verification`), enforced by Rule `R-006` with minimum substantive character thresholds (>= 30 chars) and anti-placeholder checks.
-- **Dual-Layer Context Capture & Lossless Compression (§10)**:
-  - Layer 1: Content-addressed references for registries, lessons, and prompts.
-  - Layer 2: Verbatim cognition and code traces to preserve causal signal for CoT SFT / DPO training.
-  - Lifecycle: Plain JSON hot path during active runs; sealed to cold `.tar.zst` archives upon completion. Achieves **~91% storage reduction** (~45 MB for 10,000 runs) with transparent streaming single-member extraction in Python 3.12+.
-- **Deterministic Reviewer Pre-Filter (`validator.py`)**: Defined programmatic pre-filtering for Reviewer checks 1–5, 7, and 9 to fail fast and prevent wasting local LLM inference compute.
-- **Recovery Task Governance & Lesson Anti-Contamination**: Governed fallback task synthesis (mandating expedited Reviewer + Security validation) and localized intra-run lesson feedback to immediate task retries (`retries < 2`), delaying global `MemoryStore` extraction to run seal.
-- **Resumable Checkpoints**: Defined structured `run_aborted.json` checkpointing with operator resumption via `python sysadmin/pipeline.py --resume <run_id>`.
-- **Pure 6-Role Taxonomy**: Removed ad-hoc `"researcher"` roles to preserve strict taxonomy boundaries; research tools (`web_search`, `read_url`) are assigned directly to the Architect and Coder.
+### 1. Deterministic Pre-Filters & Context Store
+- **[`sysadmin/validator.py`](./validator.py)**: Implemented deterministic pre-filters (Checks 1–5, 7, and 9) failing fast on invalid schemas, missing tools/agents, invalid domain tags, DAG cycles, prompt tampering, or substandard cognition blocks (< 30 chars).
+- **[`sysadmin/mcp_core/context_store.py`](./mcp_core/context_store.py)**: Implemented dual-layer context storage with plain JSON during active runs and `.tar.zst` lossless compression upon completion, with single-member streaming extraction.
 
-### 2. Single-Model Multi-Persona (SMMP) Execution Profile (§4.7)
-- Formalized an execution mode where a single capable foundation model (e.g. `qwen2.5-coder`) remains pinned in VRAM (`keep_alive: -1`), eliminating 2–10s model-swapping latency per pipeline hop (**0 ms model-loading overhead**).
-- Modulates 4 runtime dials per stage:
-  1. *Stateless Context Reset*: Drop conversation history between stages to eliminate context drift and hallucination bleed.
-  2. *Role Persona Injection*: Dynamic injection of role prompt from `sysadmin/prompts/roles/{role}.md`.
-  3. *Sampling Profile Tuning*: Exploratory sampling for Architect (`temp: 0.25`, `top_p: 0.90`), greedy deterministic sampling for Reviewer/Security (`temp: 0.00`, `top_p: 1.00`), syntax precision for Coder/Sysadmin.
-  4. *Tool Registry Masking*: Filter API `tools` parameter to confine each stage to authorized tools.
-- Countered "self-review bias" via deterministic pre-filters, adversarial prompt framing, and blind artifact handoffs.
+### 2. Arc-Orc-Rev Multi-Agent State Machine ([`sysadmin/pipeline.py`](./pipeline.py))
+- Operational state machine driving:
+  1. **Architect**: High-level task decomposition, risk analysis, and architectural guidance.
+  2. **Orchestrator**: Concrete DAG generation, task dependency mapping, and model assignment.
+  3. **Reviewer Gate**: Deterministic pre-filter validation + LLM semantic plan audit.
+  4. **Security Gate**: STRIDE threat modeling, privilege isolation, and network safety checks.
+  5. **Dispatch & Multi-Tier Code Gates**: Pre-execution verification and execution routing.
+  6. **Resumable Checkpoints**: State persistence in `runs/<run_id>/state.json` with `--resume <run_id>` support.
 
-### 3. Custom Prime Modelfiles for Ollama (8GB, 16GB, 24GB Tiers)
-- Created custom Ollama Modelfiles embedding **Winter Prime**, the foundational single-model multi-persona agent conditioned on the 6 roles, 4-pillar contract, and defensive bash/Python invariants:
-  - 🟢 **8GB Tier**: [`ollama_update/customized_models/8gb/Modelfile-prime-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-prime-qwen7b) — `winter-prime:8gb-qwen` (alias: `winter-prime:8gb`, `winter-prime:latest`), `qwen2.5-coder:7b`, 16k context (~5.6–6.5 GB VRAM).
-  - 🟡 **16GB Tier**: [`ollama_update/customized_models/16gb/Modelfile-prime-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-prime-qwen14b) — `winter-prime:16gb-qwen` (alias: `winter-prime:16gb`), `qwen2.5-coder:14b`, 32k context (~10–14 GB VRAM).
-  - 🟣 **24GB Tier**: [`ollama_update/customized_models/24gb/Modelfile-prime-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-prime-qwen32b) — `winter-prime:24gb-qwen` (alias: `winter-prime:24gb`), `qwen2.5-coder:32b`, 16k context (~18–22 GB VRAM).
-- Updated [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh) with build targets: `prime-8gb`, `prime-16gb`, `prime-24gb`, and `prime`.
-- Documented Prime mode and build commands in [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md).
+### 3. Pre-Execution Code Gates (Three-Tier Defense)
+- **Tier 1 (Linter Gate)**: Deterministic ShellCheck static analysis, `set -euo pipefail` enforcement, and `ERR` diagnostic trap validation.
+- **Tier 2A (Reviewer Code Gate)**: LLM prompt fidelity and acceptance criteria audit (`sysadmin/prompts/roles/reviewer_code.md`).
+- **Tier 2B (Security Code Gate)**: LLM STRIDE behavioral safety audit (`sysadmin/prompts/roles/security_code.md`) ensuring no unprivileged escalation, binary tampering, or dangerous side effects.
+- **Strict Role Boundaries**: Coder authors code and passes gates; execution is strictly delegated to `sysadmin` (eliminates duplicate/premature script executions).
 
-### 4. Knowledge Graph Synchronization
-- Executed `sysadmin/venv/bin/graphify update .` to update the graphify knowledge graph (1511 nodes, 2342 edges across 125 communities).
+### 4. Multi-Stage Continuous Learning & Attribution Engine
+- **Cross-Role Slot 5 Lesson Injection**:
+  - Injects `System Architecture` lessons into Architect.
+  - Injects `Multi-Agent Orchestration` lessons into Orchestrator.
+  - Injects `Code Quality Toolchain` audit heuristics into Reviewer.
+  - Injects `Security & Hardening` STRIDE heuristics into Security Gate.
+  - Injects domain-tagged lessons into execution tasks (`coder`, `sysadmin`).
+- **Closed-Loop Memory Capture & Attribution**:
+  - **Remediation (`solved_pattern`)**: Captures critiques and successful remediations after gate revisions.
+  - **Exhaustion (`hard_failure`)**: Stages hard failures when revision budgets are exhausted.
+  - **Clean Run Mining (`proven_pattern`)**: Automatically extracts proactive risk mitigations from 0-retry runs.
+  - **Attribution**: Automatically increments utility (+1 `prevented_rework_count`) on active lessons for clean first-pass runs.
+- **Full 6-Role Trajectory Persistence**: Records complete trajectories to [`sysadmin/data/trajectories.jsonl`](./data/trajectories.jsonl) preserving `<think>` reasoning traces and 4-pillar cognition across all roles.
+
+### 5. Telemetry Enhancements
+- Updated telemetry reporting in [`sysadmin/pipeline.py`](./pipeline.py) and [`sysadmin/mcp_cli/commands/pipeline.py`](./mcp_cli/commands/pipeline.py) to include the active executing role alongside the model:
+  `📊 *Generated by winter-prime:latest (architect): 540 tokens in 20.49s (⚠️ 26.4 t/s) [resident] | Context: 1,420 / 16,384 tokens (8.7%)*`
+
+### 6. Local-Ollama MCP Server Pipeline Tools
+- **Registered Tools**: Added `run_pipeline` and `process_prompt` to [`sysadmin/mcp_ollama/server.py`](./mcp_ollama/server.py).
+- **Stdio Protocol Protection**: Redirected stdout banners to `sys.stderr` via `contextlib.redirect_stdout(sys.stderr)` and updated `send_terminal_mcp` in [`sysadmin/mcp_core/transport.py`](./mcp_core/transport.py) so JSON-RPC stdio protocol is never corrupted.
+- **Documentation**: Documented tool schemas in [`sysadmin/mcp_ollama/README.md`](./mcp_ollama/README.md).
+- **CLI Fix**: Escaped `%` in [`sysadmin/mcp_cli/commands/verify_vram.py`](./mcp_cli/commands/verify_vram.py) to resolve an argparse `TypeError`.
+- **Unit Tests**: Added [`sysadmin/tests/test_mcp_pipeline_tool.py`](./tests/test_mcp_pipeline_tool.py) — 257 total passing unit tests across the repo.
+
+### 7. Documentation & Knowledge Graph Refresh
+- Aligned [`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md), [`ollama_update/prompt_evolution_strategy.md`](../ollama_update/prompt_evolution_strategy.md), [`ollama_update/reasoning_and_learning_integration.md`](../ollama_update/reasoning_and_learning_integration.md), [`README.md`](../README.md), and [`sysadmin/README.md`](./README.md).
+- Updated knowledge graph via `graphify update .` (1,783 nodes, 2,856 edges, 145 communities).
 
 ---
 
-## 🚀 How to Resume Work (Next Steps)
+## ⏸️ Current State at Pause
 
-### Step 1: Build Local Prime Models
-From the `customized_models` directory, build the Prime model matching your workstation VRAM:
-```bash
-cd ollama_update/customized_models
+- **MCP Server Registration**:
+  `local-ollama` is configured in [`~/.gemini/config/mcp_config.json`](file:///home/pang/.gemini/config/mcp_config.json).
+- **IDE MCP Status**:
+  The IDE was started prior to updating tool definitions; restarting the IDE will cause Antigravity / Gemini Code Assist to discover and establish an active connection to `local-ollama`.
+- **Target Test Prompt**:
+  [`sysadmin/prompts/hello_world_test.md`](./prompts/hello_world_test.md) is ready for testing.
+- **Working Tree**:
+  All changes are clean, tested, and uncommitted on branch `feat/arc-orc-rev-pipeline`.
 
-# For 8GB VRAM (e.g. consumer laptop/desktop):
-./build_models.sh prime-8gb
+---
 
-# For 16GB VRAM:
-./build_models.sh prime-16gb
+## 🚀 How to Resume Work (Immediate Next Steps)
 
-# For 24GB VRAM:
-./build_models.sh prime-24gb
-```
-
-### Step 2: Implement the Deterministic Pre-Filter (`sysadmin/validator.py`)
-Implement the deterministic validation functions specified in §4.3:
-- Steps 1–5: JSON schema validation (`AnnotatedPlanMessage`), tool existence check against `tools.json`, agent existence check against `agents.json`, domain tag check against `taxonomy.json`, and DAG acyclicity traversal.
-- Step 7: Prompt fidelity hash check (`sha256(original_prompt) == sha256(frozen_prompt)`).
-- Step 9: 4-Pillar completeness & substance check (all 4 fields non-empty, >= 30 chars, disallowing `"none"` / `"n/a"`).
-
-### Step 3: Implement Context Store (`sysadmin/mcp_core/context_store.py`)
-Implement the storage abstraction specified in §10:
-- `ContextStore.save_snapshot()`: Writes `context_snapshot.json` during active runs.
-- `ContextStore.seal_run()`: Compresses `runs/<run_id>/` into `runs/<run_id>.tar.zst` using Python 3.12+ `tarfile`.
-- `ContextStore.load()`: Transparently extracts snapshot files directly from `.tar.zst` members on demand without full directory extraction.
-
-### Step 4: Implement Arc-Orc-Rev Pipeline Runner (`sysadmin/pipeline.py`)
-Integrate the SMMP execution profile with the message contracts from §3:
-- Build the state machine coordinating Architect -> Orchestrator -> Reviewer (Validator + LLM) -> Security Gate -> Executor Dispatch.
-- Implement the `SMMP_PROFILES` dynamic sampling configuration (temperature 0.25 Architect to 0.0 Reviewer/Security).
-- Implement checkpoint saving and the `--resume <run_id>` CLI argument.
+1. **Restart the IDE**:
+   The user restarts Antigravity IDE to trigger full discovery and loading of the `local-ollama` MCP server from `~/.gemini/config/mcp_config.json`.
+2. **Verify MCP Server Connection**:
+   Check that `local-ollama` appears in active MCP servers and exposes `run_pipeline` / `process_prompt`.
+3. **Execute Hello World Test via IDE MCP Tool**:
+   Invoke the MCP server tool directly from Antigravity:
+   ```json
+   call_mcp_tool(
+     ServerName="local-ollama",
+     ToolName="run_pipeline",
+     Arguments={
+       "prompt": "sysadmin/prompts/hello_world_test.md",
+       "model": "winter-prime:latest"
+     }
+   )
+   ```
+4. **Verify Artifacts**:
+   - Check creation and execution of [`sysadmin/hello_world.sh`](./hello_world.sh).
+   - Check terminal output in `terminal-mcp` PTY.
+   - Verify trajectory record in [`sysadmin/data/trajectories.jsonl`](./data/trajectories.jsonl).
+   - Verify memory attribution in [`sysadmin/data/memory.db`](./data/memory.db).
+5. **Git Commit & PR**:
+   Format gitmoji commit on branch `feat/arc-orc-rev-pipeline` and prepare PR for human review.
 
 ---
 
 ## 📂 Key Files Reference
-* **Arc-Orc-Rev Pipeline Specification**: [`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md)
-* **8GB Prime Modelfile**: [`ollama_update/customized_models/8gb/Modelfile-prime-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-prime-qwen7b)
-* **16GB Prime Modelfile**: [`ollama_update/customized_models/16gb/Modelfile-prime-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-prime-qwen14b)
-* **24GB Prime Modelfile**: [`ollama_update/customized_models/24gb/Modelfile-prime-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-prime-qwen32b)
-* **Model Build Automation**: [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh)
-* **Customized Models Documentation**: [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md)
-* **Taxonomy & Roles Architecture**: [`sysadmin/README.md`](./README.md)
-* **Agent Rules & Safety Invariants**: [`AGENTS.md`](../AGENTS.md)
+* **Session Resume Document**: [`sysadmin/SESSION_RESUME.md`](./SESSION_RESUME.md)
+* **Pipeline Runner**: [`sysadmin/pipeline.py`](./pipeline.py)
+* **MCP Server**: [`sysadmin/mcp_ollama/server.py`](./mcp_ollama/server.py)
+* **MCP Config**: [`~/.gemini/config/mcp_config.json`](file:///home/pang/.gemini/config/mcp_config.json)
+* **Pipeline Test Prompt**: [`sysadmin/prompts/hello_world_test.md`](./prompts/hello_world_test.md)
+* **Multi-Stage Memory Tests**: [`sysadmin/tests/test_full_pipeline_memory.py`](./tests/test_full_pipeline_memory.py)
+* **Code Gate Tests**: [`sysadmin/tests/test_code_gates.py`](./tests/test_code_gates.py)
+* **MCP Pipeline Tool Tests**: [`sysadmin/tests/test_mcp_pipeline_tool.py`](./tests/test_mcp_pipeline_tool.py)

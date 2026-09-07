@@ -5,14 +5,17 @@ checks from RFC v7 §4.3 (Steps 1-5, 7, 9). If any check fails, returns a Review
 immediately without invoking the LLM Reviewer.
 """
 
+import ast
 from collections import defaultdict
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Set
 
 from mcp_core.workspace import WORKSPACE_ROOT
+from mcp_ollama.server import handle_shellcheck_inspect
 
 # Constants for cognition checks
 PILLAR_FIELDS = ["analysis", "risks", "solution", "verification"]
@@ -585,4 +588,144 @@ def validate_annotated_plan(msg: dict, frozen_prompt: str) -> dict:
             "solution": solution,
             "verification": verification,
         },
+    }
+
+
+def validate_code_output(task: dict, outputs: dict) -> dict:
+    """Deterministic Linter Gate for authored code files before writing/execution (RFC v7 §4.5, Rules R-003, R-004).
+
+    Audits generated files in outputs dictionary:
+    1. For Bash scripts (.sh) or tasks with domain_tag "Defensive Bash Scripting":
+       - R-003: Must declare 'set -euo pipefail'
+       - R-003: Must declare an ERR trap ('trap ... ERR')
+       - R-004: Binary isolation (must not hardcode /home/<user>; should resolve REPO_ROOT / VENV_DIR deterministically if invoking binaries)
+       - ShellCheck: Static analysis via handle_shellcheck_inspect
+    2. For Python scripts (.py):
+       - Python AST syntax compile validation (ast.parse)
+
+    Returns:
+        dict matching code_review_verdict schema:
+        {
+            "schema_version": "2.0",
+            "message_type": "code_review_verdict",
+            "verdict": "approved" | "rejected",
+            "violations": [...],
+            "critique": "bulleted critique string"
+        }
+    """
+    violations: List[dict] = []
+
+    if not isinstance(outputs, dict) or not outputs:
+        return {
+            "schema_version": "2.0",
+            "message_type": "code_review_verdict",
+            "verdict": "approved",
+            "violations": [],
+            "critique": "",
+        }
+
+    domain_tags = [str(t).lower() for t in task.get("domain_tags", [])]
+    is_bash_task = any("bash" in dt for dt in domain_tags)
+
+    for path, content in outputs.items():
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        # Skip execution telemetry/stdout/stderr artifact keys
+        if path.lower() in ("stdout", "stderr", "returncode", "exit_code", "output", "result", "hello_world_result"):
+            continue
+
+        # 1. Shell / Bash validation
+        is_sh_file = path.endswith((".sh", ".bash"))
+        has_sh_shebang = content.strip().startswith("#!") and any(
+            sh in content.splitlines()[0] for sh in ("bash", "sh", "dash", "zsh")
+        )
+
+        if is_sh_file or has_sh_shebang or is_bash_task:
+            # If domain is bash but key is not a script file and has no shebang, skip
+            if not is_sh_file and not has_sh_shebang and not any(p.endswith((".sh", ".bash")) for p in task.get("outputs", [])):
+                continue
+            # Check 1: set -euo pipefail (R-003)
+            has_pipefail = bool(
+                re.search(r"set\s+-[a-zA-Z]*e[a-zA-Z]*u[a-zA-Z]*o\s+pipefail", content)
+                or ("set -euo pipefail" in content)
+                or ("set -e" in content and "set -u" in content and "pipefail" in content)
+            )
+            if not has_pipefail:
+                violations.append({
+                    "violation_id": f"v-code-{len(violations)+1:03d}",
+                    "type": "missing_pipefail_header",
+                    "path": path,
+                    "rule_ref": "R-003",
+                    "pillar_ref": "3",
+                    "description": f"File '{path}' is missing required defensive bash header: 'set -euo pipefail'.",
+                    "severity": "blocking",
+                })
+
+            # Check 2: ERR trap (R-003)
+            has_err_trap = bool(re.search(r"trap\s+['\"].*?['\"]\s+ERR", content))
+            if not has_err_trap:
+                violations.append({
+                    "violation_id": f"v-code-{len(violations)+1:03d}",
+                    "type": "missing_err_trap",
+                    "path": path,
+                    "rule_ref": "R-003",
+                    "pillar_ref": "3",
+                    "description": f"File '{path}' is missing required diagnostic ERR trap (e.g. trap 'echo \"❌ [ERROR] ...\" >&2; exit 1' ERR).",
+                    "severity": "blocking",
+                })
+
+            # Check 3: Hardcoded home path sanitization (R-004)
+            if re.search(r"/home/[a-zA-Z0-9_\-]+", content):
+                violations.append({
+                    "violation_id": f"v-code-{len(violations)+1:03d}",
+                    "type": "hardcoded_home_path",
+                    "path": path,
+                    "rule_ref": "R-004",
+                    "pillar_ref": "3",
+                    "description": f"File '{path}' contains hardcoded '/home/...' path violating AGENTS.md sanitization. Use relative workspace paths, REPO_ROOT, or VENV_DIR.",
+                    "severity": "blocking",
+                })
+
+            # Check 4: ShellCheck analysis (R-003)
+            sc_out = handle_shellcheck_inspect(content)
+            if "ShellCheck Analysis Findings" in sc_out or "SC1" in sc_out or "SC2" in sc_out:
+                violations.append({
+                    "violation_id": f"v-code-{len(violations)+1:03d}",
+                    "type": "shellcheck_findings",
+                    "path": path,
+                    "rule_ref": "R-003",
+                    "pillar_ref": "4",
+                    "description": f"ShellCheck static analysis findings in '{path}':\n{sc_out}",
+                    "severity": "blocking",
+                })
+
+        # 2. Python validation (.py)
+        elif path.endswith(".py"):
+            try:
+                ast.parse(content)
+            except SyntaxError as e:
+                violations.append({
+                    "violation_id": f"v-code-{len(violations)+1:03d}",
+                    "type": "python_syntax_error",
+                    "path": path,
+                    "rule_ref": "R-005",
+                    "pillar_ref": "3",
+                    "description": f"Python syntax error in '{path}': line {e.lineno}: {e.msg}",
+                    "severity": "blocking",
+                })
+
+    verdict = "approved" if not violations else "rejected"
+    critique = (
+        "\n".join([f"- [{v['type']}] {v['description']}" for v in violations])
+        if violations
+        else ""
+    )
+
+    return {
+        "schema_version": "2.0",
+        "message_type": "code_review_verdict",
+        "verdict": verdict,
+        "violations": violations,
+        "critique": critique,
     }

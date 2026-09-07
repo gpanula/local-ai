@@ -149,6 +149,22 @@ def test_run_pipeline_mocked_success(tmp_path, monkeypatch):
                     "verification": "Verified sandbox constraints and tool boundaries.",
                 },
             })
+        elif role == "coder":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "execution_result",
+                "run_id": run_id,
+                "task_id": "t-001",
+                "role": "coder",
+                "status": "success",
+                "outputs": {},
+                "cognition": {
+                    "analysis": "Coder analysis of implementation.",
+                    "risks": "No execution risks encountered.",
+                    "solution": "Authored defensive script.",
+                    "verification": "Syntax verified.",
+                },
+            })
         raise ValueError(f"Unexpected role: {role}")
 
     monkeypatch.setattr("pipeline.stage_chat", fake_stage_chat)
@@ -249,6 +265,22 @@ def test_run_pipeline_pre_filter_rejection_routes_to_orchestrator(tmp_path, monk
                     "risks": "No threats",
                     "solution": "Clear",
                     "verification": "Verified",
+                },
+            })
+        elif role == "coder":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "execution_result",
+                "run_id": run_id,
+                "task_id": "t-001",
+                "role": "coder",
+                "status": "success",
+                "outputs": {},
+                "cognition": {
+                    "analysis": "Coder analysis of implementation.",
+                    "risks": "No execution risks encountered.",
+                    "solution": "Authored defensive script.",
+                    "verification": "Syntax verified.",
                 },
             })
         raise ValueError(f"Unexpected role: {role}")

@@ -31,6 +31,8 @@ A lightweight, zero-dependency JSON-RPC 2.0 stdio MCP server bridging AI orchest
     * Queries systemctl service status with bounded unpaged output.
 12. **`journal_logs`**:
     * Queries bounded journalctl log entries filtered by unit, priority, time window, and lines limit.
+13. **`run_pipeline`** (alias: **`process_prompt`**):
+    * Directly executes the Arc-Orc-Rev multi-agent pipeline (Architect ➔ Orchestrator ➔ Reviewer Gate ➔ Security Gate ➔ Pre-Execution Code Gates ➔ Live Execution ➔ Memory Attribution & Trajectory Persistence) on a task prompt or prompt file.
 
 ---
 

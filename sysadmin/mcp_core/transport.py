@@ -117,8 +117,9 @@ class TerminalMCPSession:
 
 
 def send_terminal_mcp(text: str) -> None:
-    """Prints to local stdout and streams clean formatted comment banners directly into the active terminal-mcp PTY."""
-    print(text)
+    """Prints to local stdout (or stderr in MCP server context) and streams clean formatted comment banners directly into the active terminal-mcp PTY."""
+    target_stream = sys.stderr if (len(sys.argv) > 0 and "server.py" in sys.argv[0]) else sys.stdout
+    print(text, file=target_stream, flush=True)
     with TerminalMCPSession() as session:
         if not session.is_available:
             return

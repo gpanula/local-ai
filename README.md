@@ -6,11 +6,67 @@ A self-hosted, offline-first local AI engineering workspace running on consumer/
 
 ## 🏗️ Workspace Pillars
 
-* **[`sysadmin/`](sysadmin/README.md)**: Autonomous multi-agent pipeline, cognitive memory (`MemoryStore`), PTY terminal execution (`terminal-mcp`), SFT/DPO dataset export, and Linux sysadmin automation.
+* **[`sysadmin/`](sysadmin/README.md)**: Autonomous multi-agent pipeline (`pipeline.py`), pre-execution code review gates, cognitive memory (`MemoryStore`), PTY terminal execution (`terminal-mcp`), SFT/DPO dataset export, and Linux sysadmin automation.
 * **[`graphify-out/`](graphify-out/) & Knowledge Graph**: Automated codebase architecture mapping, AST dependency graphs, call flows, and agent navigation powered by [Graphify](https://github.com/Graphify-Labs/graphify).
 * **[`loom/`](loom/README.md)**: Multi-step task execution harness with role-based routing and verification passes.
 * **[`moe/`](moe/README.md)**: Sparse Mixture-of-Experts (MoE) routing, parameter offloading, and latency benchmarking.
 * **[`fincept/`](fincept/README.md)**: Quantitative financial analytics terminal auditing and validation models.
+
+---
+
+## 🤖 Arc-Orc-Rev Multi-Agent Architecture (RFC v7)
+
+The core autonomous engine operates as a state machine coordinating **6 canonical horizontal cognitive roles** under a standard **4-Pillar Cognition Contract** (`Analysis & Strategy`, `Risks & Edge Cases`, `Solution & Decisions`, `Verification & Testing`):
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Arc-Orc-Rev Planning & Governance Phase                         │
+│  ┌────────────────────────┐    ┌────────────────────────┐    ┌──────────────────────┐  │
+│  │ 1. Architect           │ -> │ 2. Orchestrator        │ -> │ 3. Reviewer          │  │
+│  │ (Decompose + Memory)   │    │ (DAG Nodes + Edges)    │    │ (Pre-Filter + Audit) │  │
+│  └───────────┬────────────┘    └───────────┬────────────┘    └──────────┬───────────┘  │
+│              │                             │                            │              │
+│              └─────────────────────────────┴──────────────┐             │              │
+│                                                           │             ▼              │
+│                                              ┌────────────┴─────────────────────────┐  │
+│                                              │ 4. Security Gate                     │  │
+│                                              │ (STRIDE Threat Model & Sandboxing)   │  │
+│                                              └────────────────────┬─────────────────┘  │
+└───────────────────────────────────────────────────────────────────┼────────────────────┘
+                                                                    │ (Cleared)
+                                                                    ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Dispatch & Pre-Execution Verification Phase                     │
+│  ┌────────────────────────┐    ┌────────────────────────────────────────────────────┐  │
+│  │ 5. Coder Task Agent    │ -> │ 6. Pre-Execution Multi-Tier Verification Gates     │  │
+│  │ (write_file synthesis) │    │    ├─ Tier 1: Deterministic Linter (ShellCheck/AST)│  │
+│  └────────────────────────┘    │    ├─ Tier 2A: Reviewer Code Gate (Traps/Asserts)  │  │
+│                                │    └─ Tier 2B: Security Gate (Privilege/Escape)    │  │
+│                                └──────────────────────────┬─────────────────────────┘  │
+└───────────────────────────────────────────────────────────┼────────────────────────────┘
+                                                            │ (Approved by all 3 tiers)
+                                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        Live Execution & Continuous Learning Loop                       │
+│  ┌────────────────────────┐    ┌────────────────────────────────────────────────────┐  │
+│  │ 7. Sysadmin Executor   │ -> │ 8. Memory & Trajectory Persistence                 │  │
+│  │ (Live PTY execution)   │    │    ├─ Trajectory logged to data/trajectories.jsonl │  │
+│  └────────────────────────┘    │    ├─ Remediation critique -> solved_pattern       │  │
+│                                │    ├─ Clean first-pass -> +1 lesson utility credit │  │
+│                                │    └─ Proactive mitigations -> proven_pattern      │  │
+│                                └────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Start: Running the Pipeline
+
+```bash
+# Execute prompt markdown through the multi-agent pipeline
+sysadmin/venv/bin/python sysadmin/pipeline.py sysadmin/prompts/hello_world_test.md
+
+# Resume an aborted or checkpointed run
+sysadmin/venv/bin/python sysadmin/pipeline.py --resume <RUN_ID>
+```
 
 ---
 

@@ -12,6 +12,7 @@ from validator import (
     check_prompt_fidelity,
     check_cognition_substance,
     validate_annotated_plan,
+    validate_code_output,
     load_tool_registry,
     load_agent_registry,
     load_taxonomy,
@@ -186,3 +187,86 @@ def test_validate_annotated_plan_rejected_rules(valid_plan: dict, frozen_prompt:
     assert verdict["verdict"] == "rejected_rules"
     assert verdict["return_to"] == "orchestrator"
     assert any(v["type"] == "domain_tag_missing" for v in verdict["violations"])
+
+
+def test_validate_code_output_clean_bash():
+    task = {"task_id": "t-001", "domain_tags": ["Defensive Bash Scripting"]}
+    outputs = {
+        "sysadmin/hello.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "trap 'echo \"❌ error\" >&2; exit 1' ERR\n"
+            "echo \"Hello\"\n"
+            "exit 0\n"
+        )
+    }
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "approved"
+    assert len(verdict["violations"]) == 0
+    assert verdict["critique"] == ""
+
+
+def test_validate_code_output_missing_pipefail():
+    task = {"task_id": "t-001", "domain_tags": ["Defensive Bash Scripting"]}
+    outputs = {
+        "sysadmin/hello.sh": (
+            "#!/usr/bin/env bash\n"
+            "trap 'echo \"❌ error\" >&2; exit 1' ERR\n"
+            "echo \"Hello\"\n"
+            "exit 0\n"
+        )
+    }
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "rejected"
+    assert any(v["type"] == "missing_pipefail_header" for v in verdict["violations"])
+    assert "set -euo pipefail" in verdict["critique"]
+
+
+def test_validate_code_output_missing_err_trap():
+    task = {"task_id": "t-001", "domain_tags": ["Defensive Bash Scripting"]}
+    outputs = {
+        "sysadmin/hello.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "echo \"Hello\"\n"
+            "exit 0\n"
+        )
+    }
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "rejected"
+    assert any(v["type"] == "missing_err_trap" for v in verdict["violations"])
+
+
+def test_validate_code_output_shellcheck_findings():
+    task = {"task_id": "t-001", "domain_tags": ["Defensive Bash Scripting"]}
+    outputs = {
+        "sysadmin/broken.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "trap 'echo error' ERR\n"
+            "if true then echo bad fi\n"
+        )
+    }
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "rejected"
+    assert any(v["type"] == "shellcheck_findings" for v in verdict["violations"])
+
+
+def test_validate_code_output_python_syntax():
+    task = {"task_id": "t-002", "domain_tags": ["Python Quality"]}
+    outputs = {
+        "sysadmin/script.py": "def foo(:\n    pass\n"
+    }
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "rejected"
+    assert any(v["type"] == "python_syntax_error" for v in verdict["violations"])
+
+
+def test_validate_code_output_ignore_stdout():
+    """Verify execution outputs (stdout, stderr) are not falsely linted as bash scripts."""
+    task = {"task_id": "t-002", "domain_tags": ["Defensive Bash Scripting"], "outputs": ["hello_world_result"]}
+    outputs = {"stdout": "Hello from Ollama Multi-Agent Pipeline\n"}
+    verdict = validate_code_output(task, outputs)
+    assert verdict["verdict"] == "approved"
+    assert len(verdict["violations"]) == 0
+

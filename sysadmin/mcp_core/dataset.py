@@ -100,32 +100,37 @@ def _format_assistant_cot(
         r_info = roles[role]
         if role == "orchestrator":
             sections = []
-            if r_info.get("strategy"):
-                sections.append(f"### Analysis & Strategy\n\n{r_info['strategy']}")
+            strategy = r_info.get("strategy") or r_info.get("analysis")
+            if strategy:
+                sections.append(f"### Analysis & Strategy\n\n{strategy}")
             if r_info.get("risks"):
                 sections.append(f"### Risks & Constraints\n\n{r_info['risks']}")
-            if r_info.get("plan"):
-                sections.append(f"### Architecture & Plan\n\n{r_info['plan']}")
-            if r_info.get("gates"):
-                sections.append(f"### Acceptance Gates & Tests\n\n{r_info['gates']}")
+            plan = r_info.get("plan") or r_info.get("solution")
+            if plan:
+                sections.append(f"### Architecture & Plan\n\n{plan}")
+            gates = r_info.get("gates") or r_info.get("verification")
+            if gates:
+                sections.append(f"### Acceptance Gates & Tests\n\n{gates}")
             return "\n\n".join(sections) if sections else code.strip()
         elif role == "reviewer":
             sections = []
-            if r_info.get("audit"):
-                sections.append(f"### Verification Audit\n\n{r_info['audit']}")
+            audit = r_info.get("audit") or r_info.get("analysis")
+            if audit:
+                sections.append(f"### Verification Audit\n\n{audit}")
             if r_info.get("risks"):
                 sections.append(f"### Risk & Regression Check\n\n{r_info['risks']}")
             decision = r_info.get("decision", "APPROVED")
-            fixes = r_info.get("fixes", "")
+            fixes = r_info.get("fixes") or r_info.get("solution", "")
             fixes_block = f"\n{fixes}" if fixes else ""
             sections.append(f"### Decision & Required Fixes\n\nDECISION: {decision}{fixes_block}")
-            if r_info.get("evidence"):
-                sections.append(f"### Validation Evidence\n\n{r_info['evidence']}")
+            evidence = r_info.get("evidence") or r_info.get("verification")
+            if evidence:
+                sections.append(f"### Validation Evidence\n\n{evidence}")
             return "\n\n".join(sections) if sections else code.strip()
-        elif role == "coder":
-            strategy = (r_info.get("strategy") or "").strip()
+        elif role in ("coder", "sysadmin"):
+            strategy = (r_info.get("strategy") or r_info.get("analysis") or "").strip()
             risks = (r_info.get("risks") or "").strip()
-            verification = (r_info.get("verification") or "").strip()
+            verification = (r_info.get("verification") or r_info.get("verification_plan") or "").strip()
             sections = []
             if strategy:
                 sections.append(f"### Analysis & Strategy\n\n{strategy}")
