@@ -67,6 +67,7 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:8gb-qwen` | `winter-sysadmin:8gb` | `qwen2.5-coder:7b` | [`8gb/Modelfile-sysadmin-qwen7b`](8gb/Modelfile-sysadmin-qwen7b) | 16k (`16384`) |
 | **`security`** | `winter-security:8gb-deepseek` | `winter-security:8gb` | `deepseek-r1:8b` | [`8gb/Modelfile-security-deepseek8b`](8gb/Modelfile-security-deepseek8b) | 16k (`16384`) |
 | **`reviewer`** | `winter-reviewer:8gb-qwen` | `winter-reviewer:8gb` | `qwen3:8b` | [`8gb/Modelfile-reviewer-qwen8b`](8gb/Modelfile-reviewer-qwen8b) | 8k (`8192`) |
+| **⚡ `SMMP (All Roles)`** | `winter-smmp:8gb-qwen` | `winter-smmp:8gb`, `winter-smmp:latest` | `qwen2.5-coder:7b` | [`8gb/Modelfile-smmp-qwen7b`](8gb/Modelfile-smmp-qwen7b) | 16k (`16384`) |
 
 ---
 
@@ -80,6 +81,7 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:16gb-qwen` | `winter-sysadmin:16gb` | `qwen2.5-coder:14b` | [`16gb/Modelfile-sysadmin-qwen14b`](16gb/Modelfile-sysadmin-qwen14b) | 32k (`32768`) |
 | **`security`** | `winter-security:16gb-deepseek` | `winter-security:16gb` | `deepseek-coder-v2:16b` | [`16gb/Modelfile-security-deepseek16b`](16gb/Modelfile-security-deepseek16b) | 32k (`32768`) |
 | **`reviewer`** | `winter-reviewer:16gb-deepseek` | `winter-reviewer:16gb` | `deepseek-coder-v2:16b` | [`16gb/Modelfile-reviewer-deepseek16b`](16gb/Modelfile-reviewer-deepseek16b) | 32k (`32768`) |
+| **⚡ `SMMP (All Roles)`** | `winter-smmp:16gb-qwen` | `winter-smmp:16gb` | `qwen2.5-coder:14b` | [`16gb/Modelfile-smmp-qwen14b`](16gb/Modelfile-smmp-qwen14b) | 32k (`32768`) |
 
 ---
 
@@ -93,12 +95,23 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:24gb-codestral` | `winter-sysadmin:24gb` | `codestral:latest` | [`24gb/Modelfile-sysadmin-codestral`](24gb/Modelfile-sysadmin-codestral) | 32k (`32768`) |
 | **`security`** | `winter-security:24gb-codestral` | `winter-security:24gb` | `codestral:latest` | [`24gb/Modelfile-security-codestral`](24gb/Modelfile-security-codestral) | 32k (`32768`) |
 | **`reviewer`** | `winter-reviewer:24gb-codestral` | `winter-reviewer:24gb` | `codestral:latest` | [`24gb/Modelfile-reviewer-codestral`](24gb/Modelfile-reviewer-codestral) | 32k (`32768`) |
+| **⚡ `SMMP (All Roles)`** | `winter-smmp:24gb-qwen` | `winter-smmp:24gb` | `qwen2.5-coder:32b` | [`24gb/Modelfile-smmp-qwen32b`](24gb/Modelfile-smmp-qwen32b) | 16k (`16384`) |
+
+---
+
+## ⚡ Single-Model Multi-Persona (SMMP) Mode
+
+In addition to the 18 specialized single-role models, Winter provides **SMMP foundation models** for high-throughput single-GPU workstations. A single model remains resident in VRAM (`keep_alive: -1`) and shifts personas across all 6 roles with **0 ms model loading latency**:
+
+- **`winter-smmp:8gb`**: Qwen2.5-Coder 7B, 16k context (Target: ~5.6–6.5 GB VRAM)
+- **`winter-smmp:16gb`**: Qwen2.5-Coder 14B, 32k context (Target: ~10–14 GB VRAM)
+- **`winter-smmp:24gb`**: Qwen2.5-Coder 32B, 16k context (Target: ~18–22 GB VRAM)
 
 ---
 
 ## 🚀 Building Models with `build_models.sh`
 
-A unified build script is provided to create and alias all models for a specific tier or the entire suite:
+A unified build script is provided to create and alias all models for a specific tier, SMMP mode, or the entire suite:
 
 ```bash
 cd ollama_update/customized_models
@@ -106,16 +119,28 @@ cd ollama_update/customized_models
 # Pull base models for 8GB tier:
 ./build_models.sh pull-8gb
 
-# Build all 6 models for 8GB tier:
+# Build 8GB SMMP foundation model:
+./build_models.sh smmp-8gb
+
+# Build 16GB SMMP foundation model:
+./build_models.sh smmp-16gb
+
+# Build 24GB SMMP foundation model:
+./build_models.sh smmp-24gb
+
+# Build all SMMP foundation models:
+./build_models.sh smmp
+
+# Build all 6 specialized models for 8GB tier:
 ./build_models.sh 8gb
 
-# Build all 6 models for 16GB tier:
+# Build all 6 specialized models for 16GB tier:
 ./build_models.sh 16gb
 
-# Build all 6 models for 24GB tier:
+# Build all 6 specialized models for 24GB tier:
 ./build_models.sh 24gb
 
-# Pull all base models and build all tiers (18 models):
+# Pull all base models and build all specialized tiers (18 models):
 ./build_models.sh pull-all
 ./build_models.sh all
 

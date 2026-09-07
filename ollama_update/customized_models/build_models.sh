@@ -95,6 +95,33 @@ build_24gb() {
     echo "🎉 All 24GB tier models built successfully!"
 }
 
+build_smmp_8gb() {
+    echo "🟢 [Building 8GB SMMP Model] (Target: ~5.0 - 6.5 GB VRAM)"
+    build_model "8gb" "Modelfile-smmp-qwen7b" "winter-smmp:8gb-qwen" "winter-smmp:8gb"
+    echo "🏷️  Aliasing winter-smmp:8gb -> winter-smmp:latest..."
+    ollama cp "winter-smmp:8gb" "winter-smmp:latest" || true
+    echo "🎉 8GB SMMP model built successfully!"
+}
+
+build_smmp_16gb() {
+    echo "🟡 [Building 16GB SMMP Model] (Target: ~10 - 14 GB VRAM)"
+    build_model "16gb" "Modelfile-smmp-qwen14b" "winter-smmp:16gb-qwen" "winter-smmp:16gb"
+    echo "🎉 16GB SMMP model built successfully!"
+}
+
+build_smmp_24gb() {
+    echo "🟣 [Building 24GB SMMP Model] (Target: ~16 - 22 GB VRAM)"
+    build_model "24gb" "Modelfile-smmp-qwen32b" "winter-smmp:24gb-qwen" "winter-smmp:24gb"
+    echo "🎉 24GB SMMP model built successfully!"
+}
+
+build_smmp() {
+    build_smmp_8gb
+    build_smmp_16gb
+    build_smmp_24gb
+    echo "🎉 All SMMP models built successfully!"
+}
+
 list_models() {
     echo "Winter Multi-Agent Model Matrix (6 Roles x 3 Tiers):"
     echo ""
@@ -121,6 +148,11 @@ list_models() {
     echo "  • winter-sysadmin:24gb-codestral  (alias: winter-sysadmin:24gb)"
     echo "  • winter-security:24gb-codestral  (alias: winter-security:24gb)"
     echo "  • winter-reviewer:24gb-codestral  (alias: winter-reviewer:24gb)"
+    echo ""
+    echo "⚡ Single-Model Multi-Persona (SMMP) Foundation Models:"
+    echo "  • winter-smmp:8gb-qwen   (alias: winter-smmp:8gb, winter-smmp:latest) [Qwen2.5-Coder 7B]"
+    echo "  • winter-smmp:16gb-qwen  (alias: winter-smmp:16gb)                     [Qwen2.5-Coder 14B]"
+    echo "  • winter-smmp:24gb-qwen  (alias: winter-smmp:24gb)                     [Qwen2.5-Coder 32B]"
 }
 
 TARGET="${1:-list}"
@@ -140,6 +172,18 @@ case "${TARGET}" in
         build_16gb
         build_24gb
         ;;
+    smmp-8gb)
+        build_smmp_8gb
+        ;;
+    smmp-16gb)
+        build_smmp_16gb
+        ;;
+    smmp-24gb)
+        build_smmp_24gb
+        ;;
+    smmp|smmp-all)
+        build_smmp
+        ;;
     pull-8gb)
         pull_8gb
         ;;
@@ -156,7 +200,7 @@ case "${TARGET}" in
         list_models
         ;;
     *)
-        echo "Usage: $0 [8gb | 16gb | 24gb | all | pull-8gb | pull-16gb | pull-24gb | pull-all | list]"
+        echo "Usage: $0 [8gb | 16gb | 24gb | all | smmp-8gb | smmp-16gb | smmp-24gb | smmp | pull-8gb | pull-16gb | pull-24gb | pull-all | list]"
         exit 1
         ;;
 esac

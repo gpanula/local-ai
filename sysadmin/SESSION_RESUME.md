@@ -1,79 +1,90 @@
 # Local AI Multi-Agent Pipeline: Session Summary & Resume Guide
 
-**Date**: August 21, 2026  
-**Status**: Ready to execute Code Quality & Pre-Flight Linters Verification Pipeline
+**Date**: September 6, 2026  
+**Status**: Arc-Orc-Rev Pipeline Specification (RFC v7) Completed; Single-Model Multi-Persona (SMMP) Modelfiles Created for 8GB, 16GB, and 24GB Hardware Tiers
 
 ---
 
 ## 📌 Executive Summary of Accomplishments
 
-1. **Toolchain Verification (`sysadmin/venv`)**:
-   - Confirmed complete installation and functionality of Section 1 developer tools:
-     - `python 3.12` + `pyyaml 6.0.3` + `black 26.5.1`
-     - `ansible 14.3.1` / `ansible-core 2.21.3`
-     - `ansible-lint 26.8.0` / `yamllint 1.38.0`
-     - `shellcheck 0.11.0.1` (via `shellcheck-py`)
-   - Verified that all 15 unit tests in `sysadmin/mcp_ollama/test_server.py` pass cleanly.
+### 1. Arc-Orc-Rev Pipeline Specification ([`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md) — RFC v7)
+- **Dual-Axis Taxonomy System**: Grounded the architecture directly in the Horizontal Cognitive Taxonomy (The 6 Roles from [`sysadmin/README.md`](./README.md)) and the Vertical Domain Taxonomy ([`ollama_update/taxonomy.json`](../ollama_update/taxonomy.json)).
+- **Mandatory Security Gate**: Promoted Security to a first-class validation phase between Reviewer and Dispatch, enforcing STRIDE threat modeling, dry-run dependency requirements (Rule `R-001`), and secret isolation (Rule `R-002`).
+- **Standard 4-Pillar Contract**: Replaced free-form rationale across all inter-agent messages with machine-checkable `cognition` blocks (`analysis`, `risks`, `solution`, `verification`), enforced by Rule `R-006` with minimum substantive character thresholds (>= 30 chars) and anti-placeholder checks.
+- **Dual-Layer Context Capture & Lossless Compression (§10)**:
+  - Layer 1: Content-addressed references for registries, lessons, and prompts.
+  - Layer 2: Verbatim cognition and code traces to preserve causal signal for CoT SFT / DPO training.
+  - Lifecycle: Plain JSON hot path during active runs; sealed to cold `.tar.zst` archives upon completion. Achieves **~91% storage reduction** (~45 MB for 10,000 runs) with transparent streaming single-member extraction in Python 3.12+.
+- **Deterministic Reviewer Pre-Filter (`validator.py`)**: Defined programmatic pre-filtering for Reviewer checks 1–5, 7, and 9 to fail fast and prevent wasting local LLM inference compute.
+- **Recovery Task Governance & Lesson Anti-Contamination**: Governed fallback task synthesis (mandating expedited Reviewer + Security validation) and localized intra-run lesson feedback to immediate task retries (`retries < 2`), delaying global `MemoryStore` extraction to run seal.
+- **Resumable Checkpoints**: Defined structured `run_aborted.json` checkpointing with operator resumption via `python sysadmin/pipeline.py --resume <run_id>`.
+- **Pure 6-Role Taxonomy**: Removed ad-hoc `"researcher"` roles to preserve strict taxonomy boundaries; research tools (`web_search`, `read_url`) are assigned directly to the Architect and Coder.
 
-2. **Standards Codification in `AGENTS.md`**:
-   - Codified the **Explicit Virtual Environment & Binary Isolation** rule under Section 4:
-     > *Sysadmin scripts must never rely on ambient system `$PATH` for project tooling. Scripts must deterministically resolve the target virtual environment (`VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"`) and invoke tools directly via explicit paths (`"${VENV_DIR}/bin/<binary>"`).*
+### 2. Single-Model Multi-Persona (SMMP) Execution Profile (§4.7)
+- Formalized an execution mode where a single capable foundation model (e.g. `qwen2.5-coder`) remains pinned in VRAM (`keep_alive: -1`), eliminating 2–10s model-swapping latency per pipeline hop (**0 ms model-loading overhead**).
+- Modulates 4 runtime dials per stage:
+  1. *Stateless Context Reset*: Drop conversation history between stages to eliminate context drift and hallucination bleed.
+  2. *Role Persona Injection*: Dynamic injection of role prompt from `sysadmin/prompts/roles/{role}.md`.
+  3. *Sampling Profile Tuning*: Exploratory sampling for Architect (`temp: 0.25`, `top_p: 0.90`), greedy deterministic sampling for Reviewer/Security (`temp: 0.00`, `top_p: 1.00`), syntax precision for Coder/Sysadmin.
+  4. *Tool Registry Masking*: Filter API `tools` parameter to confine each stage to authorized tools.
+- Countered "self-review bias" via deterministic pre-filters, adversarial prompt framing, and blind artifact handoffs.
 
-3. **Multi-Agent Pipeline Hardening (`sysadmin/mcp_client.py`)**:
-   - **Pre-Flight Linter Auto-Rejection**: Automatically rejects synthesized scripts and re-prompts the author model if ShellCheck reports errors or warnings (`exit 1`), unless flagged with `--bootstrap`.
-   - **Rich Diagnostic Terminal Streaming**: Extracts exact ShellCheck codes (`SC2016`, `SC2181`, etc.), line numbers, and suggestions directly into the live `terminal-mcp` session.
-   - **Consecutive Stuck-Loop Detection**: Tracks error signatures across revisions and aborts early if the author repeats the identical ShellCheck finding 3 times in a row.
-   - **Accurate Iteration & Abort Reporting**: Fixed iteration bounds to `[Iteration 1/N]` to `[Iteration N/N]` and differentiated early stuck-loop aborts from exhausted retries.
-   - **Visual Formatting**: Implemented clean box-drawing divider banners and empty-line vertical whitespace separation in terminal streams.
-   - **Tool Call Parsing**: Enhanced extraction to support both fenced markdown code blocks and raw JSON `write_file` tool calls.
+### 3. Custom SMMP Modelfiles for Ollama (8GB, 16GB, 24GB Tiers)
+- Created custom Ollama Modelfiles embedding **Winter Prime**, the foundational SMMP agent conditioned on the 6 roles, 4-pillar contract, and defensive bash/Python invariants:
+  - 🟢 **8GB Tier**: [`ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b) — `winter-smmp:8gb-qwen` (alias: `winter-smmp:8gb`, `winter-smmp:latest`), `qwen2.5-coder:7b`, 16k context (~5.6–6.5 GB VRAM).
+  - 🟡 **16GB Tier**: [`ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b) — `winter-smmp:16gb-qwen` (alias: `winter-smmp:16gb`), `qwen2.5-coder:14b`, 32k context (~10–14 GB VRAM).
+  - 🟣 **24GB Tier**: [`ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b) — `winter-smmp:24gb-qwen` (alias: `winter-smmp:24gb`), `qwen2.5-coder:32b`, 16k context (~18–22 GB VRAM).
+- Updated [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh) with build targets: `smmp-8gb`, `smmp-16gb`, `smmp-24gb`, and `smmp`.
+- Documented SMMP mode and build commands in [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md).
 
-4. **Rule 8 Compliant Prompt Specification**:
-   - Refactored [`sysadmin/prompts/verify_code_quality_toolchain.md`](./prompts/verify_code_quality_toolchain.md) to strictly adhere to **Rule 8 (`Division of Agent Roles & Task Boundaries`)** by removing all spoon-fed code snippets and stating high-level architectural requirements, interface contracts, and acceptance criteria.
+### 4. Knowledge Graph Synchronization
+- Executed `sysadmin/venv/bin/graphify update .` to update the graphify knowledge graph (1511 nodes, 2342 edges across 125 communities).
 
 ---
 
-## 🚀 How to Resume Work
+## 🚀 How to Resume Work (Next Steps)
 
-### Step 1: Ensure Prerequisites are Running
-Make sure local Ollama and the Terminal MCP listener are active:
+### Step 1: Build Local SMMP Models
+From the `customized_models` directory, build the SMMP model matching your workstation VRAM:
 ```bash
-# Verify Ollama service
-ollama list
+cd ollama_update/customized_models
 
-# Start Terminal MCP Listener (if not already running in another terminal)
-./sysadmin/start_terminal_mcp.sh
+# For 8GB VRAM (e.g. consumer laptop/desktop):
+./build_models.sh smmp-8gb
+
+# For 16GB VRAM:
+./build_models.sh smmp-16gb
+
+# For 24GB VRAM:
+./build_models.sh smmp-24gb
 ```
 
-### Step 2: Run the Verification Pipeline
-Execute the multi-agent pipeline using **`codestral`** (Author) and **`qwen3:8b`** (Reviewer):
-```bash
-python3 sysadmin/mcp_client.py pipeline-run sysadmin/prompts/verify_code_quality_toolchain.md \
-  --author codestral \
-  --reviewer qwen3:8b \
-  --max-retries 5 \
-  --timeout 600
-```
+### Step 2: Implement the Deterministic Pre-Filter (`sysadmin/validator.py`)
+Implement the deterministic validation functions specified in §4.3:
+- Steps 1–5: JSON schema validation (`AnnotatedPlanMessage`), tool existence check against `tools.json`, agent existence check against `agents.json`, domain tag check against `taxonomy.json`, and DAG acyclicity traversal.
+- Step 7: Prompt fidelity hash check (`sha256(original_prompt) == sha256(frozen_prompt)`).
+- Step 9: 4-Pillar completeness & substance check (all 4 fields non-empty, >= 30 chars, disallowing `"none"` / `"n/a"`).
 
-### Step 3: Verify the Generated Script
-Once the pipeline finishes and executes `sysadmin/verify_code_quality_toolchain.sh`:
-```bash
-# Run standalone script directly
-./sysadmin/verify_code_quality_toolchain.sh
+### Step 3: Implement Context Store (`sysadmin/mcp_core/context_store.py`)
+Implement the storage abstraction specified in §10:
+- `ContextStore.save_snapshot()`: Writes `context_snapshot.json` during active runs.
+- `ContextStore.seal_run()`: Compresses `runs/<run_id>/` into `runs/<run_id>.tar.zst` using Python 3.12+ `tarfile`.
+- `ContextStore.load()`: Transparently extracts snapshot files directly from `.tar.zst` members on demand without full directory extraction.
 
-# Run against custom venv path
-./sysadmin/verify_code_quality_toolchain.sh sysadmin/venv
-```
-
-### Step 4: Advance Roadmap to Section 2
-Proceed to Section 2 of [`sysadmin/mcp_ollama/TOOLS_ROADMAP.md`](./mcp_ollama/TOOLS_ROADMAP.md) (**Linux SysAdmin & Diagnostic Inspection**):
-- Author prompt specifications for `port_process_inspect` (`ss -tulpn` / `lsof`) and `network_route_inspect` (`ip route`, `ip link`).
+### Step 4: Implement Arc-Orc-Rev Pipeline Runner (`sysadmin/pipeline.py`)
+Integrate the SMMP execution profile with the message contracts from §3:
+- Build the state machine coordinating Architect -> Orchestrator -> Reviewer (Validator + LLM) -> Security Gate -> Executor Dispatch.
+- Implement the `SMMP_PROFILES` dynamic sampling configuration (temperature 0.25 Architect to 0.0 Reviewer/Security).
+- Implement checkpoint saving and the `--resume <run_id>` CLI argument.
 
 ---
 
 ## 📂 Key Files Reference
-* **Verification Prompt Specification**: [`sysadmin/prompts/verify_code_quality_toolchain.md`](./prompts/verify_code_quality_toolchain.md)
-* **P0 Toolchain Setup Prompt**: [`sysadmin/prompts/p0_toolchain_setup.md`](./prompts/p0_toolchain_setup.md)
-* **CLI Client & Pipeline Engine**: [`sysadmin/mcp_client.py`](./mcp_client.py)
-* **MCP Server**: [`sysadmin/mcp_ollama/server.py`](./mcp_ollama/server.py)
-* **Tools Roadmap**: [`sysadmin/mcp_ollama/TOOLS_ROADMAP.md`](./mcp_ollama/TOOLS_ROADMAP.md)
-* **Agent Rules & Architecture**: [`AGENTS.md`](../AGENTS.md)
+* **Arc-Orc-Rev Pipeline Specification**: [`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md)
+* **8GB SMMP Modelfile**: [`ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b)
+* **16GB SMMP Modelfile**: [`ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b)
+* **24GB SMMP Modelfile**: [`ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b)
+* **Model Build Automation**: [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh)
+* **Customized Models Documentation**: [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md)
+* **Taxonomy & Roles Architecture**: [`sysadmin/README.md`](./README.md)
+* **Agent Rules & Safety Invariants**: [`AGENTS.md`](../AGENTS.md)
