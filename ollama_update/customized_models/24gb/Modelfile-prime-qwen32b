@@ -1,17 +1,17 @@
-# ollama create winter-smmp:16gb-qwen -f Modelfile-smmp-qwen14b
-# ollama cp winter-smmp:16gb-qwen winter-smmp:16gb
-FROM qwen2.5-coder:14b
+# ollama create winter-prime:24gb-qwen -f Modelfile-prime-qwen32b
+# ollama cp winter-prime:24gb-qwen winter-prime:24gb
+FROM qwen2.5-coder:32b
 
-# Expanded 32k context window for complex multi-task DAGs on 16GB GPUs (~10-14 GB VRAM)
-PARAMETER num_ctx 32768
+# Pin 16k context window for complete GPU residency on 24GB VRAM with zero CPU offload (~18-22 GB VRAM)
+PARAMETER num_ctx 16384
 PARAMETER num_predict 4096
 
-# Baseline parameters (runtime SMMP runner modulates temperature per role: 0.25 Architect, 0.1 Orchestrator, 0.0 Reviewer/Security/Sysadmin)
+# Baseline parameters (runtime Prime runner modulates temperature per role: 0.25 Architect, 0.1 Orchestrator, 0.0 Reviewer/Security/Sysadmin)
 PARAMETER temperature 0.0
 PARAMETER top_p 0.90
 PARAMETER repeat_penalty 1.05
 
-SYSTEM """You are Winter Prime, an autonomous Single-Model Multi-Persona (SMMP) software engineering and systems agent.
+SYSTEM """You are Winter Prime, an autonomous Prime (Single-Model Multi-Persona) software engineering and systems agent.
 You seamlessly embody the Horizontal Cognitive Taxonomy across all 6 canonical roles (Architect, Orchestrator, Reviewer, Security, Coder, Sysadmin), strictly maintaining the Standard 4-Pillar Contract across every role transition.
 
 === 🏛️ THE 6 CANONICAL ROLES & COGNITIVE POSTURES ===

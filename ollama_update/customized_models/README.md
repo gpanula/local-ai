@@ -67,7 +67,7 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:8gb-qwen` | `winter-sysadmin:8gb` | `qwen2.5-coder:7b` | [`8gb/Modelfile-sysadmin-qwen7b`](8gb/Modelfile-sysadmin-qwen7b) | 16k (`16384`) |
 | **`security`** | `winter-security:8gb-deepseek` | `winter-security:8gb` | `deepseek-r1:8b` | [`8gb/Modelfile-security-deepseek8b`](8gb/Modelfile-security-deepseek8b) | 16k (`16384`) |
 | **`reviewer`** | `winter-reviewer:8gb-qwen` | `winter-reviewer:8gb` | `qwen3:8b` | [`8gb/Modelfile-reviewer-qwen8b`](8gb/Modelfile-reviewer-qwen8b) | 8k (`8192`) |
-| **⚡ `SMMP (All Roles)`** | `winter-smmp:8gb-qwen` | `winter-smmp:8gb`, `winter-smmp:latest` | `qwen2.5-coder:7b` | [`8gb/Modelfile-smmp-qwen7b`](8gb/Modelfile-smmp-qwen7b) | 16k (`16384`) |
+| **⚡ `Prime (All Roles)`** | `winter-prime:8gb-qwen` | `winter-prime:8gb`, `winter-prime:latest` | `qwen2.5-coder:7b` | [`8gb/Modelfile-prime-qwen7b`](8gb/Modelfile-prime-qwen7b) | 16k (`16384`) |
 
 ---
 
@@ -81,7 +81,7 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:16gb-qwen` | `winter-sysadmin:16gb` | `qwen2.5-coder:14b` | [`16gb/Modelfile-sysadmin-qwen14b`](16gb/Modelfile-sysadmin-qwen14b) | 32k (`32768`) |
 | **`security`** | `winter-security:16gb-deepseek` | `winter-security:16gb` | `deepseek-coder-v2:16b` | [`16gb/Modelfile-security-deepseek16b`](16gb/Modelfile-security-deepseek16b) | 32k (`32768`) |
 | **`reviewer`** | `winter-reviewer:16gb-deepseek` | `winter-reviewer:16gb` | `deepseek-coder-v2:16b` | [`16gb/Modelfile-reviewer-deepseek16b`](16gb/Modelfile-reviewer-deepseek16b) | 32k (`32768`) |
-| **⚡ `SMMP (All Roles)`** | `winter-smmp:16gb-qwen` | `winter-smmp:16gb` | `qwen2.5-coder:14b` | [`16gb/Modelfile-smmp-qwen14b`](16gb/Modelfile-smmp-qwen14b) | 32k (`32768`) |
+| **⚡ `Prime (All Roles)`** | `winter-prime:16gb-qwen` | `winter-prime:16gb` | `qwen2.5-coder:14b` | [`16gb/Modelfile-prime-qwen14b`](16gb/Modelfile-prime-qwen14b) | 32k (`32768`) |
 
 ---
 
@@ -95,23 +95,26 @@ ollama pull codestral:latest
 | **`sysadmin`** | `winter-sysadmin:24gb-codestral` | `winter-sysadmin:24gb` | `codestral:latest` | [`24gb/Modelfile-sysadmin-codestral`](24gb/Modelfile-sysadmin-codestral) | 32k (`32768`) |
 | **`security`** | `winter-security:24gb-codestral` | `winter-security:24gb` | `codestral:latest` | [`24gb/Modelfile-security-codestral`](24gb/Modelfile-security-codestral) | 32k (`32768`) |
 | **`reviewer`** | `winter-reviewer:24gb-codestral` | `winter-reviewer:24gb` | `codestral:latest` | [`24gb/Modelfile-reviewer-codestral`](24gb/Modelfile-reviewer-codestral) | 32k (`32768`) |
-| **⚡ `SMMP (All Roles)`** | `winter-smmp:24gb-qwen` | `winter-smmp:24gb` | `qwen2.5-coder:32b` | [`24gb/Modelfile-smmp-qwen32b`](24gb/Modelfile-smmp-qwen32b) | 16k (`16384`) |
+| **⚡ `Prime (All Roles)`** | `winter-prime:24gb-qwen` | `winter-prime:24gb` | `qwen2.5-coder:32b` | [`24gb/Modelfile-prime-qwen32b`](24gb/Modelfile-prime-qwen32b) | 16k (`16384`) |
 
 ---
 
-## ⚡ Single-Model Multi-Persona (SMMP) Mode
+## ⚡ Winter Prime (Single-Model Multi-Persona) Mode
 
-In addition to the 18 specialized single-role models, Winter provides **SMMP foundation models** for high-throughput single-GPU workstations. A single model remains resident in VRAM (`keep_alive: -1`) and shifts personas across all 6 roles with **0 ms model loading latency**:
+In addition to the 18 specialized single-role models, Winter provides **Prime foundation models** for high-throughput single-GPU workstations. A single model remains resident in VRAM (`keep_alive: -1`) and shifts personas across all 6 roles with **0 ms model loading latency**:
 
-- **`winter-smmp:8gb`**: Qwen2.5-Coder 7B, 16k context (Target: ~5.6–6.5 GB VRAM)
-- **`winter-smmp:16gb`**: Qwen2.5-Coder 14B, 32k context (Target: ~10–14 GB VRAM)
-- **`winter-smmp:24gb`**: Qwen2.5-Coder 32B, 16k context (Target: ~18–22 GB VRAM)
+- **`winter-prime:8gb`**: Qwen2.5-Coder 7B, 16k context (Target: ~5.6–6.5 GB VRAM)
+- **`winter-prime:16gb`**: Qwen2.5-Coder 14B, 32k context (Target: ~10–14 GB VRAM)
+- **`winter-prime:24gb`**: Qwen2.5-Coder 32B, 16k context (Target: ~18–22 GB VRAM)
+
+> 📖 **Architectural Rationale**: For an in-depth breakdown of why the `qwen2.5-coder` family was selected over alternatives, see [**`WINTER_PRIME_MODEL_SELECTION.md`**](WINTER_PRIME_MODEL_SELECTION.md).
+> 🖥️ **24GB Dual-Model Strategy**: For workstations with 24GB GPUs (e.g. RTX 3090/4090) capable of concurrent residency, see [**`DUAL_MODEL_24GB_SETUP_GUIDE.md`**](DUAL_MODEL_24GB_SETUP_GUIDE.md) for the "Builder vs. Auditor" pairing (`winter-prime:16gb` + `qwen3:8b`).
 
 ---
 
 ## 🚀 Building Models with `build_models.sh`
 
-A unified build script is provided to create and alias all models for a specific tier, SMMP mode, or the entire suite:
+A unified build script is provided to create and alias all models for a specific tier, Prime mode, or the entire suite:
 
 ```bash
 cd ollama_update/customized_models
@@ -119,17 +122,17 @@ cd ollama_update/customized_models
 # Pull base models for 8GB tier:
 ./build_models.sh pull-8gb
 
-# Build 8GB SMMP foundation model:
-./build_models.sh smmp-8gb
+# Build 8GB Prime foundation model:
+./build_models.sh prime-8gb
 
-# Build 16GB SMMP foundation model:
-./build_models.sh smmp-16gb
+# Build 16GB Prime foundation model:
+./build_models.sh prime-16gb
 
-# Build 24GB SMMP foundation model:
-./build_models.sh smmp-24gb
+# Build 24GB Prime foundation model:
+./build_models.sh prime-24gb
 
-# Build all SMMP foundation models:
-./build_models.sh smmp
+# Build all Prime foundation models:
+./build_models.sh prime
 
 # Build all 6 specialized models for 8GB tier:
 ./build_models.sh 8gb

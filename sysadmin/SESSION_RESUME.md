@@ -29,13 +29,13 @@
   4. *Tool Registry Masking*: Filter API `tools` parameter to confine each stage to authorized tools.
 - Countered "self-review bias" via deterministic pre-filters, adversarial prompt framing, and blind artifact handoffs.
 
-### 3. Custom SMMP Modelfiles for Ollama (8GB, 16GB, 24GB Tiers)
-- Created custom Ollama Modelfiles embedding **Winter Prime**, the foundational SMMP agent conditioned on the 6 roles, 4-pillar contract, and defensive bash/Python invariants:
-  - 🟢 **8GB Tier**: [`ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b) — `winter-smmp:8gb-qwen` (alias: `winter-smmp:8gb`, `winter-smmp:latest`), `qwen2.5-coder:7b`, 16k context (~5.6–6.5 GB VRAM).
-  - 🟡 **16GB Tier**: [`ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b) — `winter-smmp:16gb-qwen` (alias: `winter-smmp:16gb`), `qwen2.5-coder:14b`, 32k context (~10–14 GB VRAM).
-  - 🟣 **24GB Tier**: [`ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b) — `winter-smmp:24gb-qwen` (alias: `winter-smmp:24gb`), `qwen2.5-coder:32b`, 16k context (~18–22 GB VRAM).
-- Updated [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh) with build targets: `smmp-8gb`, `smmp-16gb`, `smmp-24gb`, and `smmp`.
-- Documented SMMP mode and build commands in [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md).
+### 3. Custom Prime Modelfiles for Ollama (8GB, 16GB, 24GB Tiers)
+- Created custom Ollama Modelfiles embedding **Winter Prime**, the foundational single-model multi-persona agent conditioned on the 6 roles, 4-pillar contract, and defensive bash/Python invariants:
+  - 🟢 **8GB Tier**: [`ollama_update/customized_models/8gb/Modelfile-prime-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-prime-qwen7b) — `winter-prime:8gb-qwen` (alias: `winter-prime:8gb`, `winter-prime:latest`), `qwen2.5-coder:7b`, 16k context (~5.6–6.5 GB VRAM).
+  - 🟡 **16GB Tier**: [`ollama_update/customized_models/16gb/Modelfile-prime-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-prime-qwen14b) — `winter-prime:16gb-qwen` (alias: `winter-prime:16gb`), `qwen2.5-coder:14b`, 32k context (~10–14 GB VRAM).
+  - 🟣 **24GB Tier**: [`ollama_update/customized_models/24gb/Modelfile-prime-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-prime-qwen32b) — `winter-prime:24gb-qwen` (alias: `winter-prime:24gb`), `qwen2.5-coder:32b`, 16k context (~18–22 GB VRAM).
+- Updated [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh) with build targets: `prime-8gb`, `prime-16gb`, `prime-24gb`, and `prime`.
+- Documented Prime mode and build commands in [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md).
 
 ### 4. Knowledge Graph Synchronization
 - Executed `sysadmin/venv/bin/graphify update .` to update the graphify knowledge graph (1511 nodes, 2342 edges across 125 communities).
@@ -44,19 +44,19 @@
 
 ## 🚀 How to Resume Work (Next Steps)
 
-### Step 1: Build Local SMMP Models
-From the `customized_models` directory, build the SMMP model matching your workstation VRAM:
+### Step 1: Build Local Prime Models
+From the `customized_models` directory, build the Prime model matching your workstation VRAM:
 ```bash
 cd ollama_update/customized_models
 
 # For 8GB VRAM (e.g. consumer laptop/desktop):
-./build_models.sh smmp-8gb
+./build_models.sh prime-8gb
 
 # For 16GB VRAM:
-./build_models.sh smmp-16gb
+./build_models.sh prime-16gb
 
 # For 24GB VRAM:
-./build_models.sh smmp-24gb
+./build_models.sh prime-24gb
 ```
 
 ### Step 2: Implement the Deterministic Pre-Filter (`sysadmin/validator.py`)
@@ -81,9 +81,9 @@ Integrate the SMMP execution profile with the message contracts from §3:
 
 ## 📂 Key Files Reference
 * **Arc-Orc-Rev Pipeline Specification**: [`plans/arc-orc-rev-pipeline-spec.md`](../plans/arc-orc-rev-pipeline-spec.md)
-* **8GB SMMP Modelfile**: [`ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-smmp-qwen7b)
-* **16GB SMMP Modelfile**: [`ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-smmp-qwen14b)
-* **24GB SMMP Modelfile**: [`ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-smmp-qwen32b)
+* **8GB Prime Modelfile**: [`ollama_update/customized_models/8gb/Modelfile-prime-qwen7b`](../ollama_update/customized_models/8gb/Modelfile-prime-qwen7b)
+* **16GB Prime Modelfile**: [`ollama_update/customized_models/16gb/Modelfile-prime-qwen14b`](../ollama_update/customized_models/16gb/Modelfile-prime-qwen14b)
+* **24GB Prime Modelfile**: [`ollama_update/customized_models/24gb/Modelfile-prime-qwen32b`](../ollama_update/customized_models/24gb/Modelfile-prime-qwen32b)
 * **Model Build Automation**: [`ollama_update/customized_models/build_models.sh`](../ollama_update/customized_models/build_models.sh)
 * **Customized Models Documentation**: [`ollama_update/customized_models/README.md`](../ollama_update/customized_models/README.md)
 * **Taxonomy & Roles Architecture**: [`sysadmin/README.md`](./README.md)
