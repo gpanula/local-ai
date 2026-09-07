@@ -20,6 +20,9 @@ class ActiveThinkingView(Widget):
         background: $surface;
         padding: 0 1;
     }
+    ActiveThinkingView:focus-within {
+        border: double $accent;
+    }
     #thinking-header {
         text-style: bold;
         color: $primary;
@@ -27,6 +30,7 @@ class ActiveThinkingView(Widget):
     }
     #thinking-scroll {
         height: 1fr;
+        scrollbar-size-vertical: 1;
     }
     #thinking-body {
         color: $text;

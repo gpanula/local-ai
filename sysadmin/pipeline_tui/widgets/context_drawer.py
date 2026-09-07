@@ -22,6 +22,9 @@ class ContextWindowDrawer(Widget):
         padding: 0 1;
         display: block;
     }
+    ContextWindowDrawer:focus-within {
+        border: double $accent;
+    }
     ContextWindowDrawer.collapsed {
         height: 3;
         min-height: 3;
@@ -32,6 +35,7 @@ class ContextWindowDrawer(Widget):
     }
     .ctx-scroll {
         height: 1fr;
+        scrollbar-size-vertical: 1;
     }
     """
 

@@ -22,8 +22,12 @@ class CognitivePillarsView(Widget):
         background: $background;
         padding: 0 1;
     }
+    CognitivePillarsView:focus-within {
+        border: double $accent;
+    }
     .pillar-scroll {
         height: 1fr;
+        scrollbar-size-vertical: 1;
     }
     """
 
