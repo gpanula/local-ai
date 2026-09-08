@@ -140,7 +140,7 @@ class PipelineWatchApp(App):
                 "or press 'o' / 'r' to browse and replay past runs."
             )
 
-        while True:
+        while self.is_running:
             try:
                 if os.path.exists(latest_link):
                     target_file = os.path.realpath(latest_link)
@@ -177,7 +177,7 @@ class PipelineWatchApp(App):
     async def _tail_events(self, file_path: str) -> None:
         """Tail JSONL events from active run file."""
         pos = 0
-        while True:
+        while self.is_running:
             try:
                 if os.path.exists(file_path):
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -243,6 +243,15 @@ class PipelineWatchApp(App):
             self.query_one("#pillars-view", CognitivePillarsView).update_state(
                 cur_it, prev_code=prev_code, selected_stage=self.state.selected_stage
             )
+            raw_st = evt.get("data", {}).get("stage") or self.state.current_stage
+            st = normalize_stage(raw_st)
+            norm_sel = normalize_stage(self.state.selected_stage)
+            if st == norm_sel:
+                model = self.state.get_stage_model(norm_sel)
+                thinking = self.state.get_stage_thinking(norm_sel)
+                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking(
+                    norm_sel, model, thinking
+                )
         elif etype in ("linter_result", "review_result"):
             prev_it = self.state.iterations.get(cur_it.iteration - 1)
             prev_code = prev_it.code if prev_it else ""
@@ -274,10 +283,10 @@ class PipelineWatchApp(App):
             text = evt.get("data", {}).get("text", "")
             self.query_one("#terminal-drawer", TerminalConsoleDrawer).append_line(text)
             norm_sel = normalize_stage(self.state.selected_stage)
-            if norm_sel == "dispatch":
-                model = self.state.get_stage_model("dispatch")
-                thinking = self.state.get_stage_thinking("dispatch")
-                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking("dispatch", model, thinking)
+            if norm_sel in ("sysadmin", "dispatch", "execute"):
+                model = self.state.get_stage_model("sysadmin")
+                thinking = self.state.get_stage_thinking("sysadmin")
+                self.query_one("#thinking-view", ActiveThinkingView).update_stage_thinking("sysadmin", model, thinking)
 
     def _refresh_all_widgets(self) -> None:
         """Full refresh of all UI components to reflect current state."""

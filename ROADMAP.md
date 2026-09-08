@@ -48,6 +48,7 @@ This workspace organizes our local AI research, workflows, and experiments acros
   * **Multi-Stage Cognitive Memory (`MemoryStore`)**: SQLite-backed FTS5 memory engine with stage-specific guidance, upstream remediation capture (`solved_pattern`), budget exhaustion capture (`hard_failure`), and proactive clean-run mining (`proven_pattern`).
   * **Fine-Tuning Dataset Pipeline (`dataset.py`)**: Trajectories recorded to `sysadmin/data/trajectories.jsonl` and exported to role-targeted Chain-of-Thought (CoT) SFT and DPO datasets.
   * **Live PTY Execution**: Sandboxed interactive bash execution via `terminal-mcp` with full cognitive reasoning visible in stdout and terminal buffers.
+  * **Interactive Pipeline TUI (`pipeline_tui`)**: Textual-based live monitoring and historical replay console with 6-stage visual progression, real-time `<think>` deliberation streaming drawer, 4-pillar cognition & code tabs, and resilient run discovery with fault detection.
 * **Recommended Models**:
   * `winter-prime:latest` / `qwen3:8b` (5.2 GB) — Complex multi-step reasoning, architecture, DAG construction, and threat modeling.
   * `winter-coder:8gb-trained` / `qwen2.5-coder:7b` (4.7 GB) — High-fidelity defensive code, ShellCheck compliance, and Ansible engineering.

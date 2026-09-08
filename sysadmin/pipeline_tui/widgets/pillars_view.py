@@ -168,7 +168,7 @@ class CognitivePillarsView(Widget):
         target_tab = "tab-strategy"
         if selected_stage in ("architect", "orchestrate", "orchestrator"):
             target_tab = "tab-strategy"
-        elif selected_stage in ("author", "dispatch", "execute"):
+        elif selected_stage in ("coder", "sysadmin", "author", "dispatch", "execute"):
             target_tab = "tab-code"
         elif selected_stage in ("lint", "review", "reviewer"):
             target_tab = "tab-critique"

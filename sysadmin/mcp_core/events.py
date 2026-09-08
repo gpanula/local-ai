@@ -158,17 +158,19 @@ class EventEmitter:
             },
         })
 
-    def thinking_chunk(self, iteration: int, model: str, chunk: str, is_final: bool = False) -> None:
+    def thinking_chunk(self, iteration: int, model: str, chunk: str, is_final: bool = False, stage: Optional[str] = None) -> None:
         self.emit("thinking_chunk", {
             "iteration": iteration,
+            "stage": stage or "author",
             "model": model,
             "chunk": chunk,
             "is_final": is_final,
         })
 
-    def reasoning_chunk(self, iteration: int, model: str, reasoning: Dict[str, Any]) -> None:
+    def reasoning_chunk(self, iteration: int, model: str, reasoning: Dict[str, Any], stage: Optional[str] = None) -> None:
         self.emit("reasoning_chunk", {
             "iteration": iteration,
+            "stage": stage or "author",
             "model": model,
             "reasoning": reasoning,
         })

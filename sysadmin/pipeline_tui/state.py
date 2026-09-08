@@ -9,20 +9,20 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
-STAGE_ORDER = ["architect", "orchestrator", "reviewer", "security", "dispatch"]
+STAGE_ORDER = ["architect", "orchestrator", "reviewer", "security", "coder", "sysadmin"]
 
 
 def normalize_stage(stage: str) -> str:
-    """Normalize alias and role names to standard 5-stage pipeline keys."""
+    """Normalize alias and role names to standard 6-stage pipeline keys."""
     s = (stage or "").lower().strip()
     aliases = {
         "orchestrate": "orchestrator",
-        "author": "orchestrator",
+        "author": "coder",
         "lint": "reviewer",
         "review": "reviewer",
-        "execute": "dispatch",
-        "coder": "dispatch",
-        "sysadmin": "dispatch",
+        "execute": "sysadmin",
+        "execution": "sysadmin",
+        "dispatch": "coder",
     }
     return aliases.get(s, s)
 
@@ -38,6 +38,8 @@ class IterationState:
             "orchestrator": {},
             "reviewer": {},
             "security": {},
+            "coder": {},
+            "sysadmin": {},
             "dispatch": {},
             "orchestrate": {},
             "author": {},
@@ -51,6 +53,8 @@ class IterationState:
             "orchestrator": "",
             "reviewer": "",
             "security": "",
+            "coder": "",
+            "sysadmin": "",
             "dispatch": "",
             "orchestrate": "",
             "author": "",
@@ -63,6 +67,8 @@ class IterationState:
             "orchestrator": "",
             "reviewer": "",
             "security": "",
+            "coder": "qwen2.5-coder:7b",
+            "sysadmin": "qwen2.5-coder:7b",
             "dispatch": "sandbox",
             "orchestrate": "",
             "author": "",
@@ -71,6 +77,20 @@ class IterationState:
             "execute": "sandbox",
         }
         self.reasoning: Dict[str, Any] = {}
+        self.stage_reasoning: Dict[str, Dict[str, Any]] = {
+            "architect": {},
+            "orchestrator": {},
+            "reviewer": {},
+            "security": {},
+            "coder": {},
+            "sysadmin": {},
+            "dispatch": {},
+            "orchestrate": {},
+            "author": {},
+            "lint": {},
+            "review": {},
+            "execute": {},
+        }
         self.code: str = ""
         self.script_name: Optional[str] = None
         self.stats: Dict[str, Any] = {}
@@ -138,8 +158,10 @@ class PipelineState:
             return self.models.get("reviewer") or self.models.get("default") or "winter-prime:latest"
         elif norm_st == "security":
             return self.models.get("security") or self.models.get("default") or "winter-prime:latest"
-        elif norm_st == "dispatch":
-            return "sandbox / dispatch"
+        elif norm_st == "coder":
+            return self.models.get("coder") or "qwen2.5-coder:7b"
+        elif norm_st in ("sysadmin", "dispatch", "execute"):
+            return self.models.get("sysadmin") or "sandbox / sysadmin"
         return ""
 
     def get_stage_thinking(self, stage: str) -> str:
@@ -149,6 +171,19 @@ class PipelineState:
         t = cur_it.stage_thinking.get(norm_st) or cur_it.stage_thinking.get(stage, "")
         if t:
             return t
+        sr = getattr(cur_it, "stage_reasoning", {}).get(norm_st) or getattr(cur_it, "stage_reasoning", {}).get(stage)
+        if sr and isinstance(sr, dict) and any(sr.values()):
+            parts = []
+            if sr.get("strategy"):
+                parts.append(f"🧠 [Pillar 1: Analysis & Strategy]\n{sr['strategy']}")
+            if sr.get("risks"):
+                parts.append(f"⚠️ [Pillar 2: Risks & Edge Cases]\n{sr['risks']}")
+            if sr.get("solution"):
+                parts.append(f"🛠️ [Pillar 3: Solution & Decisions]\n{sr['solution']}")
+            if sr.get("verification_plan") or sr.get("verification"):
+                parts.append(f"🧪 [Pillar 4: Verification & Testing]\n{sr.get('verification_plan') or sr.get('verification')}")
+            if parts:
+                return "\n\n".join(parts)
         roles = cur_it.review.get("roles") or {}
         if norm_st == "architect":
             arch = roles.get("architect") or roles.get("coder") or {}
@@ -171,7 +206,11 @@ class PipelineState:
             sec = roles.get("security") or {}
             cot = sec.get("chain_of_thought") or sec.get("analysis") or ""
             return cot
-        elif norm_st == "dispatch" and self.terminal_lines:
+        elif norm_st == "coder":
+            cdr = roles.get("coder") or roles.get("author") or {}
+            cot = cdr.get("chain_of_thought") or cdr.get("analysis") or ""
+            return cot or cur_it.thinking
+        elif norm_st in ("sysadmin", "dispatch", "execute") and self.terminal_lines:
             return "\n".join(self.terminal_lines[-50:])
         return ""
 
@@ -181,6 +220,20 @@ class PipelineState:
         cur_it = self.current_iteration()
         ctx = cur_it.stage_contexts.get(norm_st) or cur_it.stage_contexts.get(stage)
         if ctx and (ctx.get("system_rules") or ctx.get("token_breakdown")):
+            if not ctx.get("lessons"):
+                try:
+                    import json
+                    up = json.loads(ctx.get("user_prompt", "{}"))
+                    if isinstance(up, dict) and up.get("injected_lessons"):
+                        ctx["lessons"] = up["injected_lessons"]
+                        if "token_breakdown" in ctx:
+                            tb = ctx["token_breakdown"]
+                            if tb.get("lessons", 0) == 0:
+                                lessons_tk = len(json.dumps(ctx["lessons"])) // 4
+                                tb["lessons"] = lessons_tk
+                                tb["total"] = tb.get("total", 0) + lessons_tk
+                except Exception:
+                    pass
             return ctx
         return self._derive_stage_context(stage, cur_it)
 
@@ -191,6 +244,14 @@ class PipelineState:
         task_prompt = self.prompt or base_ctx.get("user_prompt", "")
         script_code = it.code or ""
         injected_lessons = base_ctx.get("lessons") or []
+        if not injected_lessons and base_ctx.get("user_prompt"):
+            try:
+                import json
+                up = json.loads(base_ctx.get("user_prompt", "{}"))
+                if isinstance(up, dict) and up.get("injected_lessons"):
+                    injected_lessons = up["injected_lessons"]
+            except Exception:
+                pass
 
         def est(t: str) -> int:
             return max(1, len(t) // 4) if t else 0
@@ -313,7 +374,39 @@ class PipelineState:
                 },
             }
 
-        elif norm_st == "dispatch":
+        elif norm_st == "coder":
+            coder_rules = (
+                "Winter Coder Code Authorship & Lint Standard:\n"
+                "- Author defensive bash scripts or python modules per task spec.\n"
+                "- Constraint: Pure code output only; must satisfy ShellCheck and pytest.\n"
+                "- Follow AGENTS.md standards: set -euo pipefail, explicit traps, no hardcoded /home."
+            )
+            rules_tk = est(coder_rules)
+            prompt_tk = est(task_prompt)
+            fb_tk = est(it.code)
+            return {
+                "stage": "coder",
+                "system_rules": coder_rules,
+                "tools": [
+                    {"name": "write_file", "description": "Write authored code or script to filesystem"},
+                    {"name": "read_file", "description": "Inspect existing files and dependencies"},
+                    {"name": "run_bash", "description": "Run linters (ShellCheck, pytest)"},
+                ],
+                "lessons": injected_lessons,
+                "user_prompt": task_prompt,
+                "rework_feedback": it.code or "(Code synthesis pending)",
+                "token_breakdown": {
+                    "rules": rules_tk,
+                    "tools": 150,
+                    "lessons": 0,
+                    "prompt": prompt_tk,
+                    "feedback": fb_tk,
+                    "total": rules_tk + 150 + prompt_tk + fb_tk,
+                    "limit": 8192,
+                },
+            }
+
+        elif norm_st in ("sysadmin", "dispatch", "execute"):
             exec_rules = (
                 "Sandbox Execution Policy:\n"
                 "- Isolated subshell execution with strict environment variables.\n"
@@ -325,7 +418,7 @@ class PipelineState:
             prompt_tk = est(script_code)
             fb_tk = est(term_text)
             return {
-                "stage": "dispatch",
+                "stage": "sysadmin",
                 "system_rules": exec_rules,
                 "tools": [{"name": "bash", "description": "Linux execution subshell"}],
                 "lessons": [],
@@ -405,9 +498,25 @@ class PipelineState:
             it = self.get_iteration(iter_num)
             raw_stage = data.get("stage") or self.current_stage
             st = normalize_stage(raw_stage)
-            it.reasoning.update(data.get("reasoning", {}))
+            r_dict = data.get("reasoning", {})
+            it.reasoning.update(r_dict)
+            it.stage_reasoning[st] = r_dict
+            it.stage_reasoning[raw_stage] = r_dict
             it.stage_models[st] = data.get("model", "")
             it.stage_models[raw_stage] = data.get("model", "")
+            if not it.stage_thinking.get(st) and r_dict:
+                parts = []
+                if r_dict.get("strategy"):
+                    parts.append(f"🧠 [Pillar 1: Analysis & Strategy]\n{r_dict['strategy']}")
+                if r_dict.get("risks"):
+                    parts.append(f"⚠️ [Pillar 2: Risks & Edge Cases]\n{r_dict['risks']}")
+                if r_dict.get("solution"):
+                    parts.append(f"🛠️ [Pillar 3: Solution & Decisions]\n{r_dict['solution']}")
+                if r_dict.get("verification_plan") or r_dict.get("verification"):
+                    parts.append(f"🧪 [Pillar 4: Verification & Testing]\n{r_dict.get('verification_plan') or r_dict.get('verification')}")
+                if parts:
+                    it.stage_thinking[st] = "\n\n".join(parts)
+                    it.stage_thinking[raw_stage] = it.stage_thinking[st]
 
         elif etype == "code_synthesized":
             iter_num = data.get("iteration", self.active_iteration_idx)

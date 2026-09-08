@@ -75,6 +75,7 @@ The architecture unites local models, sandboxed interactive terminals, a persist
   - Planning: [`architect.md`](prompts/roles/architect.md), [`orchestrator.md`](prompts/roles/orchestrator.md), [`reviewer.md`](prompts/roles/reviewer.md), [`security.md`](prompts/roles/security.md).
   - Pre-Execution Gates: [`reviewer_code.md`](prompts/roles/reviewer_code.md), [`security_code.md`](prompts/roles/security_code.md).
   - Execution: [`coder.md`](prompts/roles/coder.md), [`sysadmin.md`](prompts/roles/sysadmin.md).
+* **[`pipeline_tui/`](pipeline_tui/)**: Interactive terminal user interface (Textual-based) for live monitoring, step-by-step visual stepper progression across the 6 canonical roles, real-time `<think>` deliberation streaming, 4-pillar cognition inspection, and historical run replay. Invocable via `sysadmin/venv/bin/python -m sysadmin.pipeline_tui`.
 * **[`mcp_cli/`](mcp_cli/README.md)**: Extensible command-registry CLI providing subcommands for pipeline execution (`pipeline-run`, `build-and-run`), dataset exporting (`export-dataset`), memory lifecycle (`memory-*`), static analysis (`shellcheck`, `ansible-check`), and VRAM verification. Invocable via [`mcp_client.py`](mcp_client.py).
 * **[`mcp_core/`](mcp_core/README.md)**: Shared core library providing:
   - Workspace path confinement & socket security (`workspace.py`)
@@ -101,7 +102,7 @@ The architecture unites local models, sandboxed interactive terminals, a persist
 
 ---
 
-## 🚀 Pipeline Execution
+## 🚀 Pipeline Execution & Monitoring
 
 ### 1. Launching the Multi-Agent Pipeline
 Execute any prompt markdown or string through the full Arc-Orc-Rev state machine:
@@ -114,7 +115,24 @@ sysadmin/venv/bin/python sysadmin/pipeline.py sysadmin/prompts/hello_world_test.
 sysadmin/venv/bin/python sysadmin/pipeline.py sysadmin/prompts/hello_world_test.md --model winter-prime:latest
 ```
 
-### 2. Resuming Checkpointed or Aborted Runs
+### 2. Live TUI Monitoring & Run Replay
+Launch the interactive Terminal User Interface to observe execution live or inspect historical runs:
+
+```bash
+# Launch interactive TUI in live discovery mode
+sysadmin/venv/bin/python -m sysadmin.pipeline_tui
+
+# Replay a specific run trajectory or event stream
+sysadmin/venv/bin/python -m sysadmin.pipeline_tui --replay <RUN_ID_OR_PATH>
+```
+
+Features:
+- **6-Role Stepper**: Visual stage progression across `Architect` ➔ `Orchestrator` ➔ `Reviewer` ➔ `Security` ➔ `Coder` ➔ `Sysadmin`.
+- **Active Thinking Drawer**: Live streaming of raw `<think>` deliberation tokens for model observability and prompt debugging.
+- **Cognition & Code Inspector**: 4-pillar tabs (`Analysis`, `Risks`, `Decisions`, `Testing`) and dedicated code artifact viewer (`tab-code`).
+- **Terminal & Logs Drawer**: Embedded PTY output streaming and event log viewer.
+
+### 3. Resuming Checkpointed or Aborted Runs
 If a run paused for human escalation or was interrupted, resume directly from its stored `state.json`:
 
 ```bash

@@ -12,21 +12,22 @@ STAGES = [
     ("orchestrator", "Orchestrator"),
     ("reviewer", "Reviewer"),
     ("security", "Security"),
-    ("dispatch", "Execution"),
+    ("coder", "Coder"),
+    ("sysadmin", "Sysadmin"),
 ]
 
 
 def normalize_stage(stage: str) -> str:
-    """Normalize alias and role names to standard 5-stage pipeline keys."""
+    """Normalize alias and role names to standard 6-stage pipeline keys."""
     s = (stage or "").lower().strip()
     aliases = {
         "orchestrate": "orchestrator",
-        "author": "orchestrator",
+        "author": "coder",
         "lint": "reviewer",
         "review": "reviewer",
-        "execute": "dispatch",
-        "coder": "dispatch",
-        "sysadmin": "dispatch",
+        "execute": "sysadmin",
+        "execution": "sysadmin",
+        "dispatch": "coder",
     }
     return aliases.get(s, s)
 

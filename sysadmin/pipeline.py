@@ -116,6 +116,8 @@ def parse_llm_json(response: str) -> dict:
     clean = response.split("\n\n---\n")[0].strip()
 
     think_match = re.search(r"<think>([\s\S]*?)</think>", response)
+    if not think_match:
+        think_match = re.search(r"<think>([\s\S]*?)(?=```json|\{)", response)
     cot = think_match.group(1).strip() if think_match else ""
 
     # Match ```json ... ``` or ``` ... ```
@@ -192,6 +194,7 @@ def stage_chat(
     user_content: str,
     model: str = "winter-prime:latest",
     tools: Optional[List[Dict[str, Any]]] = None,
+    lessons: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Call Ollama via handle_chat with SMMP profile applied + terminal-mcp streaming."""
     profile = SMMP_PROFILES.get(role, {"temperature": 0.1, "top_p": 0.9})
@@ -201,6 +204,20 @@ def stage_chat(
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
+    if lessons is None:
+        try:
+            parsed_content = json.loads(user_content)
+            if isinstance(parsed_content, dict):
+                lessons = parsed_content.get("injected_lessons") or []
+                if not lessons:
+                    for k in ("plan", "task", "annotated_plan"):
+                        nested = parsed_content.get(k)
+                        if isinstance(nested, dict) and nested.get("injected_lessons"):
+                            lessons = nested["injected_lessons"]
+                            break
+        except Exception:
+            lessons = []
+
     emitter = EventEmitter.get_current()
     if emitter:
         try:
@@ -208,7 +225,7 @@ def stage_chat(
                 iteration=1,
                 system_rules=system_prompt,
                 tools=tools or [],
-                lessons=[],
+                lessons=lessons or [],
                 user_prompt=user_content,
                 stage=role,
             )
@@ -228,6 +245,8 @@ def stage_chat(
     clean_body = response.split("\n\n---\n")[0].strip()
 
     think_match = re.search(r"<think>([\s\S]*?)</think>", response)
+    if not think_match:
+        think_match = re.search(r"<think>([\s\S]*?)(?=```json|\{)", response)
     if think_match:
         cot = think_match.group(1).strip()
         if cot:
@@ -259,17 +278,35 @@ def stage_chat(
 
             if emitter:
                 try:
-                    emitter.emit("reasoning_chunk", {
-                        "iteration": 1,
-                        "stage": role,
-                        "model": model,
-                        "reasoning": {
+                    emitter.reasoning_chunk(
+                        iteration=1,
+                        model=model,
+                        reasoning={
                             "strategy": cognition.get("analysis", ""),
                             "risks": cognition.get("risks", ""),
                             "solution": cognition.get("solution", ""),
                             "verification_plan": cognition.get("verification", ""),
                         },
-                    })
+                        stage=role,
+                    )
+                    if not think_match:
+                        thinking_parts = []
+                        if cognition.get("analysis"):
+                            thinking_parts.append(f"🧠 [Pillar 1: Analysis & Strategy]\n{cognition['analysis']}")
+                        if cognition.get("risks"):
+                            thinking_parts.append(f"⚠️ [Pillar 2: Risks & Edge Cases]\n{cognition['risks']}")
+                        if cognition.get("solution"):
+                            thinking_parts.append(f"🛠️ [Pillar 3: Solution & Decisions]\n{cognition['solution']}")
+                        if cognition.get("verification"):
+                            thinking_parts.append(f"🧪 [Pillar 4: Verification & Testing]\n{cognition['verification']}")
+                        if thinking_parts:
+                            emitter.thinking_chunk(
+                                iteration=1,
+                                model=model,
+                                chunk="\n\n".join(thinking_parts),
+                                stage=role,
+                                is_final=True,
+                            )
                 except Exception:
                     pass
     except Exception:
@@ -624,6 +661,7 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
             pass
         state.injected_lessons["reviewer"] = relevant_lessons
         annotated_plan["audit_heuristics"] = [l["rule"] for l in relevant_lessons]
+        annotated_plan["injected_lessons"] = relevant_lessons
         send_terminal_mcp(
             f"\n📥 [MEMORY] Injected {len(relevant_lessons)} heuristic(s) into Reviewer: {', '.join(lesson_ids)}"
         )
@@ -694,6 +732,7 @@ def run_security(state: PipelineState, store: ContextStore, model: str = "winter
             pass
         state.injected_lessons["security"] = relevant_lessons
         annotated_plan["security_heuristics"] = [l["rule"] for l in relevant_lessons]
+        annotated_plan["injected_lessons"] = relevant_lessons
         send_terminal_mcp(
             f"\n📥 [MEMORY] Injected {len(relevant_lessons)} heuristic(s) into Security: {', '.join(lesson_ids)}"
         )
@@ -882,6 +921,12 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
         send_terminal_mcp(
             f"\n🚀 [DISPATCH] Executing task '{tid}' with agent `{role}`: {task_desc}"
         )
+        emitter = EventEmitter.get_current()
+        if emitter:
+            try:
+                emitter.stage_transition(role)
+            except Exception:
+                pass
 
         retries = 0
         max_retries = 2

@@ -22,7 +22,7 @@ def test_real_trajectories_replay_into_state():
         # Basic integrity checks on accumulated state
         assert state.run_id == r["id"]
         assert state.current_stage == "finished"
-        assert state.outcome in ("approved", "aborted", "failed")
+        assert state.outcome in ("approved", "aborted", "failed", "complete")
         assert len(state.iterations) >= 1
 
         cur_it = state.current_iteration()
@@ -133,11 +133,18 @@ def test_app_pilot_stage_navigation_with_arrows():
             pillars_tabs = app.query_one("#pillars-tabs", TabbedContent)
             ctx_meter = app.query_one("#ctx-meter", Static)
 
-            # Replay of latest ended at 'dispatch' stage
-            assert app.state.selected_stage == "dispatch"
-            assert "DISPATCH" in str(ctx_meter.content)
+            # Replay of latest ended at 'sysadmin' stage
+            assert app.state.selected_stage == "sysadmin"
+            assert "SYSADMIN" in str(ctx_meter.content)
 
-            # Move left: dispatch -> security
+            # Move left: sysadmin -> coder
+            await pilot.press("left")
+            assert app.state.selected_stage == "coder"
+            assert "CODER" in str(header_widget.content)
+            assert "CODER" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-code"
+
+            # Move left: coder -> security
             await pilot.press("left")
             assert app.state.selected_stage == "security"
             assert "SECURITY" in str(header_widget.content)
@@ -190,20 +197,27 @@ def test_app_pilot_stage_navigation_with_arrows():
             assert "SECURITY" in str(ctx_meter.content)
             assert pillars_tabs.active == "tab-risks"
 
-            # Move right: security -> dispatch
+            # Move right: security -> coder
             await pilot.press("right")
-            assert app.state.selected_stage == "dispatch"
-            assert "DISPATCH" in str(header_widget.content)
-            assert "DISPATCH" in str(ctx_meter.content)
+            assert app.state.selected_stage == "coder"
+            assert "CODER" in str(header_widget.content)
+            assert "CODER" in str(ctx_meter.content)
+            assert pillars_tabs.active == "tab-code"
 
-            # Bound check: right again shouldn't go past dispatch
+            # Move right: coder -> sysadmin
             await pilot.press("right")
-            assert app.state.selected_stage == "dispatch"
+            assert app.state.selected_stage == "sysadmin"
+            assert "SYSADMIN" in str(header_widget.content)
+            assert "SYSADMIN" in str(ctx_meter.content)
 
-            # Navigate back left to security
+            # Bound check: right again shouldn't go past sysadmin
+            await pilot.press("right")
+            assert app.state.selected_stage == "sysadmin"
+
+            # Navigate back left to coder
             await pilot.press("left")
-            assert app.state.selected_stage == "security"
-            assert "SECURITY" in str(ctx_meter.content)
+            assert app.state.selected_stage == "coder"
+            assert "CODER" in str(ctx_meter.content)
 
             await pilot.press("q")
 
@@ -282,23 +296,30 @@ def test_arc_orc_rev_live_event_stream_tracking():
             assert "✓ Reviewer" in stepper_text
             assert "⟳ Security" in stepper_text
 
-            # 6. Stage: Dispatch
-            app.state.handle_event({"type": "stage_transition", "data": {"stage": "dispatch", "iteration": 1}})
+            # 6. Stage: Coder
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "coder", "iteration": 1}})
             app._apply_single_event_ui({"type": "stage_transition"})
             stepper_text = str(stepper.query_one("#stepper-content", Static).content)
             assert "✓ Security" in stepper_text
-            assert "⟳ Execution" in stepper_text
+            assert "⟳ Coder" in stepper_text
 
-            # Terminal output streamed during dispatch
+            # 7. Stage: Sysadmin
+            app.state.handle_event({"type": "stage_transition", "data": {"stage": "sysadmin", "iteration": 1}})
+            app._apply_single_event_ui({"type": "stage_transition"})
+            stepper_text = str(stepper.query_one("#stepper-content", Static).content)
+            assert "✓ Coder" in stepper_text
+            assert "⟳ Sysadmin" in stepper_text
+
+            # Terminal output streamed during dispatch / sysadmin
             app.state.handle_event({"type": "terminal_chunk", "data": {"text": "Executing: echo 'hello world'"}})
             app._apply_single_event_ui({"type": "terminal_chunk", "data": {"text": "Executing: echo 'hello world'"}})
             assert term_drawer.line_count == 1
 
-            # 7. Pipeline complete
+            # 8. Pipeline complete
             app.state.handle_event({"type": "pipeline_end", "data": {"outcome": "complete"}})
             app._apply_single_event_ui({"type": "pipeline_end"})
             stepper_text = str(stepper.query_one("#stepper-content", Static).content)
-            assert "✓ Execution" in stepper_text
+            assert "✓ Sysadmin" in stepper_text
 
             await pilot.press("q")
 

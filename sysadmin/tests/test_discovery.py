@@ -99,3 +99,23 @@ def test_load_events_for_trajectory_run(mock_trajectories):
     assert "linter_result" in types
     assert "review_result" in types
     assert "pipeline_end" in types
+
+
+def test_list_runs_event_stream_failed_outcome(tmp_path):
+    """Verify runs with exit errors or stale streams are reported as failed rather than in_progress."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    ef = runs_dir / "run-failed-001.jsonl"
+    events = [
+        {"type": "pipeline_start", "timestamp": "2026-09-07T12:00:00Z", "data": {"prompt": "Test failing run"}},
+        {"type": "terminal_chunk", "data": {"text": "Exit Code: 1 (indicating an error)"}},
+        {"type": "pipeline_end", "data": {"outcome": "failed", "abort_reason": "Execution error"}},
+    ]
+    with open(ef, "w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+
+    runs = list_runs(trajectories_path=str(tmp_path / "trajectories.jsonl"), runs_dir=str(runs_dir))
+    assert len(runs) == 1
+    assert runs[0]["id"] == "run-failed-001"
+    assert runs[0]["outcome"] == "failed"

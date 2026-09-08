@@ -56,6 +56,8 @@ class ActiveThinkingView(Widget):
                 "orchestrator": "(Awaiting Orchestrator task DAG formulation & specification)",
                 "reviewer": "(Awaiting Reviewer gate contract evaluation)",
                 "security": "(Awaiting Security gate STRIDE analysis & vulnerability assessment)",
+                "coder": "(Awaiting Coder script authoring & code synthesis)",
+                "sysadmin": "(Awaiting Sysadmin tool dispatch & execution sandbox)",
                 "dispatch": "(Awaiting Execution sandbox & tool dispatch)",
                 "orchestrate": "(No deliberation recorded for orchestrator planning)",
                 "author": "(No deliberation recorded for author agent)",

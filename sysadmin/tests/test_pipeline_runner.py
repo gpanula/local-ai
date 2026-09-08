@@ -292,3 +292,52 @@ def test_run_pipeline_pre_filter_rejection_routes_to_orchestrator(tmp_path, monk
     # Orchestrator was called twice: first iteration failed pre-filter, second iteration passed
     assert orchestrator_call_count[0] == 2
     assert len(reviewer_called) == 1
+
+
+def test_raw_thinking_role_prompts():
+    """Verify non-execution roles require <think> while execution roles do not."""
+    non_exec_roles = ["architect", "orchestrator", "reviewer", "security", "reviewer_code", "security_code"]
+    for r in non_exec_roles:
+        p = load_role_prompt(r)
+        assert "<think>" in p, f"Role {r} prompt should require raw thinking"
+
+    exec_roles = ["coder", "sysadmin"]
+    for r in exec_roles:
+        p = load_role_prompt(r)
+        assert "<think>" not in p, f"Execution role {r} should not require raw thinking"
+
+
+def test_parse_llm_json_raw_thinking():
+    """Verify parse_llm_json extracts <think> blocks and retains valid JSON."""
+    from pipeline import parse_llm_json
+
+    raw_response = (
+        "<think>\n"
+        "Deliberating on architecture: we need defensive bash standards.\n"
+        "Checking domain tags: Defensive Bash Scripting.\n"
+        "</think>\n"
+        "```json\n"
+        "{\n"
+        '  "schema_version": "2.0",\n'
+        '  "message_type": "plan",\n'
+        '  "run_id": "run-test-01",\n'
+        '  "tasks": []\n'
+        "}\n"
+        "```"
+    )
+    parsed = parse_llm_json(raw_response)
+    assert parsed["schema_version"] == "2.0"
+    assert parsed["message_type"] == "plan"
+    assert "Deliberating on architecture" in parsed["cognition"]["chain_of_thought"]
+
+    # Unclosed <think> fallback
+    unclosed_response = (
+        "<think>\n"
+        "Analyzing risks without closing tag...\n"
+        "```json\n"
+        '{"schema_version": "2.0", "message_type": "plan"}\n'
+        "```"
+    )
+    parsed_unclosed = parse_llm_json(unclosed_response)
+    assert parsed_unclosed["schema_version"] == "2.0"
+    assert "Analyzing risks" in parsed_unclosed["cognition"]["chain_of_thought"]
