@@ -1,22 +1,25 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Enable strict error handling
 set -euo pipefail
 
-# Define variables
-VENV_DIR="sysadmin/venv"
-TEMP_DIR=$(mktemp -d)
+# Deterministic directory resolution
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"
+REQUIREMENTS_FILE="${REPO_ROOT}/sysadmin/requirements.txt"
+TEMP_DIR=$(mktemp -d -p /tmp)
 
 # Trap for ERR signals
-trap 'echo "❌ [ERROR] Script failed on line ${LINENO} executing: ${BASH_COMMAND}" >&2; exit 1' ERR
+trap 'echo "❌ [ERROR] Line ${LINENO}: ${BASH_COMMAND}" >&2; exit 1' ERR
 
 # Trap for EXIT signals to clean up temporary files
-trap 'rm -rf "${TEMP_DIR:-}"' EXIT
+trap 'rm -rf "${TEMP_DIR:-}" "${ANSIBLE_LOCAL_TEMP:-}"' EXIT
 
 # Function to create virtual environment
 create_venv() {
     if [ ! -d "${VENV_DIR}" ]; then
-        python -m venv "${VENV_DIR}"
+        python3 -m venv "${VENV_DIR}"
     fi
 }
 
@@ -36,7 +39,13 @@ upgrade_pip_tools() {
 
 # Function to install required packages
 install_packages() {
-    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec
+    if [ -f "${REQUIREMENTS_FILE}" ]; then
+        echo "📦 Installing packages from ${REQUIREMENTS_FILE}..."
+        "${VENV_DIR}/bin/pip" install --upgrade -r "${REQUIREMENTS_FILE}"
+    else
+        echo "⚠️  [WARN] ${REQUIREMENTS_FILE} not found; falling back to hardcoded package list..."
+        "${VENV_DIR}/bin/pip" install --upgrade ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec rich textual zstandard
+    fi
 }
 
 # Function to verify package installation
@@ -49,8 +58,8 @@ verify_packages() {
     done
 
     # Verify Python library import
-    if ! "${VENV_DIR}/bin/python" -c "import yaml; print(yaml.__version__)" &> /dev/null; then
-        echo "Error: pyyaml is not installed or not importable."
+    if ! "${VENV_DIR}/bin/python" -c "import yaml, rich, textual, zstandard; print(yaml.__version__)" &> /dev/null; then
+        echo "Error: required python libraries are not installed or not importable."
         exit 1
     fi
 }
@@ -58,7 +67,7 @@ verify_packages() {
 # Function to run smoke tests
 run_smoke_tests() {
     # Set environment variables for Ansible
-    export ANSIBLE_LOCAL_TEMP=$(mktemp -d)
+    export ANSIBLE_LOCAL_TEMP=$(mktemp -d -p /tmp)
     export ANSIBLE_HOME="${ANSIBLE_LOCAL_TEMP}"
 
     # Run smoke tests
