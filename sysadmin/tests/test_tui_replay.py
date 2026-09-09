@@ -354,3 +354,55 @@ def test_arc_orc_rev_live_event_stream_tracking():
             await pilot.press("q")
 
     asyncio.run(_run())
+
+
+def test_run_picker_side_scroll_wheel():
+    """Verify that mouse side-scroll and pointer events scroll the run picker table horizontally and vertically."""
+    import asyncio
+    from textual import events
+    from textual.app import App
+    from textual.widgets import DataTable, Input
+    from pipeline_tui.discovery import list_runs
+    from pipeline_tui.widgets.run_picker import RunPickerModal, ReplayDataTable
+
+    class ModalApp(App):
+        def on_mount(self):
+            runs = list_runs(limit=10)
+            self.push_screen(RunPickerModal(runs))
+
+    async def _run():
+        app = ModalApp()
+        async with app.run_test(size=(90, 25)) as pilot:
+            screen = app.screen
+            table = screen.query_one("#picker-table", ReplayDataTable)
+            search = screen.query_one("#picker-search", Input)
+
+            # 1. Direct table side scroll right
+            table.post_message(events.MouseScrollRight(table, 0, 0, 0, 0, 0, False, False, False))
+            await pilot.pause(0.1)
+            assert table.scroll_x == 12
+
+            # 2. Side scroll right on search input (mouse over search bar)
+            search.post_message(events.MouseScrollRight(search, 0, 0, 0, 0, 0, False, False, False))
+            await pilot.pause(0.1)
+            assert table.scroll_x == 24
+
+            # 3. Side scroll left on search input
+            search.post_message(events.MouseScrollLeft(search, 0, 0, 0, 0, 0, False, False, False))
+            await pilot.pause(0.1)
+            assert table.scroll_x == 12
+
+            # 4. Shift + MouseScrollDown on search input (terminal horizontal translation)
+            search.post_message(events.MouseScrollDown(search, 0, 0, 0, 0, 0, False, False, True))
+            await pilot.pause(0.1)
+            assert table.scroll_x == 24
+
+            # 5. Standard vertical MouseScrollDown
+            search.post_message(events.MouseScrollDown(search, 0, 0, 0, 0, 0, False, False, False))
+            await pilot.pause(0.1)
+            assert table.scroll_y == 3
+
+            await pilot.press("escape")
+
+    asyncio.run(_run())
+
