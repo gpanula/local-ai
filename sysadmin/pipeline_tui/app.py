@@ -7,6 +7,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -294,7 +295,12 @@ class PipelineWatchApp(App):
         self.query_one("#terminal-drawer", TerminalConsoleDrawer).set_lines(self.state.terminal_lines)
         self._update_stage_view()
 
-    # --- Actions ---
+    # --- Message Handlers & Actions ---
+
+    @on(PipelineStepper.StageSelected)
+    def on_stage_selected(self, message: PipelineStepper.StageSelected) -> None:
+        self.state.selected_stage = normalize_stage(message.stage)
+        self._update_stage_view()
 
     def action_prev_stage(self) -> None:
         self.state.prev_stage()

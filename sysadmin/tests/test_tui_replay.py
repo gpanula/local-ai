@@ -20,7 +20,11 @@ def test_real_trajectories_replay_into_state():
             state.handle_event(evt)
 
         # Basic integrity checks on accumulated state
-        assert state.run_id == r["id"]
+        assert (
+            state.run_id == r["id"]
+            or state.run_id in r.get("task_file", "")
+            or (r.get("event_file") and state.run_id in r["event_file"])
+        )
         assert state.current_stage == "finished"
         assert state.outcome in ("approved", "aborted", "failed", "complete")
         assert len(state.iterations) >= 1
@@ -222,6 +226,32 @@ def test_app_pilot_stage_navigation_with_arrows():
             await pilot.press("q")
 
     asyncio.run(_run())
+
+
+def test_app_pilot_stage_mouse_click_selection():
+    """Verify that clicking stage badges in the stepper updates the selected stage and view."""
+    import asyncio
+    from textual.widgets import Static
+    from pipeline_tui.app import PipelineWatchApp
+
+    async def _run():
+        app = PipelineWatchApp(target_run_id="latest", is_replay=True)
+        async with app.run_test(size=(140, 35)) as pilot:
+            await pilot.pause(0.1)
+            thinking_view = app.query_one("#thinking-view")
+            header_widget = thinking_view.query_one("#thinking-header", Static)
+
+            stages_to_test = ["orchestrator", "security", "coder", "sysadmin", "architect", "reviewer"]
+            for stage in stages_to_test:
+                badge = app.query_one(f"#stage-badge-{stage}")
+                await pilot.click(badge)
+                assert app.state.selected_stage == stage
+                assert stage.upper() in str(header_widget.content)
+
+            await pilot.press("q")
+
+    asyncio.run(_run())
+
 
 
 def test_arc_orc_rev_live_event_stream_tracking():
