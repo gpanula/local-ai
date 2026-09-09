@@ -24,4 +24,16 @@ if [ -f "${REPO_ROOT}/sysadmin/mcp_client.py" ] && command -v python3 >/dev/null
     fi
 fi
 
+# Check if python requirements are up-to-date and committed before push (BLOCKING)
+if [ -f "${REPO_ROOT}/sysadmin/sync_requirements.sh" ]; then
+    bash "${REPO_ROOT}/sysadmin/sync_requirements.sh" >/dev/null 2>&1 || true
+    REQ_DIFF="$(git status --porcelain "${REPO_ROOT}/sysadmin/requirements.txt" 2>/dev/null || true)"
+    if [ -n "${REQ_DIFF}" ]; then
+        echo "⛔ [Requirements Drift] sysadmin/requirements.txt has uncommitted changes or package drift!" >&2
+        echo "   Please commit the updated requirements file before pushing:" >&2
+        echo "     git add sysadmin/requirements.txt && git commit -m \"✨ [toolchain]: update requirements.txt\"" >&2
+        exit 1
+    fi
+fi
+
 exit 0

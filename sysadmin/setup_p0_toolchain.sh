@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"
+REQUIREMENTS_FILE="${REPO_ROOT}/sysadmin/requirements.txt"
 TEMP_DIR=$(mktemp -d -p /tmp)
 
 # Trap for ERR signals
@@ -38,7 +39,13 @@ upgrade_pip_tools() {
 
 # Function to install required packages
 install_packages() {
-    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec rich textual zstandard
+    if [ -f "${REQUIREMENTS_FILE}" ]; then
+        echo "📦 Installing packages from ${REQUIREMENTS_FILE}..."
+        "${VENV_DIR}/bin/pip" install --upgrade -r "${REQUIREMENTS_FILE}"
+    else
+        echo "⚠️  [WARN] ${REQUIREMENTS_FILE} not found; falling back to hardcoded package list..."
+        "${VENV_DIR}/bin/pip" install --upgrade ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec rich textual zstandard
+    fi
 }
 
 # Function to verify package installation

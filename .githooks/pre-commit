@@ -35,5 +35,16 @@ if echo "${STAGED_FILES}" | grep -qE '^ollama_update/lessons\.md$|^sysadmin/prom
     fi
 fi
 
+# Check for requirements drift (warning only for pre-commit)
+if [ -f "${REPO_ROOT}/sysadmin/sync_requirements.sh" ]; then
+    bash "${REPO_ROOT}/sysadmin/sync_requirements.sh" >/dev/null 2>&1 || true
+    UNSTAGED_DIFF="$(git diff "${REPO_ROOT}/sysadmin/requirements.txt" 2>/dev/null || true)"
+    UNTRACKED="$(git ls-files --others --exclude-standard "${REPO_ROOT}/sysadmin/requirements.txt" 2>/dev/null || true)"
+    if [ -n "${UNSTAGED_DIFF}" ] || [ -n "${UNTRACKED}" ]; then
+        echo "⚠️  [Requirements Drift] sysadmin/requirements.txt has uncommitted or unstaged updates."
+        echo "   Consider staging it: git add sysadmin/requirements.txt"
+    fi
+fi
+
 exit 0
 
