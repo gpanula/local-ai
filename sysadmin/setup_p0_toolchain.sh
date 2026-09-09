@@ -36,7 +36,7 @@ upgrade_pip_tools() {
 
 # Function to install required packages
 install_packages() {
-    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec
+    "${VENV_DIR}/bin/pip" install ansible ansible-lint shellcheck-py pyyaml pytest sqlite-vec rich textual zstandard
 }
 
 # Function to verify package installation
@@ -49,8 +49,8 @@ verify_packages() {
     done
 
     # Verify Python library import
-    if ! "${VENV_DIR}/bin/python" -c "import yaml; print(yaml.__version__)" &> /dev/null; then
-        echo "Error: pyyaml is not installed or not importable."
+    if ! "${VENV_DIR}/bin/python" -c "import yaml, rich, textual, zstandard; print(yaml.__version__)" &> /dev/null; then
+        echo "Error: required python libraries are not installed or not importable."
         exit 1
     fi
 }
