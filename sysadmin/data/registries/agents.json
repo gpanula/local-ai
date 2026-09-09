@@ -1,0 +1,23 @@
+{
+  "version": "2.0",
+  "execution_mode": "SMMP",
+  "default_foundation_model": "qwen2.5-coder:7b",
+  "agents": [
+    {
+      "type": "coder",
+      "taxonomy_role": "Coder",
+      "description": "Writes and edits code files; runs linters",
+      "allowed_tools": ["read_file", "write_file", "run_bash"],
+      "model_preference": "qwen2.5-coder:7b",
+      "domain_affinity": ["Defensive Bash Scripting", "Python Quality", "ShellCheck", "Code Quality Toolchain"]
+    },
+    {
+      "type": "sysadmin",
+      "taxonomy_role": "Sysadmin",
+      "description": "Linux/Ansible system administration and infrastructure ops",
+      "allowed_tools": ["run_bash", "read_file", "write_file", "service_status", "journal_logs", "ansible_syntax_check"],
+      "model_preference": "qwen2.5-coder:7b",
+      "domain_affinity": ["Ansible & Automation", "Docker & Containerization", "Security & Hardening"]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "version": "2.0",
+  "tools": [
+    {
+      "name": "run_bash",
+      "description": "Execute a bash command",
+      "parameters": {"command": "string"},
+      "safe_for_dry_run": false,
+      "requires_approval": true,
+      "allowed_roles": ["coder", "sysadmin"],
+      "domain_tags": ["Defensive Bash Scripting", "Binary Isolation"]
+    },
+    {
+      "name": "write_file",
+      "description": "Write content to a file with optional executable permissions",
+      "parameters": {
+        "path": "string",
+        "content": "string",
+        "make_executable": "boolean"
+      },
+      "safe_for_dry_run": true,
+      "requires_approval": false,
+      "allowed_roles": ["coder", "sysadmin"],
+      "domain_tags": ["Defensive Bash Scripting", "Python Quality"]
+    },
+    {
+      "name": "read_file",
+      "description": "Read content from a file",
+      "parameters": {"path": "string"},
+      "safe_for_dry_run": true,
+      "requires_approval": false,
+      "allowed_roles": ["coder", "sysadmin"],
+      "domain_tags": ["Defensive Bash Scripting", "Python Quality"]
+    }
+  ]
+}

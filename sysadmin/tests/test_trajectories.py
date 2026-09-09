@@ -129,3 +129,77 @@ def test_aborted_outcome(tmp_path):
     )
     record = json.loads(_read_lines(path)[0])
     assert record["outcome"] == "aborted"
+
+
+def test_record_captures_reasoning_and_metadata(tmp_path):
+    path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    reasoning_payload = {
+        "strategy": "Analyze script requirements",
+        "risks": "Risk of permission fault",
+        "verification_plan": "Run with -n check",
+    }
+    stats_payload = {"eval_count": 250, "tokens_per_second": 95.0}
+    record_trajectory(
+        _result(
+            reasoning=reasoning_payload,
+            author_model="winter-coder:8gb-trained",
+            author_stats=stats_payload,
+        ),
+        "Prompt: Write robust script",
+        trajectories_path=path,
+        raw_dir=str(tmp_path),
+        task_file="sysadmin/prompts/hello.md",
+    )
+    record = json.loads(_read_lines(path)[0])
+    assert record["prompt"] == "Prompt: Write robust script"
+    assert record["author_model"] == "winter-coder:8gb-trained"
+    assert record["reasoning"] == reasoning_payload
+    assert record["telemetry"] == stats_payload
+    assert record["task_file"] == "sysadmin/prompts/hello.md"
+    assert record["canonical_category"] is not None
+    assert "coder" in record["roles"]
+    assert record["roles"]["coder"]["strategy"] == "Analyze script requirements"
+
+
+def test_record_captures_roles_and_canonical_category(tmp_path):
+    path = os.path.join(str(tmp_path), "trajectories.jsonl")
+    roles_payload = {
+        "orchestrator": {
+            "model": "winter-orchestrator:8gb",
+            "strategy": "Deconstruct task into stages",
+            "risks": "Resource contention",
+            "plan": "Phase 1: write, Phase 2: verify",
+            "gates": "Reviewer approval",
+        },
+        "coder": {
+            "model": "winter-coder:8gb-trained",
+            "strategy": "Write defensive bash script",
+            "risks": "Ambient PATH vulnerability",
+            "solution": "echo hello",
+            "verification": "Test with bash -n",
+        },
+        "reviewer": {
+            "model": "winter-reviewer:8gb",
+            "audit": "Line 5 adheres to standards",
+            "risks": "None",
+            "decision": "APPROVED",
+            "fixes": "",
+        },
+    }
+    record_trajectory(
+        _result(
+            roles=roles_payload,
+            category="Security & Hardening",
+            author_model="winter-coder:8gb-trained",
+        ),
+        "Prompt: Harden socket permissions",
+        trajectories_path=path,
+        raw_dir=str(tmp_path),
+        task_file="sysadmin/prompts/harden.md",
+    )
+    record = json.loads(_read_lines(path)[0])
+    assert record["canonical_category"] == "Security & Hardening"
+    assert record["roles"]["orchestrator"]["strategy"] == "Deconstruct task into stages"
+    assert record["roles"]["coder"]["risks"] == "Ambient PATH vulnerability"
+    assert record["roles"]["reviewer"]["decision"] == "APPROVED"
+

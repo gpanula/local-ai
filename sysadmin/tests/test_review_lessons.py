@@ -80,8 +80,8 @@ def test_modify_applies_edits_before_promotion(cmd, capsys, monkeypatch):
     command, args, db_path, lessons_md = cmd
     with MemoryStore(db_path) as store:
         store.stage_pending_lesson(_pending())
-    # First input() = action 'm'; then rule text; then keywords.
-    inputs = iter(["m", "UPDATED rule text", "heredoc, EOF"])
+    # First input() = action 'm'; then category (empty to keep); then rule text; then keywords.
+    inputs = iter(["m", "Defensive Bash Scripting", "UPDATED rule text", "heredoc, EOF"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
 
     command.run(args)
@@ -89,6 +89,7 @@ def test_modify_applies_edits_before_promotion(cmd, capsys, monkeypatch):
     with MemoryStore(db_path) as store:
         active = store.list_lessons()
         assert len(active) == 1
+        assert active[0]["category"] == "Defensive Bash Scripting"
         assert active[0]["rule"] == "UPDATED rule text"
         assert active[0]["keywords"] == ["heredoc", "EOF"]
     content = open(lessons_md, encoding="utf-8").read()
@@ -148,8 +149,8 @@ def test_mixed_actions_summary_counts(cmd, capsys, monkeypatch):
         store.stage_pending_lesson(_pending(id="pending-20260829-02"))
         store.stage_pending_lesson(_pending(id="pending-20260829-03"))
         store.stage_pending_lesson(_pending(id="pending-20260829-04"))
-    # Actions: keep, modify, discard, skip.
-    inputs = iter(["k", "m", "modified rule", "", "d", "s"])
+    # Actions: keep, modify (cat="", rule="modified rule", kw=""), discard, skip.
+    inputs = iter(["k", "m", "", "modified rule", "", "d", "s"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
 
     command.run(args)

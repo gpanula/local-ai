@@ -15,6 +15,7 @@
   - Trap exit: `trap 'rm -rf "${TMP_DIR:-}"' EXIT`
   - Temp dirs: Explicit `mktemp -d -p /tmp` (never assume `$TMPDIR` exists).
   - Assertions: Check `[ -x "${BIN}" ]` before success banners. Never print success on failed assertions.
+  - Venv & Binary Isolation: Never rely on ambient `$PATH`. Deterministically resolve virtual envs (`VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"`) and invoke tools via explicit paths (`"${VENV_DIR}/bin/<binary>"`).
 
 ## 3. Security & Cleanliness
 - **Secrets**: Never commit/log keys, tokens, passwords. Use `$GH_TOKEN`, `$OLLAMA_HOST`, or git-ignored files.
@@ -23,8 +24,15 @@
 
 ## 4. Execution & Boundaries
 - **No Polling**: No `sleep`/`ollama ps` polling loops. Launch async tasks, yield tool calls, wait for reactive notifications.
-- **Terminal Routing**: Output live progress to active `terminal-mcp` session.
-- **Human Gate**: Antigravity writes prompt specs (`sysadmin/prompts/*.md`); human must approve before delegating to Ollama.
-- **Role Split**:
-  - *Antigravity*: Orchestration, architecture, specs, git lifecycle. DO NOT write/patch Ollama implementation scripts directly.
-  - *Ollama*: Script synthesis via heredoc, execution, buffer analysis.
+- **Terminal MCP Visibility**: Output live progress and interactive script execution to the active `terminal-mcp` session.
+- **Execution Modes**:
+  - ⚡ **Direct Dev Mode** *(Default for infrastructure, tooling, memory/lessons, modelfiles, scripts, and dataset engineering)*:
+    - Antigravity directly authors, patches, and tests code (`sysadmin/*.py`, `sysadmin/*.sh`, modelfiles, datasets, unit tests) for fast iteration.
+  - 🤖 **Pipeline Delegation Mode** *(Activated explicitly by keywords: `"run pipeline"`, `"delegate"`, `"test local ai"`)*:
+    - Antigravity writes the prompt spec (`sysadmin/prompts/*.md`); awaits human review approval; then delegates execution to the local Ollama multi-agent pipeline.
+
+## 5. Observability & Local AI Transparency
+- **Full Model Transparency**: When executing or querying local Ollama models (`ollama_chat`, `ollama_task_agent`, `build-and-run`, `pipeline-run`), prioritize full visibility. Never truncate, mute, or suppress the local model's reasoning, chain-of-thought, or structured tool calls.
+- **Local Learning & Dataset Research**: Local models run on self-hosted hardware for learning, evaluation, and fine-tuning. Unfiltered visibility into model outputs, reasoning traces, and error states is required for feedback collection and model improvement.
+- **PTY Streaming**: Always preserve model reasoning and diagnostic sections (`Analysis & Strategy`, `Verification & Testing`, `Risks & Edge Cases`) in stdout and active `terminal-mcp` logs.
+

@@ -1,0 +1,53 @@
+{
+  "version": "2.0",
+  "rules": [
+    {
+      "id": "R-001",
+      "name": "no_destructive_without_dry_run",
+      "pillar": 2,
+      "domain": "Security & Hardening",
+      "description": "Any task using a destructive tool must have a dry-run task as a prerequisite in the DAG",
+      "check": "if task.tools_required contains destructive_tool then task.inputs must contain dry_run_task_output"
+    },
+    {
+      "id": "R-002",
+      "name": "no_secrets_in_plan",
+      "pillar": 2,
+      "domain": "Security & Hardening",
+      "description": "Task descriptions and constraints must not contain secret values",
+      "check": "regex scan for token/password/key patterns"
+    },
+    {
+      "id": "R-003",
+      "name": "bash_standard_compliance",
+      "pillar": 3,
+      "domain": "Defensive Bash Scripting",
+      "description": "All bash tasks must declare set -euo pipefail, ERR trap, and explicit binary paths",
+      "check": "coder executor linter gate (ShellCheck + pattern check)"
+    },
+    {
+      "id": "R-004",
+      "name": "binary_isolation_required",
+      "pillar": 3,
+      "domain": "Binary Isolation",
+      "description": "Executor tasks must not rely on ambient $PATH; resolve venv/binary paths deterministically",
+      "check": "no bare tool invocations without explicit path resolution in task constraints"
+    },
+    {
+      "id": "R-005",
+      "name": "domain_tag_required",
+      "pillar": 1,
+      "domain": "System Architecture",
+      "description": "Every task must carry at least one canonical domain_tag from taxonomy.json",
+      "check": "deterministic lookup against taxonomy.json aliases + canonicals"
+    },
+    {
+      "id": "R-006",
+      "name": "four_pillar_cognition_required",
+      "pillar": null,
+      "domain": "Multi-Agent Orchestration",
+      "description": "Every agent message must include a substantive cognition block with all four pillars (analysis, risks, solution, verification)",
+      "check": "all 4 fields present AND length >= 30 chars each AND disallow placeholder evasion ('none', 'n/a', 'ok', 'null', 'not applicable')"
+    }
+  ]
+}
