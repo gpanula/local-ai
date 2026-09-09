@@ -46,6 +46,7 @@ recordings/
 
 # Local AI runtime data (never committed)
 .localai/
+ollama_update/wiki/log.md
 
 # Sandbox temporary artifacts
 .claude/

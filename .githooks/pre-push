@@ -14,14 +14,11 @@ if [ -f "${MEMORY_DB}" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 
-# Check if memory wiki is up-to-date before push
-if [ -f "${REPO_ROOT}/sysadmin/mcp_client.py" ] && command -v python3 >/dev/null 2>&1; then
-    python3 "${REPO_ROOT}/sysadmin/mcp_client.py" compile-wiki >/dev/null 2>&1 || true
-    WIKI_DIFF="$(git status --porcelain "${REPO_ROOT}/ollama_update/wiki" 2>/dev/null || true)"
-    if [ -n "${WIKI_DIFF}" ]; then
-        echo "⚠️  [Memory Wiki] ollama_update/wiki has uncommitted updates relative to active memory."
-        echo "   Please commit the updated wiki files before pushing: git add ollama_update/wiki/ && git commit"
-    fi
+# Check if memory wiki has uncommitted edits before push
+WIKI_DIFF="$(git status --porcelain "${REPO_ROOT}/ollama_update/wiki" 2>/dev/null || true)"
+if [ -n "${WIKI_DIFF}" ]; then
+    echo "⚠️  [Memory Wiki] ollama_update/wiki has uncommitted updates."
+    echo "   Please commit the updated wiki files before pushing: git add ollama_update/wiki/ && git commit"
 fi
 
 # Check if python requirements are up-to-date and committed before push (BLOCKING)

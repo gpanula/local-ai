@@ -31,7 +31,7 @@ if echo "${STAGED_FILES}" | grep -qE '^ollama_update/lessons\.md$|^sysadmin/prom
     if [ -f "${REPO_ROOT}/sysadmin/mcp_client.py" ] && command -v python3 >/dev/null 2>&1; then
         echo "📚 [Memory Wiki] Detected changes to lessons/rules; compiling memory-health wiki..."
         python3 "${REPO_ROOT}/sysadmin/mcp_client.py" compile-wiki >/dev/null 2>&1 || true
-        git add "${REPO_ROOT}/ollama_update/wiki/index.md" "${REPO_ROOT}/ollama_update/wiki/dashboard.md" "${REPO_ROOT}/ollama_update/wiki/log.md" 2>/dev/null || true
+        git add "${REPO_ROOT}/ollama_update/wiki/index.md" "${REPO_ROOT}/ollama_update/wiki/dashboard.md" 2>/dev/null || true
     fi
 fi
 
