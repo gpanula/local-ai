@@ -16,8 +16,8 @@ class CognitivePillarsView(Widget):
 
     DEFAULT_CSS = """
     CognitivePillarsView {
-        height: 1fr;
-        min-height: 12;
+        height: 13;
+        min-height: 8;
         border: round $secondary;
         background: $background;
         padding: 0 1;
@@ -54,45 +54,69 @@ class CognitivePillarsView(Widget):
                     yield Static("No reviewer critique or linter findings.", id="critique-content")
 
     def update_state(self, iteration_state, prev_code: str = "", selected_stage: str = "author") -> None:
-        reasoning = iteration_state.reasoning or {}
-        strat = reasoning.get("strategy") or "No explicit strategy extracted."
-        risks = reasoning.get("risks") or "No explicit risks extracted."
-        verif = reasoning.get("verification_plan") or "No explicit verification plan extracted."
-        code = iteration_state.code or ""
+        from pipeline_tui.state import normalize_stage
 
-        # Check for role details
+        norm_st = normalize_stage(selected_stage)
+        stage_r = iteration_state.stage_reasoning.get(norm_st) or iteration_state.stage_reasoning.get(selected_stage) or {}
         roles = iteration_state.review.get("roles") or {}
-        if selected_stage in ("architect", "author"):
-            arch = roles.get("architect") or roles.get("coder") or {}
-            arch_strat = arch.get("strategy") or arch.get("analysis")
-            arch_risks = arch.get("risks")
-            arch_sol = arch.get("solution") or arch.get("plan")
-            arch_verif = arch.get("verification")
-            if arch_strat:
-                strat = f"─── Architect Strategy & Analysis ({arch.get('model', 'architect')}) ───\n\n{arch_strat}"
-            if arch_risks:
-                risks = f"─── Architect Risks & Constraints ───\n\n{arch_risks}"
-            if arch_verif or arch_sol:
-                verif = f"─── Architect Verification Plan ───\n\n{arch_verif or arch_sol}"
-        elif selected_stage in ("orchestrator", "orchestrate"):
-            orch = roles.get("orchestrator") or {}
-            orch_strat = orch.get("strategy") or orch.get("analysis")
-            orch_risks = orch.get("risks")
-            orch_sol = orch.get("solution") or orch.get("plan")
-            if orch_strat:
-                strat = f"─── Orchestrator Planning & Strategy ({orch.get('model', 'orchestrator')}) ───\n\n{orch_strat}"
-            if orch_risks:
-                risks = f"─── Orchestrator Architectural Risks ───\n\n{orch_risks}"
-            if orch_sol:
-                verif = f"─── Orchestrator Task DAG & Plan ───\n\n{orch_sol}"
-        elif selected_stage == "security":
-            sec = roles.get("security") or {}
-            sec_analysis = sec.get("analysis") or sec.get("strategy")
-            sec_risks = sec.get("risks")
-            if sec_analysis:
-                strat = f"─── Security STRIDE Threat Model ({sec.get('model', 'security')}) ───\n\n{sec_analysis}"
-            if sec_risks:
-                risks = f"─── Security Vulnerability Assessment ───\n\n{sec_risks}"
+        role_info = roles.get(norm_st) or roles.get(selected_stage) or {}
+        gen_r = iteration_state.reasoning or {}
+
+        # Resolve model name
+        model = iteration_state.stage_models.get(norm_st) or role_info.get("model", "")
+        model_str = f" ({model})" if model else ""
+
+        # Strategy
+        strat = (
+            stage_r.get("strategy")
+            or stage_r.get("analysis")
+            or role_info.get("strategy")
+            or role_info.get("analysis")
+            or gen_r.get("strategy")
+            or gen_r.get("analysis")
+        )
+        if strat:
+            strat = f"─── {norm_st.upper()} Strategy & Analysis{model_str} ───\n\n{strat}"
+        else:
+            strat = "No explicit strategy extracted."
+
+        # Risks
+        risks = (
+            stage_r.get("risks")
+            or role_info.get("risks")
+            or gen_r.get("risks")
+        )
+        if risks:
+            risks = f"─── {norm_st.upper()} Risks & Edge Cases ───\n\n{risks}"
+        else:
+            risks = "No explicit risks extracted."
+
+        # Verification & Plan / Solution
+        sol = (
+            stage_r.get("solution")
+            or stage_r.get("plan")
+            or role_info.get("solution")
+            or role_info.get("plan")
+            or gen_r.get("solution")
+            or ""
+        )
+        verif = (
+            stage_r.get("verification_plan")
+            or stage_r.get("verification")
+            or role_info.get("verification_plan")
+            or role_info.get("verification")
+            or gen_r.get("verification_plan")
+            or gen_r.get("verification")
+        )
+        if verif:
+            verif_body = f"Plan / Decisions:\n{sol}\n\nVerification:\n{verif}" if sol else verif
+            verif = f"─── {norm_st.upper()} Verification Plan ───\n\n{verif_body}"
+        elif sol:
+            verif = f"─── {norm_st.upper()} Plan / Decisions ───\n\n{sol}"
+        else:
+            verif = "No explicit verification plan extracted."
+
+        code = iteration_state.code or ""
 
         # Strategy
         try:

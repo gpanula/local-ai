@@ -1,11 +1,5 @@
 # Lesson Index
 
-## Defensive Bash Scripting
-
-| ID | Keywords | Rule | Source Task | Created |
-|:---|:---|:---|:---|:---|
-| [[lesson-20260830-01]] | bash, bash scripting, binary existence assertions, cleanup trap, conditional success message, defensive programming, deterministic resolution, diagnostic trap, dynamic resolution, environment variables, err handling, error handling, exit codes, hardcoded paths, quoting, required output, resources management, script structure, self-creation, standalone script, success message, venv_dir resolution, write_file | Avoid using write_file to create the script; directly embed… | sysadmin/prompts/hello_world_test.md | 2026-08-30 |
-
 ## Binary Isolation
 
 | ID | Keywords | Rule | Source Task | Created |

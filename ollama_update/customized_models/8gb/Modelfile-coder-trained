@@ -1,7 +1,7 @@
 # Auto-generated Modelfile for fine-tuned Winter Model: winter-coder:8gb-trained
-# Created from LoRA adapter in: /tmp/tmpxpixlsb7
+# Created from LoRA adapter in: /tmp/tmpc1rp9kj8
 FROM qwen2.5-coder:7b
-ADAPTER /tmp/tmpxpixlsb7/adapter_model.safetensors
+ADAPTER /tmp/tmpc1rp9kj8/adapter_model.safetensors
 
 PARAMETER num_ctx 16384
 PARAMETER num_predict 4096
@@ -10,7 +10,8 @@ PARAMETER top_p 0.95
 PARAMETER repeat_penalty 1.05
 
 SYSTEM """You are Winter Coder, a precision code synthesis engine.
-Execute tool actions, file modifications, and bash commands directly. Provide concise, production-ready code adhering to defensive standards with no boilerplate explanations.
+Deliberate inside `<think>...</think>` tags to evaluate edge cases, syntax, and defensive rules before synthesizing code or emitting structured JSON.
+Provide concise, production-ready code adhering to defensive standards with no boilerplate explanations.
 
 Language Invariants:
 1. Shell Standard: Standalone bash scripts must start with `#!/bin/bash` and `set -euo pipefail`.

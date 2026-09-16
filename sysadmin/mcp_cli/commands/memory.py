@@ -12,6 +12,7 @@ import json
 import os
 
 from mcp_core.audit import cluster_lessons, flag_low_utility, is_canonical_category, normalize_category
+from mcp_core.lesson_linter import lint_all_lessons, lint_lesson
 from mcp_core.lessons_writer import append_lesson_to_markdown, write_all_lessons_to_markdown
 from mcp_core.memory import MemoryStore
 from mcp_core.rules_writer import append_system_rule
@@ -65,6 +66,17 @@ def _print_review_card(index: int, total: int, pending: dict) -> None:
     print("-" * 60)
     print("  Proposed rule:")
     print(f"    {pending.get('proposed_rule', '')}")
+
+    # Check for invariant violations in proposed rule
+    violations = lint_lesson({"id": pending.get("id"), "rule": pending.get("proposed_rule", "")})
+    if violations:
+        print("-" * 60)
+        print(f"  🚨 [INVARIANT LINT WARNING] Triggers {len(violations)} safety/tool violation(s):")
+        for v in violations:
+            icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+            print(f"    {icon} [{v.suite} / {v.rule_name}]: {v.message}")
+            print(f"       Matched: \"{v.matched_text}\"")
+
     print("=" * 60)
 
 
@@ -286,6 +298,17 @@ class AuditLessonsCommand(BaseCommand):
 
             clusters = cluster_lessons(lessons, min_cluster_size=args.min_cluster_size)
             low_utility = flag_low_utility(lessons, min_retrievals=args.min_retrievals)
+            violations = lint_all_lessons(lessons)
+
+            if violations:
+                print("\n" + "=" * 60)
+                print(f"🚨 [Invariant Linter] {len(violations)} active lesson(s) violate safety or tool invariants!")
+                print("=" * 60)
+                for lid, viols in violations.items():
+                    for v in viols:
+                        icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+                        print(f"  {icon} [{lid}] [{v.suite} / {v.rule_name}]: {v.message}")
+                print("  💡 Run 'localai-lint-lessons-fix' or 'lint-lessons --fix' to remediate.")
 
             counts = {"promoted": 0, "modified": 0, "kept": 0, "discarded": 0,
                       "deleted": 0, "rewritten": 0, "skipped": 0}

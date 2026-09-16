@@ -295,16 +295,20 @@ def test_run_pipeline_pre_filter_rejection_routes_to_orchestrator(tmp_path, monk
 
 
 def test_raw_thinking_role_prompts():
-    """Verify non-execution roles require <think> while execution roles do not."""
-    non_exec_roles = ["architect", "orchestrator", "reviewer", "security", "reviewer_code", "security_code"]
-    for r in non_exec_roles:
+    """Verify all canonical pipeline roles require <think> deliberation."""
+    all_roles = [
+        "architect",
+        "orchestrator",
+        "reviewer",
+        "security",
+        "coder",
+        "sysadmin",
+        "reviewer_code",
+        "security_code",
+    ]
+    for r in all_roles:
         p = load_role_prompt(r)
         assert "<think>" in p, f"Role {r} prompt should require raw thinking"
-
-    exec_roles = ["coder", "sysadmin"]
-    for r in exec_roles:
-        p = load_role_prompt(r)
-        assert "<think>" not in p, f"Execution role {r} should not require raw thinking"
 
 
 def test_parse_llm_json_raw_thinking():
@@ -341,3 +345,49 @@ def test_parse_llm_json_raw_thinking():
     parsed_unclosed = parse_llm_json(unclosed_response)
     assert parsed_unclosed["schema_version"] == "2.0"
     assert "Analyzing risks" in parsed_unclosed["cognition"]["chain_of_thought"]
+
+
+def test_pipeline_cli_tier_resolution(monkeypatch):
+    """Verify pipeline main() CLI parser resolves tiers to corresponding winter-prime models."""
+    from unittest.mock import patch
+    from pipeline import main
+
+    captured = {}
+
+    def mock_run_pipeline(prompt, model, tier=None):
+        captured["prompt"] = prompt
+        captured["model"] = model
+        captured["tier"] = tier
+        return {"run_id": "test-run", "status": "complete"}
+
+    with patch("pipeline.run_pipeline", side_effect=mock_run_pipeline):
+        # 1. Default without flags -> winter-prime:latest
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt"])
+        main()
+        assert captured["model"] == "winter-prime:latest"
+        assert captured["tier"] is None
+
+        # 2. Tier 8gb -> winter-prime:8gb
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--tier", "8gb"])
+        main()
+        assert captured["model"] == "winter-prime:8gb"
+        assert captured["tier"] == "8gb"
+
+        # 3. Tier 16gb -> winter-prime:16gb
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--tier", "16gb"])
+        main()
+        assert captured["model"] == "winter-prime:16gb"
+        assert captured["tier"] == "16gb"
+
+        # 4. Tier 24gb -> winter-prime:24gb
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--tier", "24gb"])
+        main()
+        assert captured["model"] == "winter-prime:24gb"
+        assert captured["tier"] == "24gb"
+
+        # 5. Explicit model override with tier
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--tier", "8gb", "--model", "custom:model"])
+        main()
+        assert captured["model"] == "custom:model"
+        assert captured["tier"] == "8gb"
+

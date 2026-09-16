@@ -34,8 +34,9 @@ def test_real_trajectories_replay_into_state():
         assert "token_breakdown" in cur_it.context_window
         assert cur_it.context_window["token_breakdown"]["total"] > 0
 
-        # Code or reasoning present
-        assert cur_it.code or cur_it.reasoning or cur_it.thinking
+        # Code or reasoning present (for non-failed/completed runs)
+        if state.outcome in ("approved", "complete"):
+            assert cur_it.code or cur_it.reasoning or cur_it.thinking
 
 
 def test_pipeline_state_iteration_stepping():

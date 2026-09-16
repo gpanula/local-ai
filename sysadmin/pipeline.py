@@ -312,10 +312,24 @@ def stage_chat(
     except Exception:
         pass
 
-    # Check for synthesized code in clean_body
+    # Check for synthesized code in clean_body or parsed JSON outputs
+    code_str = ""
     code_match = re.search(r"```(?:bash|sh)?\n([\s\S]*?)```", clean_body)
-    if code_match and role in ("coder", "dispatch", "sysadmin"):
+    if code_match:
         code_str = code_match.group(1).strip()
+    else:
+        try:
+            parsed_body = parse_llm_json(response)
+            out_dict = parsed_body.get("outputs", {})
+            if isinstance(out_dict, dict):
+                for p, c in out_dict.items():
+                    if isinstance(c, str) and (p.endswith((".sh", ".bash", ".py", ".yml", ".yaml", ".json")) or c.strip().startswith("#!")):
+                        code_str = c.strip()
+                        break
+        except Exception:
+            pass
+
+    if code_str and role in ("coder", "dispatch", "sysadmin"):
         if emitter:
             try:
                 emitter.emit("code_synthesized", {
@@ -984,6 +998,19 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                 passed_all_gates = True
                 break
 
+            if code_files:
+                first_path, first_code = next(iter(code_files.items()))
+                emitter = EventEmitter.get_current()
+                if emitter:
+                    try:
+                        emitter.code_synthesized(
+                            iteration=1,
+                            code=first_code,
+                            script_name=first_path,
+                        )
+                    except Exception:
+                        pass
+
             # Tier 1: Deterministic Code Linter Gate
             linter_verdict = validate_code_output(task, outputs)
             if linter_verdict.get("verdict") != "approved":
@@ -993,6 +1020,17 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                 send_terminal_mcp(
                     f"\n❌ [CODE LINTER GATE] Task '{tid}' rejected with {len(violations)} violation(s):\n{v_summary}"
                 )
+                emitter = EventEmitter.get_current()
+                if emitter:
+                    try:
+                        emitter.linter_result(
+                            iteration=1,
+                            passed=False,
+                            output=critique,
+                            returncode=1,
+                        )
+                    except Exception:
+                        pass
                 retries += 1
                 if retries <= max_retries:
                     send_terminal_mcp(
@@ -1024,6 +1062,17 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
             send_terminal_mcp(
                 f"\n✅ [CODE LINTER GATE] Passed all defensive standards & ShellCheck for task '{tid}'"
             )
+            emitter = EventEmitter.get_current()
+            if emitter:
+                try:
+                    emitter.linter_result(
+                        iteration=1,
+                        passed=True,
+                        output=linter_verdict.get("critique", "Passed all defensive standards & ShellCheck"),
+                        returncode=0,
+                    )
+                except Exception:
+                    pass
 
             # Tier 2A: Semantic Code Review (Reviewer Agent)
             send_terminal_mcp(f"\n🔍 [REVIEWER CODE GATE] Auditing semantic logic & prompt fidelity for task '{tid}'...")
@@ -1058,6 +1107,17 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                     f"\n❌ [REVIEWER CODE GATE] Task '{tid}' rejected code:\n{v_desc or 'Acceptance criteria unmet'}"
                 )
                 state.add_event("code_review_rejected", f"Task {tid} rejected by reviewer", "4")
+                emitter = EventEmitter.get_current()
+                if emitter:
+                    try:
+                        emitter.review_result(
+                            iteration=1,
+                            verdict="rejected",
+                            critique=critique,
+                            reviewer_model=model,
+                        )
+                    except Exception:
+                        pass
                 retries += 1
                 if retries <= max_retries:
                     send_terminal_mcp(
@@ -1090,6 +1150,17 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                 f"✅ [REVIEWER CODE GATE] Approved code logic & acceptance criteria for task '{tid}'"
             )
             state.add_event("code_reviewed", f"Task {tid} code passed reviewer audit", "4")
+            emitter = EventEmitter.get_current()
+            if emitter:
+                try:
+                    emitter.review_result(
+                        iteration=1,
+                        verdict="approved",
+                        critique=rev_verdict.get("cognition", {}).get("solution") or "Approved code logic & acceptance criteria.",
+                        reviewer_model=model,
+                    )
+                except Exception:
+                    pass
 
             # Tier 2B: Behavioral & STRIDE Security Gate (Security Agent)
             send_terminal_mcp(f"\n🛡️ [SECURITY CODE GATE] Auditing behavioral changes & STRIDE threats for task '{tid}'...")
@@ -1444,6 +1515,7 @@ def run_pipeline(
     run_id: Optional[str] = None,
     model: str = "winter-prime:latest",
     store: Optional[ContextStore] = None,
+    tier: Optional[str] = None,
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
     if not run_id:
@@ -1462,7 +1534,7 @@ def run_pipeline(
         emitter.pipeline_start(
             task_file=prompt if prompt.endswith(".md") else "prompt",
             prompt=prompt,
-            tier=None,
+            tier=tier,
             models={"default": model},
             max_retries=3,
         )
@@ -1511,6 +1583,7 @@ def resume_pipeline(
     run_id: str,
     model: str = "winter-prime:latest",
     store: Optional[ContextStore] = None,
+    tier: Optional[str] = None,
 ) -> dict:
     """Resume an aborted or in-flight pipeline run from state.json."""
     if store is None:
@@ -1566,19 +1639,35 @@ def resume_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(description="Arc-Orc-Rev Multi-Agent Pipeline Runner")
-    parser.add_argument("prompt", nargs="?", help="User prompt to execute")
+    parser.add_argument("prompt", nargs="?", help="User prompt to execute (text or markdown file path)")
     parser.add_argument("--resume", metavar="RUN_ID", help="Resume an aborted run")
-    parser.add_argument("--model", default="winter-prime:latest", help="Ollama model to use")
+    parser.add_argument("--tier", choices=["8gb", "16gb", "24gb"], default=None, help="Hardware tier (8gb, 16gb, 24gb)")
+    parser.add_argument("--model", default=None, help="Ollama model to use across all pipeline stages (default: winter-prime:<tier> or winter-prime:latest)")
+    parser.add_argument("--keep-models", "--no-unload", dest="keep_models", action="store_true", default=False, help="Keep models loaded in VRAM between stages")
+    parser.add_argument("--unload-models", action="store_true", default=False, help="Unload models between stages")
     args = parser.parse_args()
 
+    tier_model_map = {
+        "8gb": "winter-prime:8gb",
+        "16gb": "winter-prime:16gb",
+        "24gb": "winter-prime:24gb",
+    }
+
+    selected_model = args.model
+    if not selected_model:
+        if args.tier:
+            selected_model = tier_model_map.get(args.tier, "winter-prime:latest")
+        else:
+            selected_model = "winter-prime:latest"
+
     if args.resume:
-        result = resume_pipeline(args.resume, model=args.model)
+        result = resume_pipeline(args.resume, model=selected_model, tier=args.tier)
     elif args.prompt:
         prompt_content = args.prompt
         if os.path.isfile(args.prompt):
             with open(args.prompt, "r", encoding="utf-8") as f:
                 prompt_content = f.read().strip()
-        result = run_pipeline(prompt_content, model=args.model)
+        result = run_pipeline(prompt_content, model=selected_model, tier=args.tier)
     else:
         parser.error("Provide a prompt or --resume <run_id>")
 

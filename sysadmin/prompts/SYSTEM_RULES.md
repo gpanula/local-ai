@@ -16,7 +16,7 @@
 <!-- Rules are appended below this line by the audit-lessons promotion flow. -->
 
 ### Rule #1: Deterministic Virtual Environment & Binary Isolation
-**Promoted**: 2026-08-30 | **Source Lessons**: lesson-20260830-01
+**Promoted**: 2026-08-30 | **Source Lessons**: lesson-20260830-03
 
 Never assume `$PATH` or hardcode local relative `venv/` paths. All scripts must deterministically resolve the repository root and the virtual environment path defaulting to `${REPO_ROOT}/sysadmin/venv`:
 ```bash

@@ -14,8 +14,8 @@ class ActiveThinkingView(Widget):
 
     DEFAULT_CSS = """
     ActiveThinkingView {
-        height: 10;
-        min-height: 5;
+        height: 1fr;
+        min-height: 6;
         border: round $primary;
         background: $surface;
         padding: 0 1;

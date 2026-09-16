@@ -206,6 +206,76 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                     line = line.strip()
                     if line:
                         events.append(json.loads(line))
+            has_code = any(e.get("type") == "code_synthesized" for e in events)
+            has_linter = any(e.get("type") == "linter_result" for e in events)
+            has_review = any(e.get("type") == "review_result" for e in events)
+
+            # Recover missing artifacts from terminal chunks for historical runs
+            for e in events:
+                if e.get("type") == "terminal_chunk":
+                    txt = e.get("data", {}).get("text", "")
+                    if not has_code and ("[CODER] Complete:" in txt or "outputs" in txt):
+                        j_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", txt)
+                        if j_match:
+                            try:
+                                parsed = json.loads(j_match.group(1))
+                                outs = parsed.get("outputs", {})
+                                for p, c in outs.items():
+                                    if isinstance(c, str) and (p.endswith((".sh", ".bash", ".py", ".yml", ".yaml", ".json")) or c.strip().startswith("#!")):
+                                        events.append({
+                                            "run_id": run_info.get("id") or events[0].get("run_id", ""),
+                                            "timestamp": e.get("timestamp", ""),
+                                            "type": "code_synthesized",
+                                            "data": {
+                                                "iteration": 1,
+                                                "code": c.strip(),
+                                                "script_name": p,
+                                            },
+                                        })
+                                        has_code = True
+                                        break
+                            except Exception:
+                                pass
+                    if not has_linter and "Passed all defensive standards & ShellCheck" in txt:
+                        events.append({
+                            "run_id": run_info.get("id") or events[0].get("run_id", ""),
+                            "timestamp": e.get("timestamp", ""),
+                            "type": "linter_result",
+                            "data": {
+                                "iteration": 1,
+                                "passed": True,
+                                "output": txt.strip(),
+                                "returncode": 0,
+                            },
+                        })
+                        has_linter = True
+                    if not has_review and "Approved code logic & acceptance criteria" in txt:
+                        events.append({
+                            "run_id": run_info.get("id") or events[0].get("run_id", ""),
+                            "timestamp": e.get("timestamp", ""),
+                            "type": "review_result",
+                            "data": {
+                                "iteration": 1,
+                                "verdict": "approved",
+                                "critique": "Approved code logic & acceptance criteria.",
+                                "reviewer_model": run_info.get("model", ""),
+                            },
+                        })
+                        has_review = True
+
+            if events and not any(e.get("type") == "pipeline_end" for e in events):
+                outcome = run_info.get("outcome", "failed")
+                if outcome != "in_progress":
+                    events.append({
+                        "run_id": run_info.get("id") or events[0].get("run_id", ""),
+                        "timestamp": events[-1].get("timestamp", ""),
+                        "type": "pipeline_end",
+                        "data": {
+                            "outcome": outcome,
+                            "iterations": 1,
+                            "abort_reason": "Run interrupted or terminated prematurely",
+                        },
+                    })
             return events
         except Exception:
             pass

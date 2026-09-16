@@ -20,15 +20,6 @@
 <!-- Lessons are appended below this line by the review-lessons promotion flow. -->
 
 ---
-id: lesson-20260830-01
-category: Defensive Bash Scripting
-keywords: [bash, bash scripting, binary existence assertions, cleanup trap, conditional success message, defensive programming, deterministic resolution, diagnostic trap, dynamic resolution, environment variables, err handling, error handling, exit codes, hardcoded paths, quoting, required output, resources management, script structure, self-creation, standalone script, success message, venv_dir resolution, write_file]
-created: 2026-08-30
-source_task: sysadmin/prompts/hello_world_test.md
----
-**Rule**: Avoid using write_file to create the script; directly embed the script content to ensure it's standalone and compliant with defensive standards. Verify file existence with [ -x ...] and resolve VENV_DIR explicitly as required by universal system rules.
-
----
 id: lesson-20260830-03
 category: Binary Isolation
 keywords: [ansible, ansible sandbox isolation, bash, bash scripting, binary assertions, binary existence check, binary isolation, code quality, functional test suites, linters, pre-execution assertions, pre-flight linters, python, python syntax validation, virtual environment, yaml, yaml parsing]
