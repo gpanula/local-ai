@@ -1,7 +1,7 @@
 # Local AI Multi-Agent Pipeline: Session Summary & Resume Guide
 
-**Date**: September 7–8, 2026  
-**Status**: Arc-Orc-Rev Pipeline Operational (6 Canonical Roles); Live Textual TUI (`pipeline_tui`) Integrated with 6-Role Stepper, Code Synthesis Viewer, and Real-Time Thinking Stream; Raw `<think>` Deliberation Re-Enabled for Non-Execution Prompts; Context Window Lessons Fix; Resilient Run Discovery & Fault Detection; 282 Unit/Integration Tests Passing  
+**Date**: September 16, 2026  
+**Status**: Arc-Orc-Rev Pipeline Operational (6 Canonical Roles); Live Textual TUI (`pipeline_tui`) Integrated with 6-Role Stepper, Code Synthesis Viewer, and Real-Time Thinking Stream; Lesson Invariant Linter & Multi-Store Safety Verifier Active; Raw `<think>` Deliberation Re-Enabled for Non-Execution Prompts; Context Window Lessons Fix; Resilient Run Discovery & Fault Detection; 295 Unit/Integration Tests Passing  
 **Active Branch**: `feat/arc-orc-rev-pipeline`  
 
 ---
@@ -148,4 +148,7 @@
 * **TUI Discovery Engine**: [`sysadmin/pipeline_tui/discovery.py`](./pipeline_tui/discovery.py)
 * **MCP Server**: [`sysadmin/mcp_ollama/server.py`](./mcp_ollama/server.py)
 * **Role System Prompts**: [`sysadmin/prompts/roles/`](./prompts/roles/)
+* **Lesson Invariant Linter Core**: [`sysadmin/mcp_core/lesson_linter.py`](./mcp_core/lesson_linter.py)
+* **Lesson Linter CLI**: [`sysadmin/mcp_cli/commands/lint_lessons.py`](./mcp_cli/commands/lint_lessons.py)
+* **Phase 8 Completion Report**: [`ollama_update/phase8_completion.md`](../ollama_update/phase8_completion.md)
 * **Test Suite**: [`sysadmin/tests/`](./tests/)
