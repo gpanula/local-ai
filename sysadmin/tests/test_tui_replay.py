@@ -407,3 +407,72 @@ def test_run_picker_side_scroll_wheel():
 
     asyncio.run(_run())
 
+
+def test_pipeline_state_context_limit_from_capture():
+    """Verify that context window sizes stored in run captures are used directly without queries."""
+    state = PipelineState()
+    # 1. Capture from pipeline_start
+    state.handle_event({
+        "type": "pipeline_start",
+        "data": {
+            "tier": "24gb",
+            "models": {"architect": "winter-prime:16gb", "reviewer": "deepseek-r1:8b"},
+            "context_limits": {"winter-prime:16gb": 32768, "deepseek-r1:8b": 16384},
+        }
+    })
+
+    assert state.get_context_limit(stage="architect") == 32768
+    assert state.get_context_limit(stage="reviewer") == 16384
+
+    # 2. Capture from context_window event override
+    state.handle_event({
+        "type": "context_window",
+        "data": {
+            "iteration": 1,
+            "stage": "reviewer",
+            "token_breakdown": {"total": 500, "limit": 20480},
+        }
+    })
+    assert state.get_context_limit(stage="reviewer") == 20480
+
+
+def test_pipeline_state_query_once_and_remember():
+    """Verify that state queries Ollama once per model and remembers it across stage switches."""
+    from unittest.mock import MagicMock, patch
+
+    state = PipelineState()
+    state.handle_event({
+        "type": "pipeline_start",
+        "data": {
+            "tier": "24gb",
+            "models": {
+                "architect": "custom-model-alpha",
+                "orchestrator": "custom-model-alpha",
+                "reviewer": "custom-model-beta",
+            },
+        }
+    })
+
+    with patch("mcp_ollama.server._get_model_context_length") as mock_query:
+        mock_query.side_effect = lambda m: 32768 if "alpha" in m else 65536
+
+        # 1. First query for architect (custom-model-alpha)
+        lim1 = state.get_context_limit(stage="architect")
+        assert lim1 == 32768
+        assert mock_query.call_count == 1
+
+        # 2. Second query for orchestrator (same custom-model-alpha) -> should use cache, no network call!
+        lim2 = state.get_context_limit(stage="orchestrator")
+        assert lim2 == 32768
+        assert mock_query.call_count == 1  # Still 1!
+
+        # 3. Query for reviewer (custom-model-beta) -> new model, queries once
+        lim3 = state.get_context_limit(stage="reviewer")
+        assert lim3 == 65536
+        assert mock_query.call_count == 2
+
+        # 4. Switch back to architect -> cached!
+        lim4 = state.get_context_limit(stage="architect")
+        assert lim4 == 32768
+        assert mock_query.call_count == 2  # Still 2!
+

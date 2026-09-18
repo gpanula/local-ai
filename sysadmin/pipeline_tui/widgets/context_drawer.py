@@ -86,7 +86,13 @@ class ContextWindowDrawer(Widget):
         self.raw_data = ctx_data or {}
         tb = self.raw_data.get("token_breakdown", {})
         tot = tb.get("total", 0)
-        lim = tb.get("limit", 8192)
+        lim = tb.get("limit")
+        if not lim:
+            model_lower = (model or "").lower()
+            if any(tag in model_lower for tag in ("16gb", "24gb", "14b", "32b")):
+                lim = 32768
+            else:
+                lim = 8192
         pct = int((tot / lim) * 100) if lim else 0
 
         # Update Meter

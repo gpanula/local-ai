@@ -108,6 +108,7 @@ class PipelineState:
         self.prompt: str = ""
         self.tier: str = "8gb"
         self.models: Dict[str, str] = {}
+        self.model_context_limits: Dict[str, int] = {}
         self.max_retries: int = 3
         self.current_stage: str = "idle"
         self.selected_stage: str = "architect"
@@ -237,9 +238,56 @@ class PipelineState:
             return ctx
         return self._derive_stage_context(stage, cur_it)
 
+    def get_context_limit(self, stage: Optional[str] = None) -> int:
+        """Resolve expected context limit: from captured run data, or query once per model and remember."""
+        st = stage or self.selected_stage or self.current_stage
+        model = self.get_stage_model(st)
+
+        # 1. From captured run event data (stage_contexts or context_window token_breakdown)
+        cur_it = self.current_iteration()
+        if cur_it:
+            stage_ctx = cur_it.stage_contexts.get(st) or cur_it.stage_contexts.get(normalize_stage(st))
+            if stage_ctx:
+                lim = stage_ctx.get("token_breakdown", {}).get("limit")
+                if lim and lim > 0:
+                    if model:
+                        self.model_context_limits[model] = lim
+                    return lim
+            if cur_it.context_window:
+                lim = cur_it.context_window.get("token_breakdown", {}).get("limit")
+                if lim and lim > 0:
+                    if model:
+                        self.model_context_limits[model] = lim
+                    return lim
+
+        # 2. Check if already captured in pipeline_start or previously queried/remembered
+        if model and model in self.model_context_limits:
+            return self.model_context_limits[model]
+
+        # 3. Query Ollama ONCE for newly encountered model and remember
+        if model:
+            try:
+                from mcp_ollama.server import _get_model_context_length
+                ctx_len = _get_model_context_length(model)
+                if ctx_len and ctx_len > 0:
+                    self.model_context_limits[model] = ctx_len
+                    return ctx_len
+            except Exception:
+                pass
+
+        # 4. Fallback if Ollama is unreachable/offline and no run capture exists
+        tier_str = (self.tier or "").lower()
+        if "16gb" in tier_str or "24gb" in tier_str:
+            return 32768
+        for m in self.models.values():
+            if isinstance(m, str) and any(tag in m.lower() for tag in ("16gb", "24gb", "14b", "32b")):
+                return 32768
+        return 8192
+
     def _derive_stage_context(self, stage: str, it: IterationState) -> Dict[str, Any]:
         """Synthesize a structured context window for stages lacking explicit events."""
         norm_st = normalize_stage(stage)
+        limit_tk = self.get_context_limit(stage=stage)
         base_ctx = it.context_window or {}
         task_prompt = self.prompt or base_ctx.get("user_prompt", "")
         script_code = it.code or ""
@@ -281,7 +329,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + prompt_tk + fb_tk + (len(injected_lessons) * 200),
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -310,7 +358,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + prompt_tk + fb_tk + (len(injected_lessons) * 200),
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -341,7 +389,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + 150 + (len(injected_lessons) * 200) + prompt_tk + fb_tk,
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -370,7 +418,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + 100 + prompt_tk + fb_tk,
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -402,7 +450,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + 150 + prompt_tk + fb_tk,
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -431,7 +479,7 @@ class PipelineState:
                     "prompt": prompt_tk,
                     "feedback": fb_tk,
                     "total": rules_tk + 50 + prompt_tk + fb_tk,
-                    "limit": 8192,
+                    "limit": limit_tk,
                 },
             }
 
@@ -451,6 +499,11 @@ class PipelineState:
             self.max_retries = data.get("max_retries", 3)
             self.start_time = event.get("timestamp", "")
             self.current_stage = "start"
+            ctx_lims = data.get("context_limits", {})
+            if isinstance(ctx_lims, dict):
+                for k, v in ctx_lims.items():
+                    if isinstance(v, (int, float)) and v > 0:
+                        self.model_context_limits[k] = int(v)
 
         elif etype == "stage_transition":
             raw_stage = data.get("stage", self.current_stage)
@@ -471,6 +524,11 @@ class PipelineState:
             it.stage_contexts[raw_stage] = data
             if not it.context_window or st == self.selected_stage:
                 it.context_window = data
+            lim = data.get("token_breakdown", {}).get("limit")
+            if lim and lim > 0:
+                stage_model = self.get_stage_model(st)
+                if stage_model:
+                    self.model_context_limits[stage_model] = lim
 
         elif etype == "thinking_chunk":
             iter_num = data.get("iteration", self.active_iteration_idx)

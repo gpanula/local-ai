@@ -99,13 +99,22 @@ class EventEmitter:
 
     # --- Domain-specific convenience helpers ---
 
-    def pipeline_start(self, task_file: str, prompt: str, tier: Optional[str], models: Dict[str, str], max_retries: int) -> None:
+    def pipeline_start(
+        self,
+        task_file: str,
+        prompt: str,
+        tier: Optional[str],
+        models: Dict[str, str],
+        max_retries: int,
+        context_limits: Optional[Dict[str, int]] = None,
+    ) -> None:
         self.emit("pipeline_start", {
             "task_file": task_file,
             "prompt": prompt,
             "tier": tier,
             "models": models,
             "max_retries": max_retries,
+            "context_limits": context_limits or {},
         })
 
     def stage_transition(self, stage: str, iteration: int = 1, metadata: Optional[Dict[str, Any]] = None) -> None:

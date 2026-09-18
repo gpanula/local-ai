@@ -47,14 +47,20 @@ class PipelineHeader(Widget):
         self.run_id = state.run_id or "run-active"
         self.task_file = state.task_file or "interactive"
         self.tier = (state.tier or "8gb").upper()
-        self.model = state.models.get("author") or state.models.get("coder") or "ollama"
+        self.model = (
+            state.models.get("builder")
+            or state.models.get("author")
+            or state.models.get("coder")
+            or state.models.get("default")
+            or "ollama"
+        )
         self.status = state.current_stage.upper()
 
         cur_it = state.current_iteration()
         tb = cur_it.context_window.get("token_breakdown", {})
         if tb:
             tot = tb.get("total", 0)
-            lim = tb.get("limit", 8192)
+            lim = tb.get("limit") or (state.get_context_limit() if hasattr(state, "get_context_limit") else 8192)
             pct = int((tot / lim) * 100) if lim else 0
             self.context_tokens = f"{tot:,} / {lim:,} tk ({pct}%)"
         

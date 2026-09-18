@@ -301,6 +301,13 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
     injected_lessons = rec.get("injected_lessons") or []
     telemetry = rec.get("telemetry") or {}
 
+    model_str = (author_model or "").lower()
+    inferred_tier = (
+        "24gb" if ("24gb" in model_str or "32b" in model_str)
+        else ("16gb" if ("16gb" in model_str or "14b" in model_str) else "8gb")
+    )
+    context_limit = 32768 if inferred_tier in ("16gb", "24gb") else 8192
+
     # 1. pipeline_start
     events.append({
         "run_id": run_id,
@@ -309,9 +316,10 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
         "data": {
             "task_file": task_file,
             "prompt": prompt,
-            "tier": None,
-            "models": {"author": author_model},
+            "tier": inferred_tier,
+            "models": {"author": author_model, "builder": author_model, "coder": author_model},
             "max_retries": iterations,
+            "context_limits": {author_model: context_limit} if author_model else {},
         },
     })
 
@@ -367,7 +375,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(prompt) // 4 or 400,
                 "feedback": 0,
                 "total": 1000 + len(injected_lessons) * 200,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
@@ -429,7 +437,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(prompt) // 4 or 400,
                 "feedback": 0,
                 "total": 900 + len(injected_lessons) * 200,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
@@ -478,7 +486,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": (len(prompt) + len(chosen)) // 4 or 500,
                 "feedback": len(rev_critique) // 4 if rev_critique else 0,
                 "total": 1450,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
@@ -546,7 +554,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(chosen) // 4 or 200,
                 "feedback": 40,
                 "total": 740,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
@@ -589,7 +597,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(prompt) // 4 or 100,
                 "feedback": 50,
                 "total": 450,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
@@ -631,7 +639,7 @@ def load_events_for_run(run_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "prompt": len(chosen) // 4 or 200,
                 "feedback": 50,
                 "total": 550,
-                "limit": 8192,
+                "limit": context_limit,
             },
         },
     })
