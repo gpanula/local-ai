@@ -426,4 +426,165 @@ def test_dispatch_two_task_dag_executes_only_once_by_sysadmin(tmp_path):
         assert mock_exec.call_count == 1
         assert state.tasks["t-001"]["status"] == "success"
         assert state.tasks["t-002"]["status"] == "success"
+        assert state.status == "complete"
+
+
+def test_dispatch_aborts_when_execution_has_error_marker(tmp_path):
+    """Verify that if target script output contains error signatures, dispatch marks task failed and aborts."""
+    state = PipelineState("test-run-005", "Create and execute broken script")
+    state.messages["annotated_plan"] = {
+        "tasks": [
+            {
+                "task_id": "t-001",
+                "description": "Create and run script",
+                "domain_tags": ["Defensive Bash Scripting"],
+                "assigned_agent": "coder",
+                "tools_required": ["run_bash", "write_file"],
+                "inputs": [],
+                "outputs": ["sysadmin/broken.sh"],
+                "constraints": ["set -euo pipefail"],
+            }
+        ]
+    }
+    store = ContextStore()
+
+    coder_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "execution_result",
+        "run_id": "test-run-005",
+        "task_id": "t-001",
+        "role": "coder",
+        "status": "success",
+        "outputs": {
+            "sysadmin/broken.sh": "#!/bin/bash\necho bad\n"
+        },
+        "cognition": {"analysis": "a", "risks": "b", "solution": "c", "verification": "d"},
+    })
+
+    reviewer_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "code_review_verdict",
+        "run_id": "test-run-005",
+        "task_id": "t-001",
+        "verdict": "approved",
+        "violations": [],
+        "cognition": {"analysis": "a", "risks": "b", "solution": "c", "verification": "d"},
+    })
+
+    security_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "code_security_verdict",
+        "run_id": "test-run-005",
+        "task_id": "t-001",
+        "verdict": "cleared",
+        "behavioral_summary": "Safe",
+        "threats": [],
+        "cognition": {"analysis": "a", "risks": "b", "solution": "c", "verification": "d"},
+    })
+
+    def mock_stage_chat(role, system_prompt, user_content, model):
+        if role == "coder":
+            return coder_response
+        elif role == "reviewer":
+            return reviewer_response
+        elif role == "security":
+            return security_response
+        return "{}"
+
+    # Simulates the exact bug observed: Exit Code reported as 0, but buffer has ❌ [ERROR]
+    mock_run_out = (
+        "### 🖥️ Shell Command Execution (terminal-mcp PTY)\n"
+        "- **Command**: `./sysadmin/broken.sh`\n"
+        "- **Exit Code**: `0`\n"
+        "```\n"
+        "❌ [ERROR] python not found or not executable in /mypool/valkyrie/home/pang/Projects/sysadmin/venv/bin/\n"
+        "```"
+    )
+
+    with patch("pipeline.stage_chat", side_effect=mock_stage_chat), \
+         patch("pipeline.handle_write_file", return_value="Wrote file"), \
+         patch("pipeline.handle_execute_task", return_value=mock_run_out) as mock_exec, \
+         patch("pipeline.MemoryStore") as mock_mem:
+
+        mock_mem_inst = MagicMock()
+        mock_mem_inst.search_lessons.return_value = []
+        mock_mem.return_value = mock_mem_inst
+
+        ret = run_dispatch(state, store)
+
+        assert ret == "aborted"
+        assert state.status == "aborted"
+        assert state.tasks["t-001"]["status"] == "failed"
+        assert any(e["event"] == "task_execution_failed" or "failed" in e["event"] for e in state.events)
+
+
+def test_execute_in_terminal_mcp_extracts_exit_code_and_safety_override():
+    """Verify that _execute_in_terminal_mcp parses __LOCALAI_EXIT__ and applies AGENTS.md Rule 2."""
+    from mcp_ollama.server import _execute_in_terminal_mcp
+    import socket
+
+    # 1. Normal success
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock_cls.return_value = mock_sock
+        mock_file = MagicMock()
+        mock_sock.makefile.return_value = mock_file
+        mock_file.readline.side_effect = [
+            '{"id":1}\n',
+            json.dumps({
+                "result": {
+                    "content": [{
+                        "text": "all checks pass\n__LOCALAI_EXIT:0__\n⚡ mcp  pang:local-ai$ "
+                    }]
+                }
+            }) + "\n",
+        ]
+
+        tail, ec, target = _execute_in_terminal_mcp("echo hi")
+        assert ec == 0
+        assert "__LOCALAI_EXIT" not in tail
+        assert "all checks pass" in tail
+
+    # 2. Non-zero exit code captured from marker
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock_cls.return_value = mock_sock
+        mock_file = MagicMock()
+        mock_sock.makefile.return_value = mock_file
+        mock_file.readline.side_effect = [
+            '{"id":1}\n',
+            json.dumps({
+                "result": {
+                    "content": [{
+                        "text": "failure occurred\n__LOCALAI_EXIT:2__\n⚡ mcp  pang:local-ai$ "
+                    }]
+                }
+            }) + "\n",
+        ]
+
+        tail, ec, target = _execute_in_terminal_mcp("exit 2")
+        assert ec == 2
+        assert "__LOCALAI_EXIT" not in tail
+
+    # 3. Rule 2 override: Exit 0 but error marker present in buffer
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock_cls.return_value = mock_sock
+        mock_file = MagicMock()
+        mock_sock.makefile.return_value = mock_file
+        mock_file.readline.side_effect = [
+            '{"id":1}\n',
+            json.dumps({
+                "result": {
+                    "content": [{
+                        "text": "❌ [ERROR] command failed\n__LOCALAI_EXIT:0__\n⚡ mcp  pang:local-ai$ "
+                    }]
+                }
+            }) + "\n",
+        ]
+
+        tail, ec, target = _execute_in_terminal_mcp("bad_cmd")
+        assert ec == 1
+        assert "__LOCALAI_EXIT" not in tail
+
 

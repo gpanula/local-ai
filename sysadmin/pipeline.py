@@ -21,12 +21,13 @@ from mcp_core.workspace import WORKSPACE_ROOT
 from mcp_core.context_store import ContextStore
 from mcp_core.transport import send_terminal_mcp
 from mcp_core.events import EventEmitter, generate_run_id
+from mcp_core.hardware import get_hardware_tier
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
 from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.extraction import extract_lesson_from_critique
 from mcp_core.attribution import attribute_lessons
 from mcp_core.trajectories import record_trajectory, DEFAULT_TRAJECTORIES_PATH
-from mcp_ollama.server import handle_chat, handle_write_file, handle_execute_task
+from mcp_ollama.server import handle_chat, handle_write_file, handle_execute_task, _get_model_context_length
 from validator import validate_annotated_plan, validate_code_output
 
 # Sampling profiles per taxonomy role (RFC v7 §4.7)
@@ -38,6 +39,41 @@ SMMP_PROFILES: Dict[str, Dict[str, Any]] = {
     "coder": {"temperature": 0.05, "top_p": 0.85, "description": "High-precision code syntax & ShellCheck compliance"},
     "sysadmin": {"temperature": 0.00, "top_p": 1.00, "description": "Zero-hallucination bash & systemd command generation"},
 }
+
+# Canonical Strategy to Auditor Model Mapping
+AUDITOR_STRATEGY_MAP: Dict[str, str] = {
+    "balanced": "qwen3:8b",
+    "adversarial": "deepseek-r1:8b",
+    "algorithmic": "deepseek-coder-v2:16b",
+}
+
+
+def resolve_auditor_model(
+    annotated_plan: Optional[Dict[str, Any]] = None,
+    explicit_auditor: Optional[str] = None,
+    builder_model: str = "winter-prime:16gb",
+    fallback_auditor: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve effective auditor model from explicit flag, Orchestrator strategy, or fallback."""
+    if explicit_auditor:
+        return explicit_auditor
+
+    if isinstance(annotated_plan, dict):
+        plan_model = annotated_plan.get("auditor_model")
+        plan_strat = annotated_plan.get("auditor_strategy")
+
+        candidate = None
+        if plan_model and isinstance(plan_model, str) and plan_model.strip():
+            candidate = plan_model.strip()
+        elif plan_strat and isinstance(plan_strat, str):
+            candidate = AUDITOR_STRATEGY_MAP.get(plan_strat.strip().lower())
+
+        if candidate:
+            # Enforce Anti-Self-Review: cannot match builder model
+            if candidate != builder_model:
+                return candidate
+
+    return fallback_auditor
 
 
 class PipelineState:
@@ -57,6 +93,8 @@ class PipelineState:
         self.events: List[Dict[str, Any]] = []
         self.prior_plan_hash: Optional[str] = None
         self.injected_lessons: Dict[str, List[dict]] = {}
+        self.builder_model: str = "winter-prime:latest"
+        self.auditor_model: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Serialize to state.json schema (§6.1)."""
@@ -73,6 +111,8 @@ class PipelineState:
             },
             "tasks": self.tasks,
             "events": self.events,
+            "builder_model": getattr(self, "builder_model", "winter-prime:latest"),
+            "auditor_model": getattr(self, "auditor_model", None),
         }
 
     @classmethod
@@ -89,6 +129,8 @@ class PipelineState:
         state.tasks = data.get("tasks", {})
         state.events = data.get("events", [])
         state.messages = data.get("messages", {})
+        state.builder_model = data.get("builder_model", "winter-prime:latest")
+        state.auditor_model = data.get("auditor_model", None)
         return state
 
     def add_event(self, event_type: str, detail: str, pillar: Optional[str] = None) -> None:
@@ -221,12 +263,14 @@ def stage_chat(
     emitter = EventEmitter.get_current()
     if emitter:
         try:
+            ctx_limit = _get_model_context_length(model)
             emitter.context_window(
                 iteration=1,
                 system_rules=system_prompt,
                 tools=tools or [],
                 lessons=lessons or [],
                 user_prompt=user_content,
+                context_limit=ctx_limit,
                 stage=role,
             )
         except Exception:
@@ -620,6 +664,7 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
 def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
     """Reviewer Phase: Deterministic pre-filter + LLM review audit (ReviewVerdict)."""
     annotated_plan = state.messages.get("annotated_plan", {})
+    builder_model = getattr(state, "builder_model", "winter-prime:16gb")
 
     try:
         memory_store = MemoryStore(DEFAULT_DB_PATH)
@@ -627,7 +672,7 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
         memory_store = None
 
     # Step 1: Deterministic Pre-Filter
-    pre_filter_verdict = validate_annotated_plan(annotated_plan, state.original_prompt)
+    pre_filter_verdict = validate_annotated_plan(annotated_plan, state.original_prompt, builder_model=builder_model)
     if pre_filter_verdict.get("verdict") != "approved":
         state.messages["review_verdict"] = pre_filter_verdict
         store.save_message(state.run_id, "review_verdict", pre_filter_verdict)
@@ -828,7 +873,12 @@ def run_security(state: PipelineState, store: ContextStore, model: str = "winter
             return "orchestrator"
 
 
-def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
+def run_dispatch(
+    state: PipelineState,
+    store: ContextStore,
+    model: str = "winter-prime:latest",
+    auditor_model: Optional[str] = None,
+) -> str:
     """Dispatch Phase: Prepares executor tasks, snapshots, and task messages."""
     annotated_plan = state.messages.get("annotated_plan", {})
     tasks = annotated_plan.get("tasks", [])
@@ -1086,11 +1136,12 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                 "original_prompt": state.original_prompt,
                 "code_files": code_files,
             }
+            rev_model = auditor_model or model
             raw_rev = stage_chat(
                 role="reviewer",
                 system_prompt=rev_sys_prompt,
                 user_content=json.dumps(rev_payload, indent=2),
-                model=model,
+                model=rev_model,
             )
             try:
                 rev_verdict = parse_llm_json(raw_rev)
@@ -1174,11 +1225,12 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
                 "original_prompt": state.original_prompt,
                 "code_files": code_files,
             }
+            sec_model = auditor_model or model
             raw_sec = stage_chat(
                 role="security",
                 system_prompt=sec_sys_prompt,
                 user_content=json.dumps(sec_payload, indent=2),
-                model=model,
+                model=sec_model,
             )
             try:
                 sec_verdict = parse_llm_json(raw_sec)
@@ -1255,7 +1307,9 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
             state.tasks[tid]["status"] = "failed"
             store.save_message(state.run_id, f"execution_result_{tid}", exec_res)
             state.add_event("task_failed", f"Task {tid} failed pre-execution verification gates", "3")
-            continue
+            state.status = "aborted"
+            state.add_event("dispatch_aborted", f"Dispatch aborted: Task {tid} failed pre-execution verification gates", "3")
+            return "aborted"
 
         # Apply file write outputs ONLY after linter gate approval
         written_files = []
@@ -1316,7 +1370,13 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
             run_cmd = target if target.startswith("./") else f"./{target}"
             run_out = handle_execute_task(run_cmd, task_description=task_desc, model=model)
             send_terminal_mcp(f"📋 [Execution Output]\n{run_out}")
-            if not re.search(r"Exit Code\*?\*?:\s*`?0`?", run_out):
+
+            # Verify exit code and explicit error signatures
+            has_exit_zero = bool(re.search(r"Exit Code\*?\*?:\s*`?0`?", run_out))
+            has_explicit_error = bool(
+                re.search(r"❌\s*\[ERROR\]|Traceback \(most recent call last\)|command not found|No such file or directory", run_out)
+            )
+            if not has_exit_zero or has_explicit_error:
                 exec_succeeded = False
 
         # Lesson Attribution on Execution Success (§5.02)
@@ -1340,6 +1400,22 @@ def run_dispatch(state: PipelineState, store: ContextStore, model: str = "winter
             exec_res["artifacts"] = outputs
         store.save_message(state.run_id, f"execution_result_{tid}", exec_res)
         state.add_event("task_executed", f"Task {tid} executed by {role}", "3")
+
+        if not exec_succeeded:
+            state.status = "aborted"
+            state.add_event("task_failed", f"Task {tid} script execution failed in terminal-mcp", "3")
+            state.add_event("dispatch_aborted", f"Dispatch aborted: Task {tid} execution failed", "3")
+            return "aborted"
+
+    failed_tasks = [t for t, d in state.tasks.items() if d.get("status") == "failed"]
+    if failed_tasks:
+        state.status = "aborted"
+        state.add_event(
+            "dispatch_failed",
+            f"Execution failed on {len(failed_tasks)} task(s): {', '.join(failed_tasks)}",
+            "3",
+        )
+        return "aborted"
 
     state.status = "complete"
     state.add_event(
@@ -1516,6 +1592,8 @@ def run_pipeline(
     model: str = "winter-prime:latest",
     store: Optional[ContextStore] = None,
     tier: Optional[str] = None,
+    auditor_model: Optional[str] = None,
+    dynamic_auditor: bool = False,
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
     if not run_id:
@@ -1525,7 +1603,49 @@ def run_pipeline(
         store = ContextStore()
 
     state = PipelineState(run_id=run_id, original_prompt=prompt)
+    state.builder_model = model
+    state.auditor_model = auditor_model
     store.save_state(run_id, state.to_dict())
+
+    effective_tier = tier
+    if not effective_tier:
+        if auditor_model or dynamic_auditor:
+            effective_tier = "24gb"
+        elif "16gb" in model:
+            effective_tier = "16gb"
+        elif "24gb" in model:
+            effective_tier = "24gb"
+        elif "8gb" in model:
+            effective_tier = "8gb"
+        else:
+            try:
+                effective_tier = get_hardware_tier()
+            except Exception:
+                effective_tier = "8gb"
+
+    models_dict = {
+        "default": model,
+        "builder": model,
+        "author": model,
+        "coder": model,
+        "sysadmin": model,
+        "architect": model,
+        "orchestrator": model,
+    }
+    if auditor_model:
+        models_dict.update({
+            "auditor": auditor_model,
+            "reviewer": auditor_model,
+            "security": auditor_model,
+        })
+
+    context_limits = {}
+    for m in set(models_dict.values()):
+        if isinstance(m, str) and m:
+            try:
+                context_limits[m] = _get_model_context_length(m)
+            except Exception:
+                pass
 
     emitter = None
     try:
@@ -1534,13 +1654,15 @@ def run_pipeline(
         emitter.pipeline_start(
             task_file=prompt if prompt.endswith(".md") else "prompt",
             prompt=prompt,
-            tier=tier,
-            models={"default": model},
+            tier=effective_tier,
+            models=models_dict,
             max_retries=3,
+            context_limits=context_limits,
         )
     except Exception:
         pass
 
+    current_effective_auditor = auditor_model
     try:
         while state.current_phase not in ("complete", "aborted"):
             if emitter:
@@ -1555,7 +1677,38 @@ def run_pipeline(
                 state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
                 break
 
-            next_phase = phase_fn(state, store, model=model)
+            # Dynamic Auditor Resolution from Orchestrator's annotated plan
+            if (not auditor_model or dynamic_auditor) and state.messages.get("annotated_plan"):
+                loaded_plan = store.load(f"runs/{state.run_id}/messages/annotated_plan.json") if isinstance(state.messages.get("annotated_plan"), str) else state.messages.get("annotated_plan")
+                resolved = resolve_auditor_model(
+                    annotated_plan=loaded_plan,
+                    explicit_auditor=auditor_model if not dynamic_auditor else None,
+                    builder_model=model,
+                    fallback_auditor="qwen3:8b" if (tier == "24gb" or dynamic_auditor) else None,
+                )
+                if resolved and resolved != current_effective_auditor:
+                    current_effective_auditor = resolved
+                    state.auditor_model = resolved
+                    models_dict["auditor"] = resolved
+                    models_dict["reviewer"] = resolved
+                    models_dict["security"] = resolved
+                    if resolved not in context_limits:
+                        try:
+                            context_limits[resolved] = _get_model_context_length(resolved)
+                        except Exception:
+                            pass
+                    send_terminal_mcp(
+                        f"\n🎯 [ORCHESTRATOR] Dynamically selected Auditor model: `{current_effective_auditor}`"
+                    )
+
+            if state.current_phase in ("reviewer", "security"):
+                current_phase_model = current_effective_auditor or model
+                next_phase = phase_fn(state, store, model=current_phase_model)
+            elif state.current_phase == "dispatch":
+                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor)
+            else:
+                next_phase = phase_fn(state, store, model=model)
+
             state.current_phase = next_phase
             store.save_state(run_id, state.to_dict())
 
@@ -1584,6 +1737,8 @@ def resume_pipeline(
     model: str = "winter-prime:latest",
     store: Optional[ContextStore] = None,
     tier: Optional[str] = None,
+    auditor_model: Optional[str] = None,
+    dynamic_auditor: bool = False,
 ) -> dict:
     """Resume an aborted or in-flight pipeline run from state.json."""
     if store is None:
@@ -1599,6 +1754,7 @@ def resume_pipeline(
     except Exception:
         pass
 
+    current_effective_auditor = auditor_model or state.auditor_model
     try:
         while state.current_phase not in ("complete", "aborted"):
             if emitter:
@@ -1613,7 +1769,29 @@ def resume_pipeline(
                 state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
                 break
 
-            next_phase = phase_fn(state, store, model=model)
+            if (not auditor_model or dynamic_auditor) and state.messages.get("annotated_plan"):
+                loaded_plan = store.load(f"runs/{state.run_id}/messages/annotated_plan.json") if isinstance(state.messages.get("annotated_plan"), str) else state.messages.get("annotated_plan")
+                resolved = resolve_auditor_model(
+                    annotated_plan=loaded_plan,
+                    explicit_auditor=auditor_model if not dynamic_auditor else None,
+                    builder_model=model,
+                    fallback_auditor="qwen3:8b" if (tier == "24gb" or dynamic_auditor) else None,
+                )
+                if resolved and resolved != current_effective_auditor:
+                    current_effective_auditor = resolved
+                    state.auditor_model = resolved
+                    send_terminal_mcp(
+                        f"\n🎯 [ORCHESTRATOR] Dynamically selected Auditor model: `{current_effective_auditor}`"
+                    )
+
+            if state.current_phase in ("reviewer", "security"):
+                current_phase_model = current_effective_auditor or model
+                next_phase = phase_fn(state, store, model=current_phase_model)
+            elif state.current_phase == "dispatch":
+                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor)
+            else:
+                next_phase = phase_fn(state, store, model=model)
+
             state.current_phase = next_phase
             store.save_state(run_id, state.to_dict())
 
@@ -1642,7 +1820,10 @@ def main():
     parser.add_argument("prompt", nargs="?", help="User prompt to execute (text or markdown file path)")
     parser.add_argument("--resume", metavar="RUN_ID", help="Resume an aborted run")
     parser.add_argument("--tier", choices=["8gb", "16gb", "24gb"], default=None, help="Hardware tier (8gb, 16gb, 24gb)")
-    parser.add_argument("--model", default=None, help="Ollama model to use across all pipeline stages (default: winter-prime:<tier> or winter-prime:latest)")
+    parser.add_argument("--model", default=None, help="Ollama model to use across pipeline stages (default: winter-prime:<tier> or winter-prime:latest)")
+    parser.add_argument("--auditor-model", default=None, help="Auditor model for Reviewer and Security stages (Dual-Model mode)")
+    parser.add_argument("--dual-model", action="store_true", default=False, help="Enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: dynamic/qwen3:8b)")
+    parser.add_argument("--dynamic-auditor", action="store_true", default=False, help="Enable dynamic auditor model selection by Orchestrator")
     parser.add_argument("--keep-models", "--no-unload", dest="keep_models", action="store_true", default=False, help="Keep models loaded in VRAM between stages")
     parser.add_argument("--unload-models", action="store_true", default=False, help="Unload models between stages")
     args = parser.parse_args()
@@ -1653,21 +1834,35 @@ def main():
         "24gb": "winter-prime:24gb",
     }
 
-    selected_model = args.model
-    if not selected_model:
-        if args.tier:
-            selected_model = tier_model_map.get(args.tier, "winter-prime:latest")
-        else:
-            selected_model = "winter-prime:latest"
+    dynamic_auditor = args.dynamic_auditor
+    auditor_model = args.auditor_model
+    if args.dual_model:
+        selected_model = args.model or "winter-prime:16gb"
+        if not auditor_model:
+            dynamic_auditor = True
+            auditor_model = None
+    else:
+        selected_model = args.model
+        if not selected_model:
+            if args.tier:
+                selected_model = tier_model_map.get(args.tier, "winter-prime:latest")
+            else:
+                selected_model = "winter-prime:latest"
+
+    kwargs = {"model": selected_model, "tier": args.tier}
+    if auditor_model:
+        kwargs["auditor_model"] = auditor_model
+    if dynamic_auditor:
+        kwargs["dynamic_auditor"] = True
 
     if args.resume:
-        result = resume_pipeline(args.resume, model=selected_model, tier=args.tier)
+        result = resume_pipeline(args.resume, **kwargs)
     elif args.prompt:
         prompt_content = args.prompt
         if os.path.isfile(args.prompt):
             with open(args.prompt, "r", encoding="utf-8") as f:
                 prompt_content = f.read().strip()
-        result = run_pipeline(prompt_content, model=selected_model, tier=args.tier)
+        result = run_pipeline(prompt_content, **kwargs)
     else:
         parser.error("Provide a prompt or --resume <run_id>")
 

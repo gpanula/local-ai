@@ -150,3 +150,49 @@ def test_mcp_run_pipeline_default_model():
         assert not resp["result"].get("isError")
         mock_run.assert_called_once_with("Valid task prompt", model="winter-prime:latest")
 
+
+def test_mcp_run_pipeline_dual_model():
+    """Verify run_pipeline with dual_model=True sets builder and auditor models."""
+    mock_result = {"run_id": "test-dual-model", "status": "complete"}
+    with patch("pipeline.run_pipeline", return_value=mock_result) as mock_run:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "prompt": "Valid task prompt",
+                    "dual_model": True
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert not resp["result"].get("isError")
+        mock_run.assert_called_once_with("Valid task prompt", model="winter-prime:16gb", auditor_model="qwen3:8b")
+
+
+def test_mcp_run_pipeline_dynamic_auditor():
+    """Verify run_pipeline with dynamic_auditor=True sets dynamic_auditor flag and 16gb builder."""
+    mock_result = {"run_id": "test-dynamic-auditor", "status": "complete"}
+    with patch("pipeline.run_pipeline", return_value=mock_result) as mock_run:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "prompt": "Valid task prompt",
+                    "dynamic_auditor": True
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert not resp["result"].get("isError")
+        mock_run.assert_called_once_with("Valid task prompt", model="winter-prime:16gb", dynamic_auditor=True)
+
+
+

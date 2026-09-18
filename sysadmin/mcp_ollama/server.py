@@ -8,6 +8,7 @@ chat, code generation, and model management to a local Ollama instance.
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -350,7 +351,8 @@ def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: i
     import time
 
     sock_path = socket_path or os.environ.get("TERMINAL_MCP_SOCKET", "/tmp/terminal-mcp.sock")
-    exec_command = f"cd {shlex.quote(cwd)} && (\n{command}\n)" if cwd else command
+    inner_cmd = f"cd {shlex.quote(cwd)} && (\n{command}\n)" if cwd else f"(\n{command}\n)"
+    exec_command = f"{inner_cmd}; __LOCALAI_EC=$?; echo \"__LOCALAI_EXIT:${{__LOCALAI_EC}}__\""
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -386,9 +388,31 @@ def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: i
             time.sleep(1.0)
 
         s.close()
-        lines = last_text.strip().splitlines()
-        tail = "\n".join(lines[-40:]) if len(lines) > 40 else last_text
-        return tail, 0, "terminal-mcp PTY"
+
+        # Extract exit code from marker
+        ec_match = re.search(r"__LOCALAI_EXIT:(\d+)__", last_text)
+        if ec_match:
+            exit_code = int(ec_match.group(1))
+        else:
+            exit_code = 0
+
+        # Safety override (AGENTS.md Rule 2): Never rely solely on exit 0.
+        # Inspect buffer for hidden tracebacks, syntax errors, or permission faults.
+        error_indicators = [
+            "❌ [ERROR]",
+            "Traceback (most recent call last)",
+            "command not found",
+            "No such file or directory",
+            "SyntaxError:",
+            "Permission denied",
+        ]
+        if exit_code == 0 and any(err in last_text for err in error_indicators):
+            exit_code = 1
+
+        cleaned_text = re.sub(r"__LOCALAI_EXIT:\d+__\r?\n?", "", last_text)
+        lines = cleaned_text.strip().splitlines()
+        tail = "\n".join(lines[-40:]) if len(lines) > 40 else cleaned_text
+        return tail, exit_code, "terminal-mcp PTY"
     except Exception as e:
         try:
             s.close()
@@ -486,7 +510,10 @@ def handle_execute_task(
 def handle_run_pipeline(
     prompt: str,
     model: Optional[str] = None,
-    resume: Optional[str] = None
+    resume: Optional[str] = None,
+    auditor_model: Optional[str] = None,
+    dual_model: bool = False,
+    dynamic_auditor: bool = False,
 ) -> str:
     """
     Executes the full Arc-Orc-Rev multi-agent pipeline (Architect -> Orchestrator ->
@@ -504,9 +531,14 @@ def handle_run_pipeline(
             "**Parameters:**\n"
             "- `prompt` (str): Task prompt text or workspace path to a prompt file (e.g. 'sysadmin/prompts/task.md'). Required unless `resume` is specified.\n"
             "- `model` (str, optional): Ollama model to use across all pipeline stages (default: 'winter-prime:latest').\n"
+            "- `auditor_model` (str, optional): Secondary Auditor model for Reviewer and Security stages (e.g. 'qwen3:8b').\n"
+            "- `dual_model` (bool, optional): Enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b).\n"
+            "- `dynamic_auditor` (bool, optional): Allow the Orchestrator/Architect to dynamically select the Auditor model/strategy based on task domain tags and risk vectors.\n"
             "- `resume` (str, optional): Run ID to resume an aborted run from state.json.\n\n"
             "**Examples:**\n"
             "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md')`\n"
+            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md', dual_model=True)`\n"
+            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md', dynamic_auditor=True)`\n"
             "- `run_pipeline(prompt='Write a python script to check service health', model='winter-prime:latest')`\n"
             "- `run_pipeline(prompt='', resume='run-20260907-...')`"
         )
@@ -524,14 +556,28 @@ def handle_run_pipeline(
             with open(prompt_content, "r", encoding="utf-8") as f:
                 prompt_content = f.read().strip()
 
-    selected_model = model or "winter-prime:latest"
+    if dynamic_auditor:
+        selected_model = model or "winter-prime:16gb"
+        selected_auditor = auditor_model
+    elif dual_model:
+        selected_model = model or "winter-prime:16gb"
+        selected_auditor = auditor_model or "qwen3:8b"
+    else:
+        selected_model = model or "winter-prime:latest"
+        selected_auditor = auditor_model
+
+    kwargs = {"model": selected_model}
+    if selected_auditor:
+        kwargs["auditor_model"] = selected_auditor
+    if dynamic_auditor:
+        kwargs["dynamic_auditor"] = True
 
     from pipeline import run_pipeline, resume_pipeline
     with contextlib.redirect_stdout(sys.stderr):
         if resume_raw:
-            result = resume_pipeline(resume_raw, model=selected_model)
+            result = resume_pipeline(resume_raw, **kwargs)
         else:
-            result = run_pipeline(prompt_content, model=selected_model)
+            result = run_pipeline(prompt_content, **kwargs)
 
     return json.dumps(result, indent=2)
 
@@ -1109,7 +1155,19 @@ TOOLS = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional local Ollama model to use for all pipeline stages (default: 'winter-prime:latest')."
+                    "description": "Optional local Ollama model to use for all pipeline stages or as Builder model (default: 'winter-prime:latest')."
+                },
+                "auditor_model": {
+                    "type": "string",
+                    "description": "Optional secondary Auditor model for Reviewer and Security stages (e.g., 'qwen3:8b')."
+                },
+                "dual_model": {
+                    "type": "boolean",
+                    "description": "Optional flag to enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b)."
+                },
+                "dynamic_auditor": {
+                    "type": "boolean",
+                    "description": "Optional flag to enable dynamic Auditor selection by the Orchestrator based on task domain tags and risk vectors."
                 },
                 "resume": {
                     "type": "string",
@@ -1131,7 +1189,19 @@ TOOLS = [
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional local Ollama model to use for all pipeline stages (default: 'winter-prime:latest')."
+                    "description": "Optional local Ollama model to use for all pipeline stages or as Builder model (default: 'winter-prime:latest')."
+                },
+                "auditor_model": {
+                    "type": "string",
+                    "description": "Optional secondary Auditor model for Reviewer and Security stages (e.g., 'qwen3:8b')."
+                },
+                "dual_model": {
+                    "type": "boolean",
+                    "description": "Optional flag to enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b)."
+                },
+                "dynamic_auditor": {
+                    "type": "boolean",
+                    "description": "Optional flag to enable dynamic Auditor selection by the Orchestrator based on task domain tags and risk vectors."
                 },
                 "resume": {
                     "type": "string",
@@ -1262,7 +1332,10 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 text = handle_run_pipeline(
                     prompt=args.get("prompt", ""),
                     model=args.get("model"),
-                    resume=args.get("resume")
+                    resume=args.get("resume"),
+                    auditor_model=args.get("auditor_model"),
+                    dual_model=bool(args.get("dual_model", False)),
+                    dynamic_auditor=bool(args.get("dynamic_auditor", False)),
                 )
             else:
                 return {

@@ -391,3 +391,150 @@ def test_pipeline_cli_tier_resolution(monkeypatch):
         assert captured["model"] == "custom:model"
         assert captured["tier"] == "8gb"
 
+    captured_dual = {}
+
+    def mock_run_pipeline_dual(prompt, model, tier=None, auditor_model=None, dynamic_auditor=False, **kwargs):
+        captured_dual["model"] = model
+        captured_dual["auditor_model"] = auditor_model
+        captured_dual["dynamic_auditor"] = dynamic_auditor
+        return {"run_id": "test-run-dual", "status": "complete"}
+
+    with patch("pipeline.run_pipeline", side_effect=mock_run_pipeline_dual):
+        # 6. --dual-model flag sets builder to winter-prime:16gb and dynamic_auditor to True
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--dual-model"])
+        main()
+        assert captured_dual["model"] == "winter-prime:16gb"
+        assert captured_dual["dynamic_auditor"] is True
+        assert captured_dual["auditor_model"] is None
+
+        # 7. --dual-model with custom explicit auditor
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--dual-model", "--auditor-model", "deepseek-r1:8b"])
+        main()
+        assert captured_dual["model"] == "winter-prime:16gb"
+        assert captured_dual["auditor_model"] == "deepseek-r1:8b"
+        assert captured_dual["dynamic_auditor"] is False
+
+        # 8. --dynamic-auditor flag alone
+        monkeypatch.setattr("sys.argv", ["pipeline.py", "test prompt", "--dynamic-auditor"])
+        main()
+        assert captured_dual["dynamic_auditor"] is True
+
+
+def test_run_pipeline_dynamic_auditor_resolution(tmp_path, monkeypatch):
+    """Verify run_pipeline with dynamic_auditor=True dynamically resolves auditor model."""
+    runs_dir = tmp_path / "runs"
+    store = ContextStore(runs_dir=str(runs_dir))
+
+    prompt = "Review security configuration"
+    run_id = "test-dynamic-auditor-001"
+    models_received = {}
+
+    def fake_stage_chat(role, system_prompt, user_content, model="winter-prime:latest", tools=None):
+        models_received[role] = model
+        if role == "architect":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "plan",
+                "run_id": run_id,
+                "original_prompt": prompt,
+                "auditor_hint": "adversarial",
+                "tasks": [{"task_id": "t-001", "description": "Audit system configuration and permissions", "domain_tags": ["Defensive Bash Scripting"], "tools_required": ["run_bash"]}],
+                "cognition": {
+                    "analysis": "Root cause analysis for system security and permissions configuration audit.",
+                    "risks": "Potential permission denied errors and privilege escalation risks on audit.",
+                    "solution": "Execute defensive bash checks with non-destructive inspections only.",
+                    "verification": "Verify all assertions pass and review findings match expected baseline.",
+                },
+            })
+        elif role == "orchestrator":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "annotated_plan",
+                "run_id": run_id,
+                "original_prompt": prompt,
+                "auditor_strategy": "adversarial",
+                "dag": {"nodes": ["t-001"], "edges": []},
+                "tasks": [{
+                    "task_id": "t-001",
+                    "description": "Audit system configuration and permissions",
+                    "domain_tags": ["Defensive Bash Scripting"],
+                    "assigned_agent": "sysadmin",
+                    "tools_required": ["run_bash"],
+                    "inputs": [],
+                    "outputs": ["audit.log"],
+                    "constraints": [],
+                }],
+                "cognition": {
+                    "analysis": "Orchestrator analysis of DAG structure and security task assignment.",
+                    "risks": "Potential scheduling conflicts or tool permission violations on execution.",
+                    "solution": "Schedule single sysadmin audit task with adversarial secondary review.",
+                    "verification": "Verify DAG acyclicity, schema conformity, and auditor selection.",
+                },
+            })
+        elif role == "reviewer":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "review_verdict",
+                "run_id": run_id,
+                "verdict": "approved",
+                "return_to": None,
+                "violations": [],
+                "cognition": {
+                    "analysis": "Reviewer audit confirms full architectural and prompt compliance.",
+                    "risks": "No architectural deviations or missing safety boundaries detected.",
+                    "solution": "Approve annotated plan for secondary security gate audit.",
+                    "verification": "Confirmed prompt fidelity and deterministic validation pass.",
+                },
+            })
+        elif role == "security":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "security_verdict",
+                "run_id": run_id,
+                "verdict": "cleared",
+                "fault_type": None,
+                "threats": [],
+                "cognition": {
+                    "analysis": "STRIDE threat modeling completed across all trust boundaries.",
+                    "risks": "No unmitigated privilege leaks or execution bypasses identified.",
+                    "solution": "Clear audited plan for live agent dispatch and execution.",
+                    "verification": "Sandbox containment and isolation parameters verified.",
+                },
+            })
+        elif role == "sysadmin":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "execution_result",
+                "run_id": run_id,
+                "task_id": "t-001",
+                "role": "sysadmin",
+                "status": "success",
+                "outputs": {},
+                "cognition": {
+                    "analysis": "Sysadmin execution analysis confirms clean inspection pass.",
+                    "risks": "Zero environmental side effects or unwanted state changes observed.",
+                    "solution": "Completed defensive audit task and generated structured output.",
+                    "verification": "Verified exit code 0 and proper output file creation.",
+                },
+            })
+        raise ValueError(f"Unexpected role: {role}")
+
+    monkeypatch.setattr("pipeline.stage_chat", fake_stage_chat)
+
+    final_state = run_pipeline(
+        prompt=prompt,
+        run_id=run_id,
+        model="winter-prime:16gb",
+        dynamic_auditor=True,
+        store=store,
+    )
+
+    assert final_state["status"] == "complete"
+    assert final_state["auditor_model"] == "deepseek-r1:8b"
+    assert models_received["architect"] == "winter-prime:16gb"
+    assert models_received["orchestrator"] == "winter-prime:16gb"
+    assert models_received["reviewer"] == "deepseek-r1:8b"
+    assert models_received["security"] == "deepseek-r1:8b"
+
+
+
