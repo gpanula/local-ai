@@ -1074,6 +1074,8 @@ def run_dispatch(
     except Exception:
         memory_store = None
 
+    verified_task_files: Dict[str, str] = {}
+
     for task in tasks:
         tid = task.get("task_id", "unknown")
         role = task.get("assigned_agent", "coder")
@@ -1155,6 +1157,7 @@ def run_dispatch(
         store.save_snapshot(state.run_id, tid, snapshot)
 
         # Build TaskMessage (§3.6)
+        declared_outputs = list(task.get("outputs") or [])
         task_msg = {
             "schema_version": "2.0",
             "message_type": "task",
@@ -1165,6 +1168,7 @@ def run_dispatch(
             "domain_tags": task.get("domain_tags", []),
             "tools_available": [{"name": t, "schema": {}} for t in task.get("tools_required", [])],
             "inputs": {inp: "" for inp in task.get("inputs", [])},
+            "declared_outputs": declared_outputs,
             "constraints": task.get("constraints", []),
             "injected_lessons": relevant_lessons,
             "original_prompt": state.original_prompt,
@@ -1256,11 +1260,39 @@ def run_dispatch(
             outputs = exec_res.get("outputs", {})
             if not outputs:
                 code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", raw_result)
-                declared_outputs = task.get("outputs", [])
                 if code_blocks and declared_outputs:
                     target_file = declared_outputs[0]
                     outputs = {target_file: max(code_blocks, key=len).strip()}
                     exec_res["outputs"] = outputs
+
+            # Output Boundary Protection:
+            # Prevent tasks from emitting undeclared files or overwriting verified files from earlier tasks.
+            if isinstance(outputs, dict):
+                declared_set = set(declared_outputs)
+                filtered_outputs = {}
+                for p, c in outputs.items():
+                    if p.lower() in ("stdout", "stderr", "returncode", "exit_code", "output", "result", "hello_world_result"):
+                        filtered_outputs[p] = c
+                        continue
+                    if declared_set:
+                        if p in declared_set:
+                            filtered_outputs[p] = c
+                        else:
+                            send_terminal_mcp(
+                                f"⚠️ [OUTPUT GUARD] Task '{tid}' emitted undeclared output `{p}` "
+                                f"(declared: {list(declared_set)}). Dropping undeclared file output."
+                            )
+                    else:
+                        # Task declared NO file outputs (e.g. execution/verification task)
+                        if p in verified_task_files:
+                            send_terminal_mcp(
+                                f"🛡️ [OUTPUT GUARD] Task '{tid}' attempted to overwrite verified file `{p}` "
+                                f"authored by earlier task '{verified_task_files[p]}'. Blocked unauthorized overwrite."
+                            )
+                        else:
+                            filtered_outputs[p] = c
+                outputs = filtered_outputs
+                exec_res["outputs"] = outputs
 
             # Multi-Tier Pre-Execution Code Verification Gate
             # Tier 1: Deterministic Linter (validate_code_output)
@@ -1572,6 +1604,7 @@ def run_dispatch(
                     res = handle_write_file(path, content, make_executable=is_sh)
                     send_terminal_mcp(f"📝 {res}")
                     written_files.append(path)
+                    verified_task_files[path] = tid
                 except Exception as e:
                     send_terminal_mcp(f"❌ Failed to write `{path}`: {e}")
 
