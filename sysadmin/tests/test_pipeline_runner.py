@@ -354,7 +354,7 @@ def test_pipeline_cli_tier_resolution(monkeypatch):
 
     captured = {}
 
-    def mock_run_pipeline(prompt, model, tier=None):
+    def mock_run_pipeline(prompt, model, tier=None, **kwargs):
         captured["prompt"] = prompt
         captured["model"] = model
         captured["tier"] = tier

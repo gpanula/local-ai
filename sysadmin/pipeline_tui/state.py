@@ -119,6 +119,7 @@ class PipelineState:
         self.abort_reason: str = ""
         self.duration_sec: float = 0.0
         self.elapsed_sec: float = 0.0
+        self.orchestrator_bypassed: bool = False
 
     def prev_stage(self) -> str:
         """Step left to previous stage in STAGE_ORDER."""
@@ -504,6 +505,9 @@ class PipelineState:
                 for k, v in ctx_lims.items():
                     if isinstance(v, (int, float)) and v > 0:
                         self.model_context_limits[k] = int(v)
+
+        elif etype == "orchestrator_bypassed":
+            self.orchestrator_bypassed = True
 
         elif etype == "stage_transition":
             raw_stage = data.get("stage", self.current_stage)

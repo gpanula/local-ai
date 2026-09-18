@@ -112,3 +112,39 @@ def get_default_model(role: str = "coder", tier: Optional[str] = None) -> str:
     active_tier = tier or get_hardware_tier()
     clean_role = role.strip().lower()
     return f"winter-{clean_role}:{active_tier}"
+
+
+# Hardware-Aware Failure Escalation Model Mapping
+# Prevents VRAM overflow on 8GB machines (laptops) by ensuring escalation models
+# strictly adhere to hardware limits.
+ESCALATION_MODELS: dict[str, dict[str, str]] = {
+    TIER_8GB: {
+        "coder": "deepseek-r1:8b",
+        "default": "deepseek-r1:8b",
+    },
+    TIER_16GB: {
+        "coder": "deepseek-coder-v2:16b",
+        "default": "deepseek-coder-v2:16b",
+    },
+    TIER_24GB: {
+        "coder": "deepseek-coder-v2:16b",
+        "default": "deepseek-coder-v2:16b",
+    },
+}
+
+
+def get_escalation_model(tier: Optional[str] = None, role: str = "coder") -> str:
+    """Resolve the default escalation model for a given role and hardware tier.
+
+    Ensures that 8GB tier never attempts to load 16GB or 24GB models.
+    """
+    active_tier = tier or get_hardware_tier()
+    tier_map = ESCALATION_MODELS.get(active_tier, ESCALATION_MODELS[TIER_8GB])
+    clean_role = role.strip().lower()
+    return tier_map.get(clean_role, tier_map.get("default", "deepseek-r1:8b"))
+
+
+def get_primary_coder_model(tier: Optional[str] = None) -> str:
+    """Resolve the default primary coder model for the active hardware tier."""
+    active_tier = tier or get_hardware_tier()
+    return f"winter-coder:{active_tier}"

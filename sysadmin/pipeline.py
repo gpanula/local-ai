@@ -21,13 +21,24 @@ from mcp_core.workspace import WORKSPACE_ROOT
 from mcp_core.context_store import ContextStore
 from mcp_core.transport import send_terminal_mcp
 from mcp_core.events import EventEmitter, generate_run_id
-from mcp_core.hardware import get_hardware_tier
+from mcp_core.hardware import (
+    get_hardware_tier,
+    get_default_model,
+    get_escalation_model,
+    get_primary_coder_model,
+)
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
 from mcp_core.injection import format_lessons_for_prompt
 from mcp_core.extraction import extract_lesson_from_critique
 from mcp_core.attribution import attribute_lessons
 from mcp_core.trajectories import record_trajectory, DEFAULT_TRAJECTORIES_PATH
-from mcp_ollama.server import handle_chat, handle_write_file, handle_execute_task, _get_model_context_length
+from mcp_ollama.server import (
+    handle_chat,
+    handle_write_file,
+    handle_execute_task,
+    handle_unload_model,
+    _get_model_context_length,
+)
 from validator import validate_annotated_plan, validate_code_output
 
 # Sampling profiles per taxonomy role (RFC v7 §4.7)
@@ -95,6 +106,12 @@ class PipelineState:
         self.injected_lessons: Dict[str, List[dict]] = {}
         self.builder_model: str = "winter-prime:latest"
         self.auditor_model: Optional[str] = None
+        self.tier: str = "8gb"
+        self.coder_model: Optional[str] = None
+        self.escalation_model: Optional[str] = None
+        self.no_escalation: bool = False
+        self.unload_models: bool = False
+        self.keep_models: bool = False
 
     def to_dict(self) -> dict:
         """Serialize to state.json schema (§6.1)."""
@@ -113,6 +130,12 @@ class PipelineState:
             "events": self.events,
             "builder_model": getattr(self, "builder_model", "winter-prime:latest"),
             "auditor_model": getattr(self, "auditor_model", None),
+            "tier": getattr(self, "tier", "8gb"),
+            "coder_model": getattr(self, "coder_model", None),
+            "escalation_model": getattr(self, "escalation_model", None),
+            "no_escalation": getattr(self, "no_escalation", False),
+            "unload_models": getattr(self, "unload_models", False),
+            "keep_models": getattr(self, "keep_models", False),
         }
 
     @classmethod
@@ -131,6 +154,12 @@ class PipelineState:
         state.messages = data.get("messages", {})
         state.builder_model = data.get("builder_model", "winter-prime:latest")
         state.auditor_model = data.get("auditor_model", None)
+        state.tier = data.get("tier", "8gb")
+        state.coder_model = data.get("coder_model", None)
+        state.escalation_model = data.get("escalation_model", None)
+        state.no_escalation = data.get("no_escalation", False)
+        state.unload_models = data.get("unload_models", False)
+        state.keep_models = data.get("keep_models", False)
         return state
 
     def add_event(self, event_type: str, detail: str, pillar: Optional[str] = None) -> None:
@@ -452,6 +481,124 @@ def normalize_annotated_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return plan
 
 
+def promote_plan_to_annotated(plan_msg: Dict[str, Any], architect_model: str = "winter-prime:16gb") -> Dict[str, Any]:
+    """Promote an Architect PlanMessage to an AnnotatedPlanMessage for fast-path direct execution.
+
+    Bypasses the Orchestrator stage by synthesizing canonical DAG, assigned agents,
+    tools, and strategy metadata directly from the Architect's decomposition.
+    """
+    raw_tasks = plan_msg.get("tasks", [])
+    annotated_tasks = []
+    task_ids = []
+
+    auditor_strat = plan_msg.get("auditor_hint") or "balanced"
+    auditor_model = AUDITOR_STRATEGY_MAP.get(str(auditor_strat).lower(), "qwen3:8b")
+    coder_strat = plan_msg.get("coder_hint") or "defensive_bash"
+
+    for i, t in enumerate(raw_tasks):
+        tid = t.get("task_id") or f"t-{i+1:03d}"
+        task_ids.append(tid)
+        agent = t.get("agent_hint") or t.get("assigned_agent") or "coder"
+        if agent not in ("coder", "sysadmin"):
+            agent = "coder"
+
+        tools = list(t.get("tools_required") or [])
+        if not tools:
+            tools = ["write_file", "run_bash"]
+
+        outputs = t.get("outputs", [])
+        if outputs and "write_file" not in tools:
+            tools.append("write_file")
+
+        depends = []
+        if i > 0 and task_ids:
+            depends = [task_ids[i - 1]]
+
+        annotated_tasks.append({
+            "task_id": tid,
+            "description": t.get("description", ""),
+            "domain_tags": t.get("domain_tags", ["Defensive Bash Scripting"]),
+            "assigned_agent": agent,
+            "tools_required": tools,
+            "inputs": t.get("inputs", []),
+            "outputs": outputs,
+            "constraints": t.get("constraints", []),
+            "depends_on": depends,
+            "coder_strategy": coder_strat,
+        })
+
+    edges = []
+    for i in range(1, len(task_ids)):
+        edges.append({
+            "from": task_ids[i - 1],
+            "to": task_ids[i],
+            "type": "data_dependency",
+        })
+
+    cognition = plan_msg.get("cognition", {})
+
+    annotated_plan = {
+        "schema_version": "2.0",
+        "message_type": "annotated_plan",
+        "run_id": plan_msg.get("run_id", ""),
+        "revision": plan_msg.get("revision", 0),
+        "revision_diff": None,
+        "original_prompt": plan_msg.get("original_prompt", ""),
+        "goal_summary": plan_msg.get("goal_summary", ""),
+        "workflow_mode": "direct",
+        "auditor_strategy": auditor_strat,
+        "auditor_model": auditor_model,
+        "dag": {
+            "nodes": task_ids,
+            "edges": edges,
+        },
+        "tasks": annotated_tasks,
+        "open_questions": plan_msg.get("open_questions", []),
+        "cognition": cognition,
+    }
+    return normalize_annotated_plan(annotated_plan)
+
+
+def resolve_coder_model(
+    task: Dict[str, Any],
+    state: Optional[PipelineState] = None,
+    tier: Optional[str] = None,
+    fallback_model: str = "winter-coder:latest",
+) -> str:
+    """Resolve active Coder model based on CLI flags, task annotation, or hardware tier."""
+    if state and getattr(state, "coder_model", None):
+        return state.coder_model.strip()
+
+    task_model = task.get("coder_model")
+    if task_model and isinstance(task_model, str) and task_model.strip():
+        return task_model.strip()
+
+    active_tier = tier or (state.tier if state else None) or get_hardware_tier()
+    task_strat = task.get("coder_strategy")
+    if task_strat and isinstance(task_strat, str):
+        strat = task_strat.strip().lower()
+        if strat == "algorithmic" and active_tier in ("16gb", "24gb"):
+            return "deepseek-coder-v2:16b"
+        elif strat == "lightweight":
+            return "winter-coder:8gb"
+
+    role = task.get("assigned_agent", "coder")
+    return get_default_model(role, tier=active_tier)
+
+
+def resolve_escalation_model(
+    role: str = "coder",
+    state: Optional[PipelineState] = None,
+    tier: Optional[str] = None,
+) -> str:
+    """Resolve the escalation model ensuring it respects available VRAM."""
+    if state and getattr(state, "escalation_model", None):
+        return state.escalation_model.strip()
+
+    active_tier = tier or (state.tier if state else None) or get_hardware_tier()
+    return get_escalation_model(tier=active_tier, role=role)
+
+
 def run_architect(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
     """Architect Phase: Decomposes user's prompt into tasks (PlanMessage)."""
     try:
@@ -556,6 +703,38 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
         f"Generated {len(plan_tasks)} tasks for run {state.run_id}",
         "1",
     )
+
+    # Fast-Path direct mode check:
+    # If the Architect designates workflow_mode == "direct" (or 1 task and not explicitly orchestrated),
+    # bypass the Orchestrator stage and advance directly to Reviewer.
+    workflow_mode = str(plan.get("workflow_mode", "")).strip().lower()
+    is_direct = (workflow_mode == "direct")
+
+    if is_direct:
+        annotated_plan = promote_plan_to_annotated(plan, architect_model=model)
+        state.messages["annotated_plan"] = annotated_plan
+        store.save_message(state.run_id, "annotated_plan", annotated_plan)
+
+        send_terminal_mcp(
+            f"\n⚡ [ARCHITECT FAST-PATH] Direct execution mode selected ({len(plan_tasks)} task(s)). "
+            f"Bypassing Orchestrator LLM pass -> advancing directly to Reviewer/Auditor gate."
+        )
+        state.add_event(
+            "orchestrator_bypassed",
+            f"Fast-path direct execution selected by Architect ({len(plan_tasks)} task(s))",
+            "2",
+        )
+        emitter = EventEmitter.get_current()
+        if emitter:
+            try:
+                emitter.emit("orchestrator_bypassed", {
+                    "reason": "Fast-path direct execution selected by Architect",
+                    "task_count": len(plan_tasks),
+                })
+            except Exception:
+                pass
+        return "reviewer"
+
     return "orchestrator"
 
 
@@ -677,6 +856,8 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
         state.messages["review_verdict"] = pre_filter_verdict
         store.save_message(state.run_id, "review_verdict", pre_filter_verdict)
         return_to = pre_filter_verdict.get("return_to", "orchestrator")
+        if annotated_plan.get("workflow_mode") == "direct" and return_to == "orchestrator":
+            return_to = "architect"
         violations = pre_filter_verdict.get("violations", [])
         v_lines = [f"  ⚠️ [{v.get('type')}] {v.get('description')}" for v in violations]
         send_terminal_mcp(
@@ -746,6 +927,8 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
         return "security"
     else:
         return_to = verdict.get("return_to", "orchestrator")
+        if annotated_plan.get("workflow_mode") == "direct" and return_to == "orchestrator":
+            return_to = "architect"
         state.add_event(
             "reviewer_rejected",
             f"Reviewer rejected plan -> {return_to}",
@@ -857,6 +1040,8 @@ def run_security(state: PipelineState, store: ContextStore, model: str = "winter
     else:
         fault_type = verdict.get("fault_type", "assignment")
         return_to = "architect" if fault_type == "scope" else "orchestrator"
+        if annotated_plan.get("workflow_mode") == "direct" and return_to == "orchestrator":
+            return_to = "architect"
         send_terminal_mcp(
             f"\n🚨 [SECURITY GATE] STRIDE threat modeling rejected plan (fault_type={fault_type}) -> returning to {return_to}"
         )
@@ -878,6 +1063,7 @@ def run_dispatch(
     store: ContextStore,
     model: str = "winter-prime:latest",
     auditor_model: Optional[str] = None,
+    tier: Optional[str] = None,
 ) -> str:
     """Dispatch Phase: Prepares executor tasks, snapshots, and task messages."""
     annotated_plan = state.messages.get("annotated_plan", {})
@@ -897,6 +1083,16 @@ def run_dispatch(
             "retries": 0,
             "role": role,
         }
+
+        # Resolve primary and escalation models respecting hardware tier / VRAM
+        active_tier = tier or getattr(state, "tier", None) or get_hardware_tier()
+        primary_coder = resolve_coder_model(task, state=state, tier=active_tier, fallback_model=model)
+        escalation_coder = resolve_escalation_model(role=role, state=state, tier=active_tier)
+        enable_escalation = not getattr(state, "no_escalation", False)
+        max_retries = 3 if (enable_escalation and escalation_coder != primary_coder) else 2
+
+        current_model = primary_coder
+        escalated = False
 
         # Query and inject lessons from MemoryStore (§4.01)
         relevant_lessons = []
@@ -954,7 +1150,7 @@ def run_dispatch(
             "injected_lesson_count": len(lesson_ids),
             "task_message_ref": f"runs/{state.run_id}/tasks/{tid}/task_message.json",
             "context_token_estimate": 1000,
-            "model_used": model,
+            "model_used": current_model,
         }
         store.save_snapshot(state.run_id, tid, snapshot)
 
@@ -983,7 +1179,7 @@ def run_dispatch(
 
         # Dispatch and execute with assigned executor agent
         send_terminal_mcp(
-            f"\n🚀 [DISPATCH] Executing task '{tid}' with agent `{role}`: {task_desc}"
+            f"\n🚀 [DISPATCH] Executing task '{tid}' with agent `{role}` (model: `{current_model}`): {task_desc}"
         )
         emitter = EventEmitter.get_current()
         if emitter:
@@ -993,17 +1189,55 @@ def run_dispatch(
                 pass
 
         retries = 0
-        max_retries = 2
         passed_all_gates = False
         exec_res = {}
         outputs = {}
+
+        def _check_escalation_before_retry():
+            nonlocal current_model, escalated
+            if retries == 2 and enable_escalation and not escalated and escalation_coder != primary_coder:
+                escalated = True
+                send_terminal_mcp(
+                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted 2 attempts on {active_tier} hardware.\n"
+                    f"   Escalating attempt {retries + 1}/{max_retries} to specialized model: `{escalation_coder}`..."
+                )
+                state.add_event(
+                    "model_escalated",
+                    f"Escalated {role} for task {tid} from {primary_coder} to {escalation_coder} on {active_tier} tier",
+                    "2",
+                )
+                emitter = EventEmitter.get_current()
+                if emitter:
+                    try:
+                        emitter.emit("model_escalated", {
+                            "task_id": tid,
+                            "primary_model": primary_coder,
+                            "escalated_model": escalation_coder,
+                            "tier": active_tier,
+                        })
+                    except Exception:
+                        pass
+
+                # VRAM Management: On 8GB or 16GB tier (or if unload_models is requested),
+                # unload the primary model before loading the escalation model.
+                should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
+                if should_unload and not getattr(state, "keep_models", False):
+                    try:
+                        send_terminal_mcp(
+                            f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for '{escalation_coder}' on {active_tier} tier..."
+                        )
+                        handle_unload_model(current_model)
+                    except Exception as e:
+                        send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
+
+                current_model = escalation_coder
 
         while retries <= max_retries:
             raw_result = stage_chat(
                 role=role,
                 system_prompt=role_sys_prompt,
                 user_content=json.dumps(task_msg, indent=2),
-                model=model,
+                model=current_model,
             )
 
             try:
@@ -1083,8 +1317,9 @@ def run_dispatch(
                         pass
                 retries += 1
                 if retries <= max_retries:
+                    _check_escalation_before_retry()
                     send_terminal_mcp(
-                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with linter critique..."
+                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with linter critique using `{current_model}`..."
                     )
                     task_msg["prior_critique"] = critique
                     task_msg["revision"] = retries
@@ -1095,11 +1330,12 @@ def run_dispatch(
                     )
                     if memory_store:
                         try:
+                            fail_model = f"{current_model} (escalated from {primary_coder})" if escalated else current_model
                             fail_lesson = extract_lesson_from_critique(
                                 critique=critique,
                                 task_file=state.original_prompt[:100],
                                 prompt_content=state.original_prompt,
-                                model=model,
+                                model=fail_model,
                                 lesson_type="hard_failure",
                                 outcome="failed",
                             )
@@ -1136,7 +1372,7 @@ def run_dispatch(
                 "original_prompt": state.original_prompt,
                 "code_files": code_files,
             }
-            rev_model = auditor_model or model
+            rev_model = auditor_model or current_model
             raw_rev = stage_chat(
                 role="reviewer",
                 system_prompt=rev_sys_prompt,
@@ -1165,14 +1401,15 @@ def run_dispatch(
                             iteration=1,
                             verdict="rejected",
                             critique=critique,
-                            reviewer_model=model,
+                            reviewer_model=rev_model,
                         )
                     except Exception:
                         pass
                 retries += 1
                 if retries <= max_retries:
+                    _check_escalation_before_retry()
                     send_terminal_mcp(
-                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with reviewer critique..."
+                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with reviewer critique using `{current_model}`..."
                     )
                     task_msg["prior_critique"] = critique
                     task_msg["revision"] = retries
@@ -1183,11 +1420,12 @@ def run_dispatch(
                     )
                     if memory_store:
                         try:
+                            fail_model = f"{current_model} (escalated from {primary_coder})" if escalated else current_model
                             fail_lesson = extract_lesson_from_critique(
                                 critique=critique,
                                 task_file=state.original_prompt[:100],
                                 prompt_content=state.original_prompt,
-                                model=model,
+                                model=fail_model,
                                 lesson_type="hard_failure",
                                 outcome="failed",
                             )
@@ -1208,7 +1446,7 @@ def run_dispatch(
                         iteration=1,
                         verdict="approved",
                         critique=rev_verdict.get("cognition", {}).get("solution") or "Approved code logic & acceptance criteria.",
-                        reviewer_model=model,
+                        reviewer_model=rev_model,
                     )
                 except Exception:
                     pass
@@ -1225,7 +1463,7 @@ def run_dispatch(
                 "original_prompt": state.original_prompt,
                 "code_files": code_files,
             }
-            sec_model = auditor_model or model
+            sec_model = auditor_model or current_model
             raw_sec = stage_chat(
                 role="security",
                 system_prompt=sec_sys_prompt,
@@ -1249,8 +1487,9 @@ def run_dispatch(
                 state.add_event("code_security_rejected", f"Task {tid} rejected by security gate", "2")
                 retries += 1
                 if retries <= max_retries:
+                    _check_escalation_before_retry()
                     send_terminal_mcp(
-                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with security critique..."
+                        f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with security critique using `{current_model}`..."
                     )
                     task_msg["prior_critique"] = critique
                     task_msg["revision"] = retries
@@ -1261,11 +1500,12 @@ def run_dispatch(
                     )
                     if memory_store:
                         try:
+                            fail_model = f"{current_model} (escalated from {primary_coder})" if escalated else current_model
                             fail_lesson = extract_lesson_from_critique(
                                 critique=critique,
                                 task_file=state.original_prompt[:100],
                                 prompt_content=state.original_prompt,
-                                model=model,
+                                model=fail_model,
                                 lesson_type="hard_failure",
                                 outcome="failed",
                             )
@@ -1287,20 +1527,28 @@ def run_dispatch(
             if retries > 0 and memory_store:
                 try:
                     critique_summary = task_msg.get("prior_critique", "Code remediation")
+                    success_model = f"{current_model} (escalated from {primary_coder})" if escalated else current_model
                     new_lesson = extract_lesson_from_critique(
                         critique=critique_summary,
                         task_file=state.original_prompt[:100],
                         prompt_content=state.original_prompt,
-                        model=model,
+                        model=success_model,
                         lesson_type="solved_pattern",
                         outcome="approved",
                     )
                     lid = memory_store.insert_lesson(new_lesson)
-                    send_terminal_mcp(f"🎉 [MEMORY] Captured solved_pattern lesson '{lid}' after successful remediation")
+                    send_terminal_mcp(f"🎉 [MEMORY] Captured solved_pattern lesson '{lid}' after successful remediation with {success_model}")
                     state.add_event("lesson_captured", f"Captured solved_pattern lesson {lid}", "3")
                 except Exception:
                     pass
             break
+
+        # If on 8GB tier and model was escalated, unload it after task completion to clear VRAM
+        if escalated and active_tier == "8gb" and not getattr(state, "keep_models", False):
+            try:
+                handle_unload_model(escalation_coder)
+            except Exception:
+                pass
 
         state.tasks[tid]["retries"] = retries
         if is_code_output and not passed_all_gates:
@@ -1594,6 +1842,11 @@ def run_pipeline(
     tier: Optional[str] = None,
     auditor_model: Optional[str] = None,
     dynamic_auditor: bool = False,
+    coder_model: Optional[str] = None,
+    escalation_model: Optional[str] = None,
+    no_escalation: bool = False,
+    unload_models: bool = False,
+    keep_models: bool = False,
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
     if not run_id:
@@ -1601,11 +1854,6 @@ def run_pipeline(
 
     if store is None:
         store = ContextStore()
-
-    state = PipelineState(run_id=run_id, original_prompt=prompt)
-    state.builder_model = model
-    state.auditor_model = auditor_model
-    store.save_state(run_id, state.to_dict())
 
     effective_tier = tier
     if not effective_tier:
@@ -1623,11 +1871,24 @@ def run_pipeline(
             except Exception:
                 effective_tier = "8gb"
 
+    state = PipelineState(run_id=run_id, original_prompt=prompt)
+    state.builder_model = model
+    state.auditor_model = auditor_model
+    state.tier = effective_tier
+    state.coder_model = coder_model
+    state.escalation_model = escalation_model
+    state.no_escalation = no_escalation
+    state.keep_models = keep_models
+    # On 8GB tier (laptops), automatically enable model unloading between stages unless keep_models is explicitly passed
+    state.unload_models = unload_models or (effective_tier == "8gb" and not keep_models)
+    store.save_state(run_id, state.to_dict())
+
+    resolved_coder = coder_model or get_default_model("coder", tier=effective_tier)
     models_dict = {
         "default": model,
         "builder": model,
         "author": model,
-        "coder": model,
+        "coder": resolved_coder,
         "sysadmin": model,
         "architect": model,
         "orchestrator": model,
@@ -1677,6 +1938,13 @@ def run_pipeline(
                 state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
                 break
 
+            # VRAM Management: unload prior models between stages on 8GB tier or when requested
+            if state.unload_models and not state.keep_models:
+                try:
+                    handle_unload_model()
+                except Exception:
+                    pass
+
             # Dynamic Auditor Resolution from Orchestrator's annotated plan
             if (not auditor_model or dynamic_auditor) and state.messages.get("annotated_plan"):
                 loaded_plan = store.load(f"runs/{state.run_id}/messages/annotated_plan.json") if isinstance(state.messages.get("annotated_plan"), str) else state.messages.get("annotated_plan")
@@ -1684,7 +1952,7 @@ def run_pipeline(
                     annotated_plan=loaded_plan,
                     explicit_auditor=auditor_model if not dynamic_auditor else None,
                     builder_model=model,
-                    fallback_auditor="qwen3:8b" if (tier == "24gb" or dynamic_auditor) else None,
+                    fallback_auditor="qwen3:8b" if (effective_tier == "24gb" or dynamic_auditor) else None,
                 )
                 if resolved and resolved != current_effective_auditor:
                     current_effective_auditor = resolved
@@ -1705,7 +1973,7 @@ def run_pipeline(
                 current_phase_model = current_effective_auditor or model
                 next_phase = phase_fn(state, store, model=current_phase_model)
             elif state.current_phase == "dispatch":
-                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor)
+                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor, tier=effective_tier)
             else:
                 next_phase = phase_fn(state, store, model=model)
 
@@ -1739,6 +2007,11 @@ def resume_pipeline(
     tier: Optional[str] = None,
     auditor_model: Optional[str] = None,
     dynamic_auditor: bool = False,
+    coder_model: Optional[str] = None,
+    escalation_model: Optional[str] = None,
+    no_escalation: bool = False,
+    unload_models: bool = False,
+    keep_models: bool = False,
 ) -> dict:
     """Resume an aborted or in-flight pipeline run from state.json."""
     if store is None:
@@ -1746,6 +2019,20 @@ def resume_pipeline(
 
     state_dict = store.load(f"runs/{run_id}/state.json")
     state = PipelineState.from_dict(state_dict)
+    if tier:
+        state.tier = tier
+    if coder_model:
+        state.coder_model = coder_model
+    if escalation_model:
+        state.escalation_model = escalation_model
+    if no_escalation:
+        state.no_escalation = no_escalation
+    if keep_models:
+        state.keep_models = keep_models
+    if unload_models or (state.tier == "8gb" and not state.keep_models):
+        state.unload_models = True
+
+    effective_tier = state.tier
 
     emitter = None
     try:
@@ -1769,13 +2056,20 @@ def resume_pipeline(
                 state.add_event("unknown_phase", f"No handler for phase: {state.current_phase}", "3")
                 break
 
+            # VRAM Management: unload prior models between stages on 8GB tier or when requested
+            if state.unload_models and not state.keep_models:
+                try:
+                    handle_unload_model()
+                except Exception:
+                    pass
+
             if (not auditor_model or dynamic_auditor) and state.messages.get("annotated_plan"):
                 loaded_plan = store.load(f"runs/{state.run_id}/messages/annotated_plan.json") if isinstance(state.messages.get("annotated_plan"), str) else state.messages.get("annotated_plan")
                 resolved = resolve_auditor_model(
                     annotated_plan=loaded_plan,
                     explicit_auditor=auditor_model if not dynamic_auditor else None,
                     builder_model=model,
-                    fallback_auditor="qwen3:8b" if (tier == "24gb" or dynamic_auditor) else None,
+                    fallback_auditor="qwen3:8b" if (effective_tier == "24gb" or dynamic_auditor) else None,
                 )
                 if resolved and resolved != current_effective_auditor:
                     current_effective_auditor = resolved
@@ -1788,7 +2082,7 @@ def resume_pipeline(
                 current_phase_model = current_effective_auditor or model
                 next_phase = phase_fn(state, store, model=current_phase_model)
             elif state.current_phase == "dispatch":
-                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor)
+                next_phase = phase_fn(state, store, model=model, auditor_model=current_effective_auditor, tier=effective_tier)
             else:
                 next_phase = phase_fn(state, store, model=model)
 
@@ -1821,6 +2115,9 @@ def main():
     parser.add_argument("--resume", metavar="RUN_ID", help="Resume an aborted run")
     parser.add_argument("--tier", choices=["8gb", "16gb", "24gb"], default=None, help="Hardware tier (8gb, 16gb, 24gb)")
     parser.add_argument("--model", default=None, help="Ollama model to use across pipeline stages (default: winter-prime:<tier> or winter-prime:latest)")
+    parser.add_argument("--coder-model", default=None, help="Explicit coder model for dispatch stage (default: resolved from tier/task)")
+    parser.add_argument("--escalation-model", default=None, help="Model to escalate to on attempt 3 if primary coder fails verification (default: tier-resolved)")
+    parser.add_argument("--no-escalation", action="store_true", default=False, help="Disable failure model escalation and retain strict single-model retry")
     parser.add_argument("--auditor-model", default=None, help="Auditor model for Reviewer and Security stages (Dual-Model mode)")
     parser.add_argument("--dual-model", action="store_true", default=False, help="Enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: dynamic/qwen3:8b)")
     parser.add_argument("--dynamic-auditor", action="store_true", default=False, help="Enable dynamic auditor model selection by Orchestrator")
@@ -1849,7 +2146,15 @@ def main():
             else:
                 selected_model = "winter-prime:latest"
 
-    kwargs = {"model": selected_model, "tier": args.tier}
+    kwargs = {
+        "model": selected_model,
+        "tier": args.tier,
+        "coder_model": args.coder_model,
+        "escalation_model": args.escalation_model,
+        "no_escalation": args.no_escalation,
+        "unload_models": args.unload_models,
+        "keep_models": args.keep_models,
+    }
     if auditor_model:
         kwargs["auditor_model"] = auditor_model
     if dynamic_auditor:

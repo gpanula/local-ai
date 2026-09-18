@@ -116,6 +116,7 @@ class PipelineStepper(Widget):
         self.iteration = getattr(state, "active_iteration_idx", getattr(state, "current_iteration_num", 1))
         self.max_retries = state.max_retries
         self.outcome = state.outcome
+        self.orchestrator_bypassed = getattr(state, "orchestrator_bypassed", False)
         self.refresh_display()
 
     def refresh_display(self) -> None:
@@ -147,7 +148,10 @@ class PipelineStepper(Widget):
             prefix = "▶ " if is_selected else ""
             suffix = " ◀" if is_selected else ""
 
-            if is_finished or i < curr_idx:
+            if key == "orchestrator" and getattr(self, "orchestrator_bypassed", False):
+                badge = f"{prefix}[⏭ Bypassed]{suffix}"
+                style = "bold white on cyan" if is_selected else "dim cyan"
+            elif is_finished or i < curr_idx:
                 badge = f"{prefix}[✓ {label}]{suffix}"
                 style = "bold white on green" if is_selected else "green"
             elif i == curr_idx:
