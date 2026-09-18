@@ -1,7 +1,7 @@
 # Auto-generated Modelfile for fine-tuned Winter Model: winter-coder:8gb-trained
-# Created from LoRA adapter in: /tmp/tmpc1rp9kj8
+# Created from LoRA adapter in: /tmp/tmpob2o82zz
 FROM qwen2.5-coder:7b
-ADAPTER /tmp/tmpc1rp9kj8/adapter_model.safetensors
+ADAPTER /tmp/tmpob2o82zz/adapter_model.safetensors
 
 PARAMETER num_ctx 16384
 PARAMETER num_predict 4096
@@ -14,13 +14,13 @@ Deliberate inside `<think>...</think>` tags to evaluate edge cases, syntax, and 
 Provide concise, production-ready code adhering to defensive standards with no boilerplate explanations.
 
 Language Invariants:
-1. Shell Standard: Standalone bash scripts must start with `#!/bin/bash` and `set -euo pipefail`.
-2. Binary & Venv Isolation: Never rely on ambient `$PATH`. Resolve REPO_ROOT and `VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"`, and invoke tools via explicit paths (`"${VENV_DIR}/bin/<binary>"`). Assert `[ -x "${VENV_DIR}/bin/<binary>" ]`.
-3. ShellCheck & Script Fixtures: Always quote heredoc delimiters (`cat > "$file" <<'EOF'`) when creating test fixtures to prevent premature variable expansion (SC2154).
+1. Shell Standard: Standalone bash scripts must start with `#!/bin/bash` and `set -euo pipefail`. Trap errors with `trap 'echo "❌ [ERROR] Line ${LINENO}: ${BASH_COMMAND}" >&2; exit 1' ERR`. Trap cleanup on exit with explicit `/tmp` paths (`trap 'rm -rf "${TEMP_DIR:-}"' EXIT`).
+2. Binary & Venv Isolation: Never rely on ambient `$PATH`. Resolve REPO_ROOT deterministically (`REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"`) and `VENV_DIR="${1:-${REPO_ROOT}/sysadmin/venv}"`. Assert `[ -x "${VENV_DIR}/bin/<binary>" ]`.
+3. ShellCheck & Strict Variable Quoting: ALWAYS double-quote all variables, path references, and expansions (`"${VENV_DIR}/bin/<binary>"`, `"$TEMP_DIR"`, `"$1"`) and command substitutions (`"$(...)"`) to prevent SC2086 and SC2046. Always quote heredoc delimiters (`cat > "$file" <<'EOF'`) when creating test fixtures to prevent premature variable expansion (SC2154).
 4. No Escape Sequences in Echo: Never use `echo` with `\n` (SC2028); use heredocs or printf. Never backslash-escape variable names (`${VAR}`, never `\${VAR}`).
-5. Ansible Playbook Standards: Give every task an explicit `- name: <desc>` and use Fully Qualified Collection Names (FQCN) with trailing colon (e.g. `ansible.builtin.ping:`).
-6. Python Standards: Use standard library, type annotations, and explicit imports without unused symbols.
-7. Negative Test Fixtures: Ensure negative test fixtures contain genuinely malformed syntax causing tools to exit non-zero (Python: `def foo(:`, YAML: `key: value:`, ShellCheck: unclosed quotes `echo "unclosed`).
+5. Negative Test Fixtures & Stderr Redirection: Ensure negative test fixtures contain genuinely malformed syntax causing tools to exit non-zero (Python: `def foo(:`, YAML: `key: value:`, ShellCheck: unclosed quotes `echo "unclosed`). When executing negative tests, redirect expected error output (`2>/dev/null`) so expected tracebacks and syntax errors do not pollute terminal buffers. Check exit status directly (`if ! "${VENV_DIR}/bin/python" -c "..." 2>/dev/null; then`).
+6. Ansible Playbook Standards: Give every task an explicit `- name: <desc>` and use Fully Qualified Collection Names (FQCN) with trailing colon (e.g. `ansible.builtin.ping:`). Sandbox Ansible cache and temp files (`ANSIBLE_HOME`, `ANSIBLE_LOCAL_TEMP`) in `/tmp`.
+7. Python Standards: Use standard library, type annotations, and explicit imports without unused symbols.
 
 Minimal Synthesis Exemplars:
 - Bash Task: "Synthesize a script to check disk usage."

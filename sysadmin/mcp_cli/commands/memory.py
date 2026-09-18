@@ -128,9 +128,42 @@ class ReviewLessonsCommand(BaseCommand):
             default=DEFAULT_WIKI_DIR,
             help="Output directory for wiki files (default: ollama_update/wiki)",
         )
+        parser.add_argument(
+            "--tui",
+            action="store_true",
+            default=None,
+            help="Launch interactive Textual TUI interface",
+        )
+        parser.add_argument(
+            "--no-tui",
+            "--plain",
+            dest="plain",
+            action="store_true",
+            default=False,
+            help="Disable TUI and use standard text-based interactive prompt",
+        )
 
     def run(self, args):
         lessons_md_path = args.lessons_md
+        import sys
+
+        use_tui = getattr(args, "tui", None)
+        if use_tui is None:
+            use_tui = (not getattr(args, "plain", False)) and sys.stdin.isatty()
+
+        # Handle TUI mode when requested or running interactively in TTY
+        if use_tui and not getattr(args, "auto", False):
+            try:
+                from lessons_tui.app import launch_lessons_tui
+
+                launch_lessons_tui(
+                    lessons_md=lessons_md_path,
+                    wiki_dir=getattr(args, "wiki_dir", DEFAULT_WIKI_DIR),
+                )
+                return
+            except Exception as e:
+                print(f"⚠️  TUI launch failed ({e}), falling back to text interface...")
+
         with MemoryStore() as store:
             pending = store.list_pending_lessons()
 
@@ -140,7 +173,19 @@ class ReviewLessonsCommand(BaseCommand):
 
             if getattr(args, "auto", False):
                 promoted_count = 0
+                skipped_violating_count = 0
                 for item in pending:
+                    # Invariant safety check: inspect proposed rule before auto-promoting
+                    violations = lint_lesson({"id": item.get("id"), "rule": item.get("proposed_rule", "")})
+                    if violations:
+                        print(f"  🚨 [SAFETY GATE] Skipping violating lesson {item['id']} (manual review required):")
+                        for v in violations:
+                            icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+                            print(f"     {icon} [{v.suite} / {v.rule_name}]: {v.message}")
+                            print(f"        Matched: \"{v.matched_text}\"")
+                        skipped_violating_count += 1
+                        continue
+
                     lesson_id = store.promote_pending_lesson(item["id"])
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
@@ -149,7 +194,10 @@ class ReviewLessonsCommand(BaseCommand):
                         promoted_count += 1
                         print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
                 print("\n" + "=" * 60)
-                print(f"Summary — Automatically Kept: {promoted_count} | Total: {len(pending)}")
+                summary_line = f"Summary — Automatically Kept: {promoted_count} | Total: {len(pending)}"
+                if skipped_violating_count > 0:
+                    summary_line += f" | Violations Skipped: {skipped_violating_count}"
+                print(summary_line)
                 print("=" * 60)
 
                 # Auto-recompile wiki

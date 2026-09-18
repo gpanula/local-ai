@@ -76,7 +76,9 @@ localai-gpu() {
 alias localai-mcp-config="cat ~/.gemini/config/mcp_config.json | python3 -m json.tool"
 
 # AI Memory & Lessons Management
-alias localai-lessons="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py review-lessons"
+alias localai-lessons="${LOCAL_AI_DIR}/bin/localai-lessons"
+alias localai-lessons-tui="${LOCAL_AI_DIR}/bin/localai-lessons --tui"
+alias localai-lessons-plain="${LOCAL_AI_DIR}/bin/localai-lessons --plain"
 alias localai-lessons-auto="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py review-lessons --auto"
 alias localai-audit="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py audit-lessons"
 alias localai-wiki="python3 ${LOCAL_AI_DIR}/sysadmin/mcp_client.py compile-wiki"

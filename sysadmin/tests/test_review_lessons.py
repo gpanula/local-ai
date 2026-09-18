@@ -163,3 +163,33 @@ def test_mixed_actions_summary_counts(cmd, capsys, monkeypatch):
         assert len(store.list_lessons()) == 2  # kept + modified
     out = capsys.readouterr().out
     assert "Kept: 1 | Modified: 1 | Discarded: 1 | Skipped: 1" in out
+
+
+def test_auto_skips_violating_lessons(cmd, capsys):
+    """Test that --auto skips lessons violating invariant safety suites."""
+    command, args, db_path, lessons_md = cmd
+    args.auto = True
+
+    with MemoryStore(db_path) as store:
+        # Valid pending lesson
+        store.stage_pending_lesson(_pending(id="pending-valid-01", proposed_rule="Always use explicit variable quoting."))
+        # Violating pending lesson (e.g. anti-write_file)
+        store.stage_pending_lesson(_pending(id="pending-violating-02", proposed_rule="Avoid using write_file for scripts."))
+
+    command.run(args)
+
+    with MemoryStore(db_path) as store:
+        # Valid lesson promoted
+        active = store.list_lessons()
+        assert len(active) == 1
+        assert active[0]["rule"] == "Always use explicit variable quoting."
+        # Violating lesson still in pending queue
+        pending = store.list_pending_lessons()
+        assert len(pending) == 1
+        assert pending[0]["id"] == "pending-violating-02"
+
+    out = capsys.readouterr().out
+    assert "Automatically Kept: 1" in out
+    assert "Violations Skipped: 1" in out
+    assert "🚨 [SAFETY GATE] Skipping violating lesson pending-violating-02" in out
+
