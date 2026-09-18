@@ -91,7 +91,70 @@ Context window allocation directly consumes VRAM via the KV cache:
 
 ---
 
-## 5. Operational Setup & Ollama Configuration
+## 5. Dynamic Auditor Selection: Open-Ended Critic Orchestration
+
+Rather than hardcoding a static Auditor model across every task, the pipeline supports **dynamic, role-driven Auditor selection**. The Architect and Orchestrator evaluate the task domain, risk vectors, and acceptance criteria to assign an optimal Auditor persona:
+
+```
+┌───────────────────────────────┐
+│        ARCHITECT (Plan)       │
+│  auditor_hint: "adversarial"  │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌───────────────────────────────┐
+│     ORCHESTRATOR (Annotated)  │
+│  auditor_strategy:            │
+│    "balanced" | "adversarial" │
+│    | "algorithmic"            │
+└──────────────┬────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  PIPELINE DYNAMIC ROUTER                        │
+│                                                                 │
+│  • "balanced"    -> qwen3:8b (General PRs, fast review)         │
+│  • "adversarial" -> deepseek-r1:8b (Security, root, zero-trust) │
+│  • "algorithmic" -> deepseek-coder-v2:16b (AST, math logic)     │
+│                                                                 │
+│  [Enforces Anti-Self-Review Invariant: auditor != builder]      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Strategy Mapping
+1. **`"balanced"` (`qwen3:8b`)**: High throughput (~98 t/s), broad contextual reasoning, perfect for general feature implementation, bug fixes, and documentation.
+2. **`"adversarial"` (`deepseek-r1:8b`)**: Deep `<think>` chain-of-thought, zero-trust mindset, strict STRIDE threat modeling. Mandatory for tasks with domain tags `Security Policy`, `Binary Isolation`, or scripts modifying system state.
+3. **`"algorithmic"` (`deepseek-coder-v2:16b`)**: DeepSeek MoE architecture (2.4B active / 16B total). Ideal for complex mathematical algorithms, data structures, and parser AST analysis.
+
+### Anti-Self-Review Invariant (Rule `R-AUDIT-01`)
+The deterministic pre-filter (`sysadmin/validator.py`) strictly enforces that the Auditor cannot be identical to the active Builder model (`auditor_model != builder_model`). If an agent attempts to assign the Builder as its own Auditor, the plan is rejected (`rejected_rules`) and returned for correction.
+
+### CLI & MCP Usage
+
+**From the CLI:**
+```bash
+# Enable 24GB Dual-Model residency with dynamic auditor selection:
+python3 sysadmin/pipeline.py sysadmin/prompts/hello_world_test.md --dual-model
+
+# Explicitly pin a specific auditor (overrides dynamic selection):
+python3 sysadmin/pipeline.py sysadmin/prompts/hello_world_test.md --dual-model --auditor-model deepseek-r1:8b
+```
+
+**From MCP (`terminal-mcp` / Antigravity):**
+```json
+{
+  "name": "run_pipeline",
+  "arguments": {
+    "prompt": "sysadmin/prompts/hello_world_test.md",
+    "dual_model": true,
+    "dynamic_auditor": true
+  }
+}
+```
+
+---
+
+## 6. Operational Setup & Ollama Configuration
 
 ### Step 1: Ensure Ollama Concurrency Environment Variables
 To keep two models concurrently resident in VRAM, Ollama must be configured to permit multi-model residency. 
@@ -146,10 +209,11 @@ qwen3:8b             f6e5d4c3b2a1    5.2 GB    100% GPU     Forever
 
 ---
 
-## 6. Modelfile Implementation References
+## 7. Modelfile Implementation References
 
 * **Builder (16GB Prime)**: [`16gb/Modelfile-prime-qwen14b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/16gb/Modelfile-prime-qwen14b)
 * **Auditor Option A (Qwen3 8GB Reviewer)**: [`8gb/Modelfile-reviewer-qwen8b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-reviewer-qwen8b)
 * **Auditor Option B (DeepSeek-R1 8GB Security)**: [`8gb/Modelfile-security-deepseek8b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-security-deepseek8b)
 * **Single-Model Fallback (24GB Prime 32B)**: [`24gb/Modelfile-prime-qwen32b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/24gb/Modelfile-prime-qwen32b)
 * **Model Selection Rationale**: [`WINTER_PRIME_MODEL_SELECTION.md`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/WINTER_PRIME_MODEL_SELECTION.md)
+

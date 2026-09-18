@@ -11,6 +11,7 @@ from validator import (
     check_dag,
     check_prompt_fidelity,
     check_cognition_substance,
+    check_auditor_strategy,
     validate_annotated_plan,
     validate_code_output,
     load_tool_registry,
@@ -269,4 +270,46 @@ def test_validate_code_output_ignore_stdout():
     verdict = validate_code_output(task, outputs)
     assert verdict["verdict"] == "approved"
     assert len(verdict["violations"]) == 0
+
+
+def test_check_auditor_strategy_valid():
+    """Verify valid auditor strategies pass with zero violations."""
+    msg = {"auditor_strategy": "adversarial", "auditor_model": "deepseek-r1:8b"}
+    violations = check_auditor_strategy(msg, builder_model="winter-prime:16gb")
+    assert len(violations) == 0
+
+    msg_balanced = {"auditor_strategy": "balanced", "auditor_model": "qwen3:8b"}
+    assert len(check_auditor_strategy(msg_balanced, builder_model="winter-prime:16gb")) == 0
+
+    msg_algo = {"auditor_strategy": "algorithmic"}
+    assert len(check_auditor_strategy(msg_algo, builder_model="winter-prime:16gb")) == 0
+
+
+def test_check_auditor_strategy_invalid():
+    """Verify unknown auditor strategy triggers R-AUDIT-02 violation."""
+    msg = {"auditor_strategy": "unrestricted"}
+    violations = check_auditor_strategy(msg, builder_model="winter-prime:16gb")
+    assert len(violations) == 1
+    assert violations[0]["type"] == "invalid_auditor_strategy"
+    assert violations[0]["rule_ref"] == "R-AUDIT-02"
+
+
+def test_check_auditor_strategy_anti_self_review():
+    """Verify assigning builder model as auditor triggers R-AUDIT-01 anti-self-review violation."""
+    msg = {"auditor_strategy": "balanced", "auditor_model": "winter-prime:16gb"}
+    violations = check_auditor_strategy(msg, builder_model="winter-prime:16gb")
+    assert len(violations) == 1
+    assert violations[0]["type"] == "anti_self_review_violation"
+    assert violations[0]["rule_ref"] == "R-AUDIT-01"
+
+
+def test_validate_annotated_plan_anti_self_review(valid_plan, frozen_prompt):
+    """Verify validate_annotated_plan rejects plan if auditor matches builder."""
+    plan = copy.deepcopy(valid_plan)
+    plan["auditor_strategy"] = "balanced"
+    plan["auditor_model"] = "winter-prime:16gb"
+    verdict = validate_annotated_plan(plan, frozen_prompt, builder_model="winter-prime:16gb")
+    assert verdict["verdict"] == "rejected_rules"
+    assert any(v["type"] == "anti_self_review_violation" for v in verdict["violations"])
+
 

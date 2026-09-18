@@ -515,10 +515,58 @@ def check_cognition_substance(msg: dict) -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Auditor Strategy & Anti-Self-Review Checks (Dynamic Dual-Model)
+# ---------------------------------------------------------------------------
+
+VALID_AUDITOR_STRATEGIES: Set[str] = {"balanced", "adversarial", "algorithmic"}
+
+
+def check_auditor_strategy(msg: dict, builder_model: Optional[str] = None) -> List[dict]:
+    """Validate optional auditor_strategy and auditor_model fields, including Anti-Self-Review."""
+    violations = []
+    strat = msg.get("auditor_strategy")
+    if strat is not None:
+        if not isinstance(strat, str) or strat.strip().lower() not in VALID_AUDITOR_STRATEGIES:
+            violations.append(
+                _violation(
+                    "",
+                    "invalid_auditor_strategy",
+                    f"Field 'auditor_strategy' must be one of {sorted(list(VALID_AUDITOR_STRATEGIES))}, got {strat!r}",
+                    rule_ref="R-AUDIT-02",
+                    pillar_ref="3",
+                )
+            )
+
+    auditor_model = msg.get("auditor_model")
+    if auditor_model is not None:
+        if not isinstance(auditor_model, str) or not auditor_model.strip():
+            violations.append(
+                _violation(
+                    "",
+                    "schema_error",
+                    "Field 'auditor_model' must be a non-empty string when present",
+                    pillar_ref="3",
+                )
+            )
+        elif builder_model and auditor_model.strip() == builder_model.strip():
+            violations.append(
+                _violation(
+                    "",
+                    "anti_self_review_violation",
+                    f"Auditor model '{auditor_model}' must not match Builder model '{builder_model}' (Anti-Self-Review Rule R-AUDIT-01)",
+                    rule_ref="R-AUDIT-01",
+                    pillar_ref="2",
+                )
+            )
+
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # Main Orchestrator Function (§2.4)
 # ---------------------------------------------------------------------------
 
-def validate_annotated_plan(msg: dict, frozen_prompt: str) -> dict:
+def validate_annotated_plan(msg: dict, frozen_prompt: str, builder_model: Optional[str] = None) -> dict:
     """Run all deterministic checks. Return a ReviewVerdict dict matching §3.4.
 
     If all checks pass, return verdict="approved" with empty violations list.
@@ -538,6 +586,7 @@ def validate_annotated_plan(msg: dict, frozen_prompt: str) -> dict:
     all_violations.extend(check_dag(msg))
     all_violations.extend(check_prompt_fidelity(msg, frozen_prompt))
     all_violations.extend(check_cognition_substance(msg))
+    all_violations.extend(check_auditor_strategy(msg, builder_model=builder_model))
 
     # Assign violation IDs
     for idx, v in enumerate(all_violations, start=1):
