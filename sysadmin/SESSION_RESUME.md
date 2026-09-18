@@ -1,7 +1,7 @@
 # Local AI Multi-Agent Pipeline: Session Summary & Resume Guide
 
-**Date**: September 16, 2026  
-**Status**: Arc-Orc-Rev Pipeline Operational (6 Canonical Roles); Live Textual TUI (`pipeline_tui`) Integrated with 6-Role Stepper, Code Synthesis Viewer, and Real-Time Thinking Stream; Lesson Invariant Linter & Multi-Store Safety Verifier Active; Raw `<think>` Deliberation Re-Enabled for Non-Execution Prompts; Context Window Lessons Fix; Resilient Run Discovery & Fault Detection; 295 Unit/Integration Tests Passing  
+**Date**: September 18, 2026  
+**Status**: Arc-Orc-Rev Pipeline Operational with Dynamic Dual-Model Critic Selection (`--dual-model`, `--dynamic-auditor`); 24GB Multi-Model Residency Architecture Active; Deterministic Check 10 Anti-Self-Review Invariant Enforced; PTY Sentinel Exit Code & Rule 2 Safety Override Verified; Fail-Fast Dispatch Verification Gates Enforced; Self-Contained Run Capture & Query-Once Context Caching Active; 306 Unit/Integration Tests Passing Cleanly  
 **Active Branch**: `feat/arc-orc-rev-pipeline`  
 
 ---
@@ -96,9 +96,40 @@
 - **Shell Aliases ([`sysadmin/shell_aliases.sh`](./shell_aliases.sh))**:
   - Added `localai-lint-lessons` and `localai-lint-lessons-fix`.
 
-### 10. Verification & Knowledge Graph
-- **295 Passing Unit/Integration Tests**: All tests across `sysadmin/tests/` passing (stepper, replay, discovery, memory, code gates, runner, CLI tier parsing, lesson linter).
-- **AST Knowledge Graph Synchronized**: Updated via `graphify update .` (2,084 nodes, 3,411 edges, 148 communities).
+### 10. Dynamic Dual-Model Critic Selection (24GB Residency)
+- **Architect & Orchestrator Dynamic Selection**:
+  - Added support for `auditor_strategy` (`"balanced"` ➔ `qwen3:8b`, `"adversarial"` ➔ `deepseek-r1:8b`, `"algorithmic"` ➔ `deepseek-coder-v2:16b`) and `auditor_model`.
+  - Updated role prompts: [`architect.md`](./prompts/roles/architect.md) and [`orchestrator.md`](./prompts/roles/orchestrator.md).
+- **Deterministic Check 10 & Anti-Self-Review Invariant ([`validator.py`](./validator.py))**:
+  - Validates `auditor_strategy` values.
+  - Enforces `Rule R-AUDIT-01`: the critic cannot be identical to the builder model (`auditor_model != builder_model`).
+- **CLI & MCP Tooling ([`pipeline.py`](./pipeline.py), [`mcp_ollama/server.py`](./mcp_ollama/server.py))**:
+  - Added `--dual-model` (auto-resolves 24GB tier) and `--dynamic-auditor` CLI flags.
+  - Updated MCP server tool `run_pipeline` with `dual_model` and `dynamic_auditor` parameters.
+- **Architecture Documentation ([`DUAL_MODEL_24GB_SETUP_GUIDE.md`](../ollama_update/customized_models/DUAL_MODEL_24GB_SETUP_GUIDE.md))**:
+  - Added Section 5 detailing Dynamic Auditor Selection, strategy mappings, VRAM allocation math, and concurrency configurations.
+
+### 11. Pipeline Live Execution Safety & Error Gate Enforcement
+- **Accurate PTY Return Code Extraction ([`mcp_ollama/server.py`](./mcp_ollama/server.py))**:
+  - Updated `_execute_in_terminal_mcp` to execute commands with a sentinel exit marker (`__LOCALAI_EXIT:$?__`), capturing the real subshell return code rather than hardcoding `0`.
+  - Implemented `AGENTS.md` Rule 2 safety override: buffer inspection forces a non-zero exit code if unhandled error markers (`❌ [ERROR]`, `Traceback`, `command not found`, `No such file or directory`) exist in stdout.
+- **Fail-Fast Verification Gates & Abort Handling ([`pipeline.py`](./pipeline.py))**:
+  - If a task fails pre-execution code gates after retries, `run_dispatch` marks `state.status = "aborted"` and halts dispatch immediately.
+  - Added dual-channel script execution validation checking both exit code and diagnostic error signatures.
+  - Added post-dispatch sanity check to prevent false-positive completion if any DAG tasks failed.
+
+### 12. Self-Contained Run Capture & Query-Once Context Window Caching
+- **Self-Contained Run Capture ([`mcp_core/events.py`](./mcp_core/events.py), [`pipeline.py`](./pipeline.py))**:
+  - `pipeline_start` records explicit `context_limits` mapping each model to its true context size.
+  - Replay and inspection directly read stored ground-truth values without requiring live Ollama queries.
+- **Query-Once-and-Remember Model Context Cache ([`pipeline_tui/state.py`](./pipeline_tui/state.py))**:
+  - Stored `model_context_limits` dictionary in `PipelineState`.
+  - `get_context_limit(stage)` checks captured event data first, cached model limits second, queries Ollama once for newly encountered models third, and falls back to tier default fourth.
+  - Fixed `ContextWindowDrawer` mount NameError bug and enabled exact context window limit display across 16GB and 24GB tiers.
+
+### 13. Verification & Knowledge Graph
+- **306 Passing Unit/Integration Tests**: All tests across `sysadmin/tests/` passing cleanly in ~22s.
+- **AST Knowledge Graph Synchronized**: Updated via `graphify update .` (2,132 nodes, 3,498 edges, 154 communities).
 
 ---
 
