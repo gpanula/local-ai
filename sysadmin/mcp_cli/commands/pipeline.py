@@ -153,11 +153,15 @@ class PipelineRunCommand(BaseCommand):
         parser.add_argument("--no-orchestrate", action="store_true", help="Skip the initial Orchestrator planning phase")
         parser.add_argument("--no-lint", action="store_true", help="Skip pre-flight linting step")
         parser.add_argument("--bootstrap", action="store_true", help="Flag task as bootstrap (tolerates missing host tools before installation)")
-        parser.add_argument("--max-retries", type=int, default=3, help="Max revision cycles if reviewer rejects (default: 3)")
+        parser.add_argument("--retry-budget", "--max-retries", dest="max_retries", type=int, default=3, help="Max revision cycles / retry budget (min: 1, max: 15, default: 3)")
         parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
         parser.add_argument("--dry-run", action="store_true", help="Stop after review without executing")
 
     def run(self, args):
+        if getattr(args, "max_retries", None) is not None:
+            if not (1 <= args.max_retries <= 15):
+                raise ValueError(f"Retry budget (--retry-budget/--max-retries) must be between 1 and 15, got: {args.max_retries}")
+
         valid_path = validate_workspace_path(args.file, "prompt file")
         with open(valid_path, "r", encoding="utf-8") as f:
             prompt_content = f.read()

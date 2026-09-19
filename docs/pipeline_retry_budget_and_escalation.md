@@ -117,8 +117,9 @@ The retry and escalation behavior can be configured via CLI flags:
 
 | Flag | Default | Effect |
 | :--- | :--- | :--- |
+| `--retry-budget, --max-retries <N>` | Phase defaults (`3` / `2`) | Sets configurable retry budget across stages & tasks (bounded: `min=1`, `max=15`). |
 | `--tier {8gb,16gb,24gb}` | Auto-detected | Sets default and escalation models tailored to GPU capacity. |
-| `--no-escalation` | `False` | Disables model promotion; caps task retries to 2 on the primary model. |
+| `--no-escalation` | `False` | Disables model promotion; caps task retries to the configured budget on the primary model. |
 | `--coder-model <name>` | Auto-resolved | Pinned override for the primary coder model across all tasks. |
 | `--escalation-model <name>`| Auto-resolved | Pinned override for the fallback escalation model. |
 | `--unload-models` | `False` | Forces Ollama to unload models after each phase or escalation step. |

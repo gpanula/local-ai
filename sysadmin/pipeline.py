@@ -87,18 +87,30 @@ def resolve_auditor_model(
     return fallback_auditor
 
 
+def validate_retry_budget(val: Any) -> int:
+    """Validate that retry budget is an integer between 1 and 15."""
+    try:
+        ival = int(val)
+    except (ValueError, TypeError):
+        raise ValueError(f"Retry budget must be an integer, got: {val!r}")
+    if not (1 <= ival <= 15):
+        raise ValueError(f"Retry budget must be between 1 and 15, got: {ival}")
+    return ival
+
+
 class PipelineState:
     """Tracks the mutable state of a single pipeline run."""
 
-    def __init__(self, run_id: str, original_prompt: str):
+    def __init__(self, run_id: str, original_prompt: str, retry_budget: Optional[int] = None):
         self.run_id = run_id
         self.original_prompt = original_prompt
         self.status = "running"
         self.current_phase = "architect"
         self.architect_revisions_used = 0
         self.orchestrator_revisions_used = 0
-        self.architect_budget = 3
-        self.orchestrator_budget = 3
+        self.retry_budget: Optional[int] = validate_retry_budget(retry_budget) if retry_budget is not None else None
+        self.architect_budget = self.retry_budget if self.retry_budget is not None else 3
+        self.orchestrator_budget = self.retry_budget if self.retry_budget is not None else 3
         self.messages: Dict[str, Any] = {}
         self.tasks: Dict[str, Any] = {}
         self.events: List[Dict[str, Any]] = []
@@ -121,6 +133,9 @@ class PipelineState:
             "original_prompt": self.original_prompt,
             "architect_revisions_used": self.architect_revisions_used,
             "orchestrator_revisions_used": self.orchestrator_revisions_used,
+            "retry_budget": getattr(self, "retry_budget", None),
+            "architect_budget": getattr(self, "architect_budget", 3),
+            "orchestrator_budget": getattr(self, "orchestrator_budget", 3),
             "current_phase": self.current_phase,
             "messages": {
                 k: f"runs/{self.run_id}/messages/{k}.json" if isinstance(v, dict) else v
@@ -144,11 +159,14 @@ class PipelineState:
         state = cls(
             run_id=data["run_id"],
             original_prompt=data.get("original_prompt", ""),
+            retry_budget=data.get("retry_budget"),
         )
         state.status = data.get("status", "running")
         state.current_phase = data.get("current_phase", "architect")
         state.architect_revisions_used = data.get("architect_revisions_used", 0)
         state.orchestrator_revisions_used = data.get("orchestrator_revisions_used", 0)
+        state.architect_budget = data.get("architect_budget", state.architect_budget)
+        state.orchestrator_budget = data.get("orchestrator_budget", state.orchestrator_budget)
         state.tasks = data.get("tasks", {})
         state.events = data.get("events", [])
         state.messages = data.get("messages", {})
@@ -1091,7 +1109,11 @@ def run_dispatch(
         primary_coder = resolve_coder_model(task, state=state, tier=active_tier, fallback_model=model)
         escalation_coder = resolve_escalation_model(role=role, state=state, tier=active_tier)
         enable_escalation = not getattr(state, "no_escalation", False)
-        max_retries = 3 if (enable_escalation and escalation_coder != primary_coder) else 2
+        configured_budget = getattr(state, "retry_budget", None)
+        if configured_budget is not None:
+            max_retries = configured_budget
+        else:
+            max_retries = 3 if (enable_escalation and escalation_coder != primary_coder) else 2
 
         current_model = primary_coder
         escalated = False
@@ -1199,10 +1221,11 @@ def run_dispatch(
 
         def _check_escalation_before_retry():
             nonlocal current_model, escalated
-            if retries == 2 and enable_escalation and not escalated and escalation_coder != primary_coder:
+            escalation_threshold = 1 if max_retries == 1 else 2
+            if retries == escalation_threshold and enable_escalation and not escalated and escalation_coder != primary_coder:
                 escalated = True
                 send_terminal_mcp(
-                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted 2 attempts on {active_tier} hardware.\n"
+                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted {escalation_threshold} attempt(s) on {active_tier} hardware.\n"
                     f"   Escalating attempt {retries + 1}/{max_retries} to specialized model: `{escalation_coder}`..."
                 )
                 state.add_event(
@@ -1880,8 +1903,12 @@ def run_pipeline(
     no_escalation: bool = False,
     unload_models: bool = False,
     keep_models: bool = False,
+    retry_budget: Optional[int] = None,
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
+    if retry_budget is not None:
+        validate_retry_budget(retry_budget)
+
     if not run_id:
         run_id = generate_run_id()
 
@@ -1904,7 +1931,7 @@ def run_pipeline(
             except Exception:
                 effective_tier = "8gb"
 
-    state = PipelineState(run_id=run_id, original_prompt=prompt)
+    state = PipelineState(run_id=run_id, original_prompt=prompt, retry_budget=retry_budget)
     state.builder_model = model
     state.auditor_model = auditor_model
     state.tier = effective_tier
@@ -1950,7 +1977,7 @@ def run_pipeline(
             prompt=prompt,
             tier=effective_tier,
             models=models_dict,
-            max_retries=3,
+            max_retries=state.retry_budget if getattr(state, "retry_budget", None) is not None else 3,
             context_limits=context_limits,
         )
     except Exception:
@@ -2045,6 +2072,7 @@ def resume_pipeline(
     no_escalation: bool = False,
     unload_models: bool = False,
     keep_models: bool = False,
+    retry_budget: Optional[int] = None,
 ) -> dict:
     """Resume an aborted or in-flight pipeline run from state.json."""
     if store is None:
@@ -2052,6 +2080,10 @@ def resume_pipeline(
 
     state_dict = store.load(f"runs/{run_id}/state.json")
     state = PipelineState.from_dict(state_dict)
+    if retry_budget is not None:
+        state.retry_budget = validate_retry_budget(retry_budget)
+        state.architect_budget = state.retry_budget
+        state.orchestrator_budget = state.retry_budget
     if tier:
         state.tier = tier
     if coder_model:
@@ -2156,7 +2188,21 @@ def main():
     parser.add_argument("--dynamic-auditor", action="store_true", default=False, help="Enable dynamic auditor model selection by Orchestrator")
     parser.add_argument("--keep-models", "--no-unload", dest="keep_models", action="store_true", default=False, help="Keep models loaded in VRAM between stages")
     parser.add_argument("--unload-models", action="store_true", default=False, help="Unload models between stages")
+    parser.add_argument(
+        "--retry-budget",
+        "--max-retries",
+        dest="retry_budget",
+        type=int,
+        default=None,
+        help="Configurable retry budget for all stages (min: 1, max: 15, default: phase defaults [3])",
+    )
     args = parser.parse_args()
+
+    if args.retry_budget is not None:
+        try:
+            validate_retry_budget(args.retry_budget)
+        except ValueError as e:
+            parser.error(str(e))
 
     tier_model_map = {
         "8gb": "winter-prime:8gb",
@@ -2187,6 +2233,7 @@ def main():
         "no_escalation": args.no_escalation,
         "unload_models": args.unload_models,
         "keep_models": args.keep_models,
+        "retry_budget": args.retry_budget,
     }
     if auditor_model:
         kwargs["auditor_model"] = auditor_model

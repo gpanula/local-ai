@@ -20,6 +20,7 @@ from pipeline import (
     resolve_coder_model,
     resolve_escalation_model,
     run_dispatch,
+    validate_retry_budget,
 )
 
 
@@ -164,6 +165,97 @@ class TestModelEscalation(unittest.TestCase):
         self.assertEqual(state.tasks["t-001"]["retries"], 3)
         events = [e["event"] for e in state.events]
         self.assertNotIn("model_escalated", events)
+
+    def test_validate_retry_budget_bounds(self):
+        # Valid bounds (1 to 15)
+        self.assertEqual(validate_retry_budget(1), 1)
+        self.assertEqual(validate_retry_budget(3), 3)
+        self.assertEqual(validate_retry_budget(15), 15)
+        self.assertEqual(validate_retry_budget("5"), 5)
+
+        # Invalid bounds (< 1 or > 15)
+        with self.assertRaises(ValueError):
+            validate_retry_budget(0)
+        with self.assertRaises(ValueError):
+            validate_retry_budget(-2)
+        with self.assertRaises(ValueError):
+            validate_retry_budget(16)
+        with self.assertRaises(ValueError):
+            validate_retry_budget("invalid")
+
+    def test_pipeline_state_retry_budget_propagation(self):
+        # Default behavior
+        default_state = PipelineState("run-default", "Default test")
+        self.assertIsNone(default_state.retry_budget)
+        self.assertEqual(default_state.architect_budget, 3)
+        self.assertEqual(default_state.orchestrator_budget, 3)
+
+        # Custom budget: 1
+        min_state = PipelineState("run-min", "Min test", retry_budget=1)
+        self.assertEqual(min_state.retry_budget, 1)
+        self.assertEqual(min_state.architect_budget, 1)
+        self.assertEqual(min_state.orchestrator_budget, 1)
+
+        # Serialization round-trip
+        data = min_state.to_dict()
+        self.assertEqual(data["retry_budget"], 1)
+        self.assertEqual(data["architect_budget"], 1)
+        self.assertEqual(data["orchestrator_budget"], 1)
+
+        restored = PipelineState.from_dict(data)
+        self.assertEqual(restored.retry_budget, 1)
+        self.assertEqual(restored.architect_budget, 1)
+        self.assertEqual(restored.orchestrator_budget, 1)
+
+        # Custom budget: 15
+        max_state = PipelineState("run-max", "Max test", retry_budget=15)
+        self.assertEqual(max_state.retry_budget, 15)
+        self.assertEqual(max_state.architect_budget, 15)
+        self.assertEqual(max_state.orchestrator_budget, 15)
+
+    @patch("pipeline.handle_unload_model")
+    @patch("pipeline.stage_chat")
+    @patch("pipeline.validate_code_output")
+    def test_dispatch_honors_custom_retry_budget(self, mock_linter, mock_chat, mock_unload):
+        # Set a custom budget of 1 retry (total 2 attempts: attempt 1 primary, attempt 2 escalated)
+        state = PipelineState("run-budget-1", "Budget test", retry_budget=1)
+        state.tier = "8gb"
+        state.messages["annotated_plan"] = {
+            "schema_version": "2.0",
+            "message_type": "annotated_plan",
+            "tasks": [
+                {
+                    "task_id": "t-001",
+                    "assigned_agent": "coder",
+                    "description": "Create quick script",
+                    "tools_required": ["write_file"],
+                    "outputs": ["sysadmin/quick.sh"],
+                }
+            ],
+        }
+
+        mock_linter.return_value = {
+            "verdict": "rejected",
+            "critique": "Linter violation",
+            "violations": [{"type": "ShellCheck", "description": "SC2086"}],
+        }
+        mock_chat.return_value = json.dumps({
+            "schema_version": "2.0",
+            "status": "success",
+            "outputs": {"sysadmin/quick.sh": "echo $VAR"},
+        })
+
+        phase = run_dispatch(state, self.store, model="winter-coder:8gb", tier="8gb")
+
+        self.assertEqual(phase, "aborted")
+        self.assertEqual(state.status, "aborted")
+        # max_retries was 1, so initial attempt + 1 retry = 2 attempts total
+        self.assertEqual(mock_chat.call_count, 2)
+        # Attempt 1 used primary model, Attempt 2 escalated model
+        mock_chat.assert_has_calls([
+            call(role="coder", system_prompt=unittest.mock.ANY, user_content=unittest.mock.ANY, model="winter-coder:8gb"),
+            call(role="coder", system_prompt=unittest.mock.ANY, user_content=unittest.mock.ANY, model="deepseek-r1:8b"),
+        ])
 
 
 if __name__ == "__main__":
