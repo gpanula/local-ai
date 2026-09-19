@@ -648,13 +648,18 @@ def resolve_secondary_escalation_model(
     role: str = "coder",
     state: Optional[PipelineState] = None,
     tier: Optional[str] = None,
+    primary_model: Optional[str] = None,
 ) -> str:
     """Resolve the Stage 3 secondary escalation model ensuring it respects available VRAM."""
     if state and getattr(state, "secondary_escalation_model", None):
         return state.secondary_escalation_model.strip()
 
     active_tier = tier or (state.tier if state else None) or get_hardware_tier()
-    return get_secondary_escalation_model(tier=active_tier, role=role)
+    model = get_secondary_escalation_model(tier=active_tier, role=role)
+    # If secondary model matches primary model, escalate to winter-prime:<tier> for distinct cognitive framing
+    if primary_model and model == primary_model:
+        return f"winter-prime:{active_tier}"
+    return model
 
 
 def run_architect(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
@@ -1148,7 +1153,9 @@ def run_dispatch(
         active_tier = tier or getattr(state, "tier", None) or get_hardware_tier()
         primary_coder = resolve_coder_model(task, state=state, tier=active_tier, fallback_model=model)
         escalation_coder = resolve_escalation_model(role=role, state=state, tier=active_tier)
-        secondary_coder = resolve_secondary_escalation_model(role=role, state=state, tier=active_tier)
+        secondary_coder = resolve_secondary_escalation_model(
+            role=role, state=state, tier=active_tier, primary_model=primary_coder
+        )
         enable_escalation = not getattr(state, "no_escalation", False)
         configured_budget = getattr(state, "retry_budget", None)
         if configured_budget is not None:

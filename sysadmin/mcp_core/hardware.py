@@ -145,18 +145,19 @@ def get_escalation_model(tier: Optional[str] = None, role: str = "coder") -> str
 
 
 # Stage 3 Heavyweight Escalation Model Mapping (Attempt 5+ / 2x Escalation Threshold)
+# Prefers customized Winter models over raw base models.
 SECONDARY_ESCALATION_MODELS: dict[str, dict[str, str]] = {
     TIER_8GB: {
-        "coder": "qwen2.5-coder:7b",
-        "default": "qwen2.5-coder:7b",
+        "coder": "winter-coder:8gb",
+        "default": "winter-coder:8gb",
     },
     TIER_16GB: {
-        "coder": "qwen2.5-coder:14b",
-        "default": "qwen2.5-coder:14b",
+        "coder": "winter-coder:16gb",
+        "default": "winter-coder:16gb",
     },
     TIER_24GB: {
-        "coder": "qwen2.5-coder:32b",
-        "default": "qwen2.5-coder:32b",
+        "coder": "winter-coder:24gb",
+        "default": "winter-coder:24gb",
     },
 }
 
@@ -164,12 +165,13 @@ SECONDARY_ESCALATION_MODELS: dict[str, dict[str, str]] = {
 def get_secondary_escalation_model(tier: Optional[str] = None, role: str = "coder") -> str:
     """Resolve the Stage 3 secondary escalation model for a given role and hardware tier.
 
-    Ensures that 8GB tier never attempts to load 14GB or 32GB models.
+    Prefers customized Winter models over raw base models, ensuring tier limits
+    are strictly respected (e.g. 8GB tier never attempts to load 16GB or 24GB models).
     """
     active_tier = tier or get_hardware_tier()
     tier_map = SECONDARY_ESCALATION_MODELS.get(active_tier, SECONDARY_ESCALATION_MODELS[TIER_8GB])
     clean_role = role.strip().lower()
-    return tier_map.get(clean_role, tier_map.get("default", "qwen2.5-coder:7b"))
+    return tier_map.get(clean_role, tier_map.get("default", f"winter-coder:{active_tier}"))
 
 
 def get_primary_coder_model(tier: Optional[str] = None) -> str:

@@ -97,27 +97,29 @@ sequenceDiagram
 
 ### Multi-Tier Model Escalation Ladder
 
-| Hardware Tier | Stage 1: Primary Coder (Attempts 1 to $T$) | Stage 2: Specialist Coder (Attempts $T+1$ to $2T$) | Stage 3: Heavyweight Coder (Attempts $2T+1$ to `max_retries`) |
+| Hardware Tier | Stage 1: Primary Coder (Attempts 1 to $T$) | Stage 2: Specialist Coder (Attempts $T+1$ to $2T$) | Stage 3: Heavyweight Winter Coder (Attempts $2T+1$ to `max_retries`) |
 | :--- | :--- | :--- | :--- |
-| **8GB Tier** (Laptop) | `winter-coder:8gb` (`qwen2.5-coder:7b`) | `deepseek-r1:8b` (CoT Reasoning) | `qwen2.5-coder:7b` (Heavyweight fallback) |
-| **16GB Tier** (Workstation) | `winter-coder:16gb` (`qwen2.5-coder:14b`) | `deepseek-coder-v2:16b` (Specialist MoE) | `qwen2.5-coder:14b` (Heavyweight fallback) |
-| **24GB Tier** (Valkyrie / RTX 3090) | `winter-coder:24gb` (`qwen2.5-coder:14b`) | `deepseek-coder-v2:16b` (Specialist MoE) | `qwen2.5-coder:32b` (32B Parameter Flagship) |
+| **8GB Tier** (Laptop) | `winter-coder:8gb` | `deepseek-r1:8b` (CoT Reasoning) | `winter-prime:8gb` (or `winter-coder:8gb`) |
+| **16GB Tier** (Workstation) | `winter-coder:16gb` | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-prime:16gb` (or `winter-coder:16gb`) |
+| **24GB Tier** (Valkyrie / RTX 3090) | `winter-coder:24gb` (or `winter-coder:16gb` dual-model) | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-prime:24gb` / `winter-coder:24gb` (32B Flagship) |
 
 ### Escalation Parameters & Thresholds
 
+- **Winter Models Preferred**:
+  - The pipeline defaults exclusively to customized Winter models (`winter-coder:<tier>` and `winter-prime:<tier>`) rather than raw foundation models, guaranteeing built-in ShellCheck standards, error traps, and strict context sizing.
 - **Configurable Escalation Threshold ($T$)**:
   - Controlled via `--escalation-threshold <N>` (min: 1, max: 15, default: 2; or 1 if `max_retries == 1`).
   - **Stage 1 (Primary)**: Handles attempts 1 through $T$.
   - **Stage 2 (Specialist)**: Promoted when `retries >= stage2_threshold` ($T$). Runs through attempt $2T$.
-  - **Stage 3 (Heavyweight)**: Promoted when `retries >= stage3_threshold` ($2T$). Runs for all remaining attempts up to `max_retries`.
+  - **Stage 3 (Heavyweight)**: Promoted when `retries >= stage3_threshold` ($2T$). Runs for all remaining attempts up to `max_retries`. If the secondary model matches the primary model on this tier, it automatically escalates to `winter-prime:<tier>` for fresh multi-persona cognitive framing.
 - **Immediate Escalation Example ($T = 1$)**:
-  - Attempt 1: Stage 1 Primary
-  - Attempt 2: Stage 2 Specialist
-  - Attempt 3+: Stage 3 Heavyweight
+  - Attempt 1: Stage 1 Primary (`winter-coder:24gb`)
+  - Attempt 2: Stage 2 Specialist (`deepseek-coder-v2:16b`)
+  - Attempt 3+: Stage 3 Heavyweight (`winter-prime:24gb`)
 - **Standard Escalation Example ($T = 2, \text{retry\_budget} = 6$)**:
-  - Attempts 1 & 2: Stage 1 Primary (`winter-coder`)
+  - Attempts 1 & 2: Stage 1 Primary (`winter-coder:24gb` or `winter-coder:16gb`)
   - Attempts 3 & 4: Stage 2 Specialist (`deepseek-coder-v2:16b` / `deepseek-r1:8b`)
-  - Attempts 5 & 6: Stage 3 Heavyweight (`qwen2.5-coder:32b`)
+  - Attempts 5 & 6: Stage 3 Heavyweight (`winter-prime:24gb` or `winter-coder:24gb`)
 - **Strict Single-Model (`--no-escalation`)**:
   - Disables both Stage 2 and Stage 3 escalations; all retries execute exclusively against the primary model.
 - **VRAM Cleanup Guard**:

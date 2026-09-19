@@ -261,12 +261,20 @@ class TestModelEscalation(unittest.TestCase):
         ])
 
     def test_secondary_escalation_models_per_tier(self):
-        # 8GB laptop tier must use 7b model
-        self.assertEqual(get_secondary_escalation_model("8gb", "coder"), "qwen2.5-coder:7b")
-        # 16GB tier must use 14b model
-        self.assertEqual(get_secondary_escalation_model("16gb", "coder"), "qwen2.5-coder:14b")
-        # 24GB tier must use 32b flagship model
-        self.assertEqual(get_secondary_escalation_model("24gb", "coder"), "qwen2.5-coder:32b")
+        # Prefers customized Winter models over raw base models
+        self.assertEqual(get_secondary_escalation_model("8gb", "coder"), "winter-coder:8gb")
+        self.assertEqual(get_secondary_escalation_model("16gb", "coder"), "winter-coder:16gb")
+        self.assertEqual(get_secondary_escalation_model("24gb", "coder"), "winter-coder:24gb")
+
+        # Distinct escalation when secondary matches primary
+        self.assertEqual(
+            resolve_secondary_escalation_model("coder", tier="24gb", primary_model="winter-coder:24gb"),
+            "winter-prime:24gb",
+        )
+        self.assertEqual(
+            resolve_secondary_escalation_model("coder", tier="24gb", primary_model="winter-coder:16gb"),
+            "winter-coder:24gb",
+        )
 
     def test_validate_escalation_threshold(self):
         self.assertEqual(validate_escalation_threshold(1), 1)
@@ -310,7 +318,7 @@ class TestModelEscalation(unittest.TestCase):
         # 24GB tier:
         # Stage 1 (Primary): winter-coder:24gb (Attempts 1 & 2, retries 0 & 1)
         # Stage 2 (Specialist): deepseek-coder-v2:16b (Attempts 3 & 4, retries 2 & 3)
-        # Stage 3 (Heavyweight): qwen2.5-coder:32b (Attempt 5+, retries 4+)
+        # Stage 3 (Heavyweight Winter): winter-prime:24gb (Attempt 5+, retries 4+)
         state = PipelineState("run-esc-cascade", "Cascade test", retry_budget=5, escalation_threshold=2)
         state.tier = "24gb"
         state.messages["annotated_plan"] = {
@@ -350,8 +358,8 @@ class TestModelEscalation(unittest.TestCase):
         self.assertEqual(models_called[1], "winter-coder:24gb")         # Attempt 2 (Stage 1 Primary)
         self.assertEqual(models_called[2], "deepseek-coder-v2:16b")     # Attempt 3 (Stage 2 Specialist)
         self.assertEqual(models_called[3], "deepseek-coder-v2:16b")     # Attempt 4 (Stage 2 Specialist)
-        self.assertEqual(models_called[4], "qwen2.5-coder:32b")         # Attempt 5 (Stage 3 Heavyweight)
-        self.assertEqual(models_called[5], "qwen2.5-coder:32b")         # Attempt 6 (Stage 3 Heavyweight)
+        self.assertEqual(models_called[4], "winter-prime:24gb")         # Attempt 5 (Stage 3 Winter Heavyweight)
+        self.assertEqual(models_called[5], "winter-prime:24gb")         # Attempt 6 (Stage 3 Winter Heavyweight)
 
         events = [e["event"] for e in state.events]
         self.assertIn("model_escalated", events)
@@ -364,7 +372,7 @@ class TestModelEscalation(unittest.TestCase):
         # When escalation_threshold=1:
         # Attempt 1 (retries=0): Primary (winter-coder:24gb)
         # Attempt 2 (retries=1): Stage 2 Specialist (deepseek-coder-v2:16b)
-        # Attempt 3 (retries=2): Stage 3 Heavyweight (qwen2.5-coder:32b)
+        # Attempt 3 (retries=2): Stage 3 Winter Heavyweight (winter-prime:24gb)
         state = PipelineState("run-esc-immediate", "Immediate escalation", retry_budget=2, escalation_threshold=1)
         state.tier = "24gb"
         state.messages["annotated_plan"] = {
@@ -400,7 +408,7 @@ class TestModelEscalation(unittest.TestCase):
         models_called = [c.kwargs["model"] for c in mock_chat.call_args_list]
         self.assertEqual(models_called[0], "winter-coder:24gb")         # Attempt 1
         self.assertEqual(models_called[1], "deepseek-coder-v2:16b")     # Attempt 2
-        self.assertEqual(models_called[2], "qwen2.5-coder:32b")         # Attempt 3
+        self.assertEqual(models_called[2], "winter-prime:24gb")         # Attempt 3
 
         events = [e["event"] for e in state.events]
         self.assertIn("model_escalated", events)
