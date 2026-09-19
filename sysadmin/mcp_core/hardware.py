@@ -144,6 +144,34 @@ def get_escalation_model(tier: Optional[str] = None, role: str = "coder") -> str
     return tier_map.get(clean_role, tier_map.get("default", "deepseek-r1:8b"))
 
 
+# Stage 3 Heavyweight Escalation Model Mapping (Attempt 5+ / 2x Escalation Threshold)
+SECONDARY_ESCALATION_MODELS: dict[str, dict[str, str]] = {
+    TIER_8GB: {
+        "coder": "qwen2.5-coder:7b",
+        "default": "qwen2.5-coder:7b",
+    },
+    TIER_16GB: {
+        "coder": "qwen2.5-coder:14b",
+        "default": "qwen2.5-coder:14b",
+    },
+    TIER_24GB: {
+        "coder": "qwen2.5-coder:32b",
+        "default": "qwen2.5-coder:32b",
+    },
+}
+
+
+def get_secondary_escalation_model(tier: Optional[str] = None, role: str = "coder") -> str:
+    """Resolve the Stage 3 secondary escalation model for a given role and hardware tier.
+
+    Ensures that 8GB tier never attempts to load 14GB or 32GB models.
+    """
+    active_tier = tier or get_hardware_tier()
+    tier_map = SECONDARY_ESCALATION_MODELS.get(active_tier, SECONDARY_ESCALATION_MODELS[TIER_8GB])
+    clean_role = role.strip().lower()
+    return tier_map.get(clean_role, tier_map.get("default", "qwen2.5-coder:7b"))
+
+
 def get_primary_coder_model(tier: Optional[str] = None) -> str:
     """Resolve the default primary coder model for the active hardware tier."""
     active_tier = tier or get_hardware_tier()

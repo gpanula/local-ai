@@ -11,6 +11,7 @@ from mcp_core.hardware import (
     get_default_model,
     get_escalation_model,
     get_primary_coder_model,
+    get_secondary_escalation_model,
     TIER_8GB,
     TIER_16GB,
     TIER_24GB,
@@ -19,7 +20,9 @@ from pipeline import (
     PipelineState,
     resolve_coder_model,
     resolve_escalation_model,
+    resolve_secondary_escalation_model,
     run_dispatch,
+    validate_escalation_threshold,
     validate_retry_budget,
 )
 
@@ -256,6 +259,152 @@ class TestModelEscalation(unittest.TestCase):
             call(role="coder", system_prompt=unittest.mock.ANY, user_content=unittest.mock.ANY, model="winter-coder:8gb"),
             call(role="coder", system_prompt=unittest.mock.ANY, user_content=unittest.mock.ANY, model="deepseek-r1:8b"),
         ])
+
+    def test_secondary_escalation_models_per_tier(self):
+        # 8GB laptop tier must use 7b model
+        self.assertEqual(get_secondary_escalation_model("8gb", "coder"), "qwen2.5-coder:7b")
+        # 16GB tier must use 14b model
+        self.assertEqual(get_secondary_escalation_model("16gb", "coder"), "qwen2.5-coder:14b")
+        # 24GB tier must use 32b flagship model
+        self.assertEqual(get_secondary_escalation_model("24gb", "coder"), "qwen2.5-coder:32b")
+
+    def test_validate_escalation_threshold(self):
+        self.assertEqual(validate_escalation_threshold(1), 1)
+        self.assertEqual(validate_escalation_threshold(2), 2)
+        self.assertEqual(validate_escalation_threshold(15), 15)
+        self.assertEqual(validate_escalation_threshold("4"), 4)
+
+        with self.assertRaises(ValueError):
+            validate_escalation_threshold(0)
+        with self.assertRaises(ValueError):
+            validate_escalation_threshold(-1)
+        with self.assertRaises(ValueError):
+            validate_escalation_threshold(16)
+        with self.assertRaises(ValueError):
+            validate_escalation_threshold("not-an-int")
+
+    def test_pipeline_state_escalation_threshold_propagation(self):
+        state = PipelineState(
+            "run-esc-threshold",
+            "Escalation test",
+            retry_budget=6,
+            escalation_threshold=3,
+            secondary_escalation_model="custom-heavy:latest",
+        )
+        self.assertEqual(state.escalation_threshold, 3)
+        self.assertEqual(state.secondary_escalation_model, "custom-heavy:latest")
+
+        # Serialization round-trip
+        data = state.to_dict()
+        self.assertEqual(data["escalation_threshold"], 3)
+        self.assertEqual(data["secondary_escalation_model"], "custom-heavy:latest")
+
+        restored = PipelineState.from_dict(data)
+        self.assertEqual(restored.escalation_threshold, 3)
+        self.assertEqual(restored.secondary_escalation_model, "custom-heavy:latest")
+
+    @patch("pipeline.handle_unload_model")
+    @patch("pipeline.stage_chat")
+    @patch("pipeline.validate_code_output")
+    def test_two_tier_escalation_cascade_dispatch(self, mock_linter, mock_chat, mock_unload):
+        # 24GB tier:
+        # Stage 1 (Primary): winter-coder:24gb (Attempts 1 & 2, retries 0 & 1)
+        # Stage 2 (Specialist): deepseek-coder-v2:16b (Attempts 3 & 4, retries 2 & 3)
+        # Stage 3 (Heavyweight): qwen2.5-coder:32b (Attempt 5+, retries 4+)
+        state = PipelineState("run-esc-cascade", "Cascade test", retry_budget=5, escalation_threshold=2)
+        state.tier = "24gb"
+        state.messages["annotated_plan"] = {
+            "schema_version": "2.0",
+            "message_type": "annotated_plan",
+            "tasks": [
+                {
+                    "task_id": "t-001",
+                    "assigned_agent": "coder",
+                    "description": "Complex task requiring multi-tier escalation",
+                    "tools_required": ["write_file"],
+                    "outputs": ["sysadmin/complex.sh"],
+                }
+            ],
+        }
+
+        mock_linter.return_value = {
+            "verdict": "rejected",
+            "critique": "Complex syntax error",
+            "violations": [{"type": "ShellCheck", "description": "SC2086"}],
+        }
+        mock_chat.return_value = json.dumps({
+            "schema_version": "2.0",
+            "status": "success",
+            "outputs": {"sysadmin/complex.sh": "echo $COMPLEX"},
+        })
+
+        phase = run_dispatch(state, self.store, model="winter-coder:24gb", tier="24gb")
+
+        self.assertEqual(phase, "aborted")
+        self.assertEqual(state.status, "aborted")
+        # retry_budget=5 means 1 initial attempt + 5 retries = 6 total attempts
+        self.assertEqual(mock_chat.call_count, 6)
+
+        models_called = [c.kwargs["model"] for c in mock_chat.call_args_list]
+        self.assertEqual(models_called[0], "winter-coder:24gb")         # Attempt 1 (Stage 1 Primary)
+        self.assertEqual(models_called[1], "winter-coder:24gb")         # Attempt 2 (Stage 1 Primary)
+        self.assertEqual(models_called[2], "deepseek-coder-v2:16b")     # Attempt 3 (Stage 2 Specialist)
+        self.assertEqual(models_called[3], "deepseek-coder-v2:16b")     # Attempt 4 (Stage 2 Specialist)
+        self.assertEqual(models_called[4], "qwen2.5-coder:32b")         # Attempt 5 (Stage 3 Heavyweight)
+        self.assertEqual(models_called[5], "qwen2.5-coder:32b")         # Attempt 6 (Stage 3 Heavyweight)
+
+        events = [e["event"] for e in state.events]
+        self.assertIn("model_escalated", events)
+        self.assertIn("model_escalated_secondary", events)
+
+    @patch("pipeline.handle_unload_model")
+    @patch("pipeline.stage_chat")
+    @patch("pipeline.validate_code_output")
+    def test_immediate_escalation_cascade_dispatch(self, mock_linter, mock_chat, mock_unload):
+        # When escalation_threshold=1:
+        # Attempt 1 (retries=0): Primary (winter-coder:24gb)
+        # Attempt 2 (retries=1): Stage 2 Specialist (deepseek-coder-v2:16b)
+        # Attempt 3 (retries=2): Stage 3 Heavyweight (qwen2.5-coder:32b)
+        state = PipelineState("run-esc-immediate", "Immediate escalation", retry_budget=2, escalation_threshold=1)
+        state.tier = "24gb"
+        state.messages["annotated_plan"] = {
+            "schema_version": "2.0",
+            "message_type": "annotated_plan",
+            "tasks": [
+                {
+                    "task_id": "t-001",
+                    "assigned_agent": "coder",
+                    "description": "Task for immediate escalation",
+                    "tools_required": ["write_file"],
+                    "outputs": ["sysadmin/imm.sh"],
+                }
+            ],
+        }
+
+        mock_linter.return_value = {
+            "verdict": "rejected",
+            "critique": "Immediate syntax error",
+            "violations": [{"type": "ShellCheck", "description": "SC2086"}],
+        }
+        mock_chat.return_value = json.dumps({
+            "schema_version": "2.0",
+            "status": "success",
+            "outputs": {"sysadmin/imm.sh": "echo $IMM"},
+        })
+
+        phase = run_dispatch(state, self.store, model="winter-coder:24gb", tier="24gb")
+
+        self.assertEqual(phase, "aborted")
+        self.assertEqual(mock_chat.call_count, 3)
+
+        models_called = [c.kwargs["model"] for c in mock_chat.call_args_list]
+        self.assertEqual(models_called[0], "winter-coder:24gb")         # Attempt 1
+        self.assertEqual(models_called[1], "deepseek-coder-v2:16b")     # Attempt 2
+        self.assertEqual(models_called[2], "qwen2.5-coder:32b")         # Attempt 3
+
+        events = [e["event"] for e in state.events]
+        self.assertIn("model_escalated", events)
+        self.assertIn("model_escalated_secondary", events)
 
 
 if __name__ == "__main__":

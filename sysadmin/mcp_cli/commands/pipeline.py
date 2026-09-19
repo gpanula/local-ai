@@ -154,6 +154,8 @@ class PipelineRunCommand(BaseCommand):
         parser.add_argument("--no-lint", action="store_true", help="Skip pre-flight linting step")
         parser.add_argument("--bootstrap", action="store_true", help="Flag task as bootstrap (tolerates missing host tools before installation)")
         parser.add_argument("--retry-budget", "--max-retries", dest="max_retries", type=int, default=3, help="Max revision cycles / retry budget (min: 1, max: 15, default: 3)")
+        parser.add_argument("--escalation-threshold", type=int, default=None, help="Retry threshold before model escalation (min: 1, max: 15, default: 2)")
+        parser.add_argument("--secondary-escalation-model", default=None, help="Model to escalate to for Stage 3 when retries >= 2 * escalation_threshold")
         parser.add_argument("--timeout", type=int, default=300, help="Execution timeout in seconds")
         parser.add_argument("--dry-run", action="store_true", help="Stop after review without executing")
 
@@ -161,6 +163,10 @@ class PipelineRunCommand(BaseCommand):
         if getattr(args, "max_retries", None) is not None:
             if not (1 <= args.max_retries <= 15):
                 raise ValueError(f"Retry budget (--retry-budget/--max-retries) must be between 1 and 15, got: {args.max_retries}")
+
+        if getattr(args, "escalation_threshold", None) is not None:
+            if not (1 <= args.escalation_threshold <= 15):
+                raise ValueError(f"Escalation threshold (--escalation-threshold) must be between 1 and 15, got: {args.escalation_threshold}")
 
         valid_path = validate_workspace_path(args.file, "prompt file")
         with open(valid_path, "r", encoding="utf-8") as f:

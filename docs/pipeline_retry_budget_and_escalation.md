@@ -49,17 +49,18 @@ graph TD
 
 ---
 
-## 3. Dynamic Model Escalation & VRAM Safety
+## 3. Dynamic Multi-Tier Model Escalation & VRAM Safety
 
-When tasks fail initial gate reviews, the pipeline utilizes a tiered escalation model strategy that adapts to available system VRAM:
+When tasks fail initial gate reviews, the pipeline utilizes a tiered escalation ladder that adapts to available system VRAM:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant D as Dispatcher
-    participant P as Primary Coder (e.g. 8gb/24gb)
+    participant P as Stage 1: Primary Coder
     participant V as VRAM Guard
-    participant E as Escalation Coder (e.g. DeepSeek / Qwen 32B)
+    participant E2 as Stage 2: Specialist Coder (e.g. DeepSeek)
+    participant E3 as Stage 3: Heavyweight Coder (e.g. Qwen 32B)
     participant M as Memory Store
 
     D->>P: Attempt 1 (Primary Model)
@@ -69,33 +70,58 @@ sequenceDiagram
     P-->>D: Remediated Code
     D->>D: Gate Rejection -> Retry 2
 
-    Note over D,V: 2 Failures on Primary Model -> Trigger Escalation
+    Note over D,V: Retries >= Stage 2 Threshold (Default: Attempt 3)
     opt VRAM Constrained (8GB/16GB Tier or --unload-models)
         D->>V: Unload Primary Model from GPU
     end
 
-    D->>E: Attempt 3 (Escalated Model) with Critique
-    E-->>D: Advanced Synthesis
-    alt Attempt 3 Passes
-        D->>M: Credit Lesson (+1 Utility)
-    else Attempt 3 Fails
-        D->>E: Attempt 4 (Final Escalated Attempt)
-        alt Attempt 4 Fails
-            D->>M: Stage Hard-Failure Lesson (Negative Learning)
-        end
+    D->>E2: Attempt 3 (Stage 2 Specialist) with Critique
+    E2-->>D: Advanced Synthesis
+    D->>D: Gate Rejection -> Retry 3
+    D->>E2: Attempt 4 (Stage 2 Specialist)
+    D->>D: Gate Rejection -> Retry 4
+
+    Note over D,V: Retries >= Stage 3 Threshold (2x Threshold, Default: Attempt 5+)
+    opt VRAM Constrained (8GB/16GB Tier or --unload-models)
+        D->>V: Unload Stage 2 Model from GPU
+    end
+
+    D->>E3: Attempt 5+ (Stage 3 Heavyweight) with Critique
+    E3-->>D: Maximum Reasoning & Capability Synthesis
+    alt Attempt Passes
+        D->>M: Credit Injected Lessons (+1 Utility)
+    else Attempt Fails & Budget Exhausted
+        D->>M: Stage Hard-Failure Lesson (Negative Learning)
     end
 ```
 
-### Escalation Parameters
+### Multi-Tier Model Escalation Ladder
 
-- **Standard Budget (`--no-escalation` or `escalation_model == primary_model`)**:
-  - `max_retries = 2` (3 total attempts).
-  - All attempts execute against the primary model.
-- **Escalated Budget (Default)**:
-  - `max_retries = 3` (4 total attempts).
-  - **Attempts 1 & 2**: Run on the primary model (e.g., `winter-coder:8gb` or `winter-coder:24gb`).
-  - **Escalation Transition (Attempt 3)**: Triggered when `retries == 2`. The pipeline promotes the task to the designated escalation model (`resolve_escalation_model()`).
-  - **VRAM Cleanup Guard**: On hardware tiers with $\le 16\text{ GB}$ VRAM (or when `--unload-models` is passed), the primary model is actively unloaded via Ollama before loading the escalation model to prevent OOM errors.
+| Hardware Tier | Stage 1: Primary Coder (Attempts 1 to $T$) | Stage 2: Specialist Coder (Attempts $T+1$ to $2T$) | Stage 3: Heavyweight Coder (Attempts $2T+1$ to `max_retries`) |
+| :--- | :--- | :--- | :--- |
+| **8GB Tier** (Laptop) | `winter-coder:8gb` (`qwen2.5-coder:7b`) | `deepseek-r1:8b` (CoT Reasoning) | `qwen2.5-coder:7b` (Heavyweight fallback) |
+| **16GB Tier** (Workstation) | `winter-coder:16gb` (`qwen2.5-coder:14b`) | `deepseek-coder-v2:16b` (Specialist MoE) | `qwen2.5-coder:14b` (Heavyweight fallback) |
+| **24GB Tier** (Valkyrie / RTX 3090) | `winter-coder:24gb` (`qwen2.5-coder:14b`) | `deepseek-coder-v2:16b` (Specialist MoE) | `qwen2.5-coder:32b` (32B Parameter Flagship) |
+
+### Escalation Parameters & Thresholds
+
+- **Configurable Escalation Threshold ($T$)**:
+  - Controlled via `--escalation-threshold <N>` (min: 1, max: 15, default: 2; or 1 if `max_retries == 1`).
+  - **Stage 1 (Primary)**: Handles attempts 1 through $T$.
+  - **Stage 2 (Specialist)**: Promoted when `retries >= stage2_threshold` ($T$). Runs through attempt $2T$.
+  - **Stage 3 (Heavyweight)**: Promoted when `retries >= stage3_threshold` ($2T$). Runs for all remaining attempts up to `max_retries`.
+- **Immediate Escalation Example ($T = 1$)**:
+  - Attempt 1: Stage 1 Primary
+  - Attempt 2: Stage 2 Specialist
+  - Attempt 3+: Stage 3 Heavyweight
+- **Standard Escalation Example ($T = 2, \text{retry\_budget} = 6$)**:
+  - Attempts 1 & 2: Stage 1 Primary (`winter-coder`)
+  - Attempts 3 & 4: Stage 2 Specialist (`deepseek-coder-v2:16b` / `deepseek-r1:8b`)
+  - Attempts 5 & 6: Stage 3 Heavyweight (`qwen2.5-coder:32b`)
+- **Strict Single-Model (`--no-escalation`)**:
+  - Disables both Stage 2 and Stage 3 escalations; all retries execute exclusively against the primary model.
+- **VRAM Cleanup Guard**:
+  - On hardware tiers with $\le 16\text{ GB}$ VRAM (or when `--unload-models` is passed), the prior model is actively unloaded via Ollama before loading Stage 2 and Stage 3 models to prevent GPU out-of-memory errors.
 
 ---
 
@@ -118,9 +144,11 @@ The retry and escalation behavior can be configured via CLI flags:
 | Flag | Default | Effect |
 | :--- | :--- | :--- |
 | `--retry-budget, --max-retries <N>` | Phase defaults (`3` / `2`) | Sets configurable retry budget across stages & tasks (bounded: `min=1`, `max=15`). |
-| `--tier {8gb,16gb,24gb}` | Auto-detected | Sets default and escalation models tailored to GPU capacity. |
+| `--escalation-threshold <N>` | `2` (or `1` if `max_retries == 1`) | Sets retry count before escalating model stages (bounded: `min=1`, `max=15`). Stage 2 triggers at $T$, Stage 3 triggers at $2T$. |
+| `--tier {8gb,16gb,24gb}` | Auto-detected | Sets default, Stage 2, and Stage 3 models tailored to GPU capacity. |
 | `--no-escalation` | `False` | Disables model promotion; caps task retries to the configured budget on the primary model. |
 | `--coder-model <name>` | Auto-resolved | Pinned override for the primary coder model across all tasks. |
-| `--escalation-model <name>`| Auto-resolved | Pinned override for the fallback escalation model. |
+| `--escalation-model <name>`| Auto-resolved | Pinned override for the Stage 2 specialist escalation model. |
+| `--secondary-escalation-model <name>` | Auto-resolved | Pinned override for the Stage 3 heavyweight escalation model. |
 | `--unload-models` | `False` | Forces Ollama to unload models after each phase or escalation step. |
 | `--keep-models` | `False` | Prevents unloading models between stages for faster execution on high-VRAM systems. |

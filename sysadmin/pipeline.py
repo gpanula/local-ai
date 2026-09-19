@@ -25,6 +25,7 @@ from mcp_core.hardware import (
     get_hardware_tier,
     get_default_model,
     get_escalation_model,
+    get_secondary_escalation_model,
     get_primary_coder_model,
 )
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
@@ -98,10 +99,28 @@ def validate_retry_budget(val: Any) -> int:
     return ival
 
 
+def validate_escalation_threshold(val: Any) -> int:
+    """Validate that escalation threshold is an integer between 1 and 15."""
+    try:
+        ival = int(val)
+    except (ValueError, TypeError):
+        raise ValueError(f"Escalation threshold must be an integer, got: {val!r}")
+    if not (1 <= ival <= 15):
+        raise ValueError(f"Escalation threshold must be between 1 and 15, got: {ival}")
+    return ival
+
+
 class PipelineState:
     """Tracks the mutable state of a single pipeline run."""
 
-    def __init__(self, run_id: str, original_prompt: str, retry_budget: Optional[int] = None):
+    def __init__(
+        self,
+        run_id: str,
+        original_prompt: str,
+        retry_budget: Optional[int] = None,
+        escalation_threshold: Optional[int] = None,
+        secondary_escalation_model: Optional[str] = None,
+    ):
         self.run_id = run_id
         self.original_prompt = original_prompt
         self.status = "running"
@@ -111,6 +130,10 @@ class PipelineState:
         self.retry_budget: Optional[int] = validate_retry_budget(retry_budget) if retry_budget is not None else None
         self.architect_budget = self.retry_budget if self.retry_budget is not None else 3
         self.orchestrator_budget = self.retry_budget if self.retry_budget is not None else 3
+        self.escalation_threshold: Optional[int] = (
+            validate_escalation_threshold(escalation_threshold) if escalation_threshold is not None else None
+        )
+        self.secondary_escalation_model: Optional[str] = secondary_escalation_model
         self.messages: Dict[str, Any] = {}
         self.tasks: Dict[str, Any] = {}
         self.events: List[Dict[str, Any]] = []
@@ -136,6 +159,8 @@ class PipelineState:
             "retry_budget": getattr(self, "retry_budget", None),
             "architect_budget": getattr(self, "architect_budget", 3),
             "orchestrator_budget": getattr(self, "orchestrator_budget", 3),
+            "escalation_threshold": getattr(self, "escalation_threshold", None),
+            "secondary_escalation_model": getattr(self, "secondary_escalation_model", None),
             "current_phase": self.current_phase,
             "messages": {
                 k: f"runs/{self.run_id}/messages/{k}.json" if isinstance(v, dict) else v
@@ -160,6 +185,8 @@ class PipelineState:
             run_id=data["run_id"],
             original_prompt=data.get("original_prompt", ""),
             retry_budget=data.get("retry_budget"),
+            escalation_threshold=data.get("escalation_threshold"),
+            secondary_escalation_model=data.get("secondary_escalation_model"),
         )
         state.status = data.get("status", "running")
         state.current_phase = data.get("current_phase", "architect")
@@ -615,6 +642,19 @@ def resolve_escalation_model(
 
     active_tier = tier or (state.tier if state else None) or get_hardware_tier()
     return get_escalation_model(tier=active_tier, role=role)
+
+
+def resolve_secondary_escalation_model(
+    role: str = "coder",
+    state: Optional[PipelineState] = None,
+    tier: Optional[str] = None,
+) -> str:
+    """Resolve the Stage 3 secondary escalation model ensuring it respects available VRAM."""
+    if state and getattr(state, "secondary_escalation_model", None):
+        return state.secondary_escalation_model.strip()
+
+    active_tier = tier or (state.tier if state else None) or get_hardware_tier()
+    return get_secondary_escalation_model(tier=active_tier, role=role)
 
 
 def run_architect(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
@@ -1108,6 +1148,7 @@ def run_dispatch(
         active_tier = tier or getattr(state, "tier", None) or get_hardware_tier()
         primary_coder = resolve_coder_model(task, state=state, tier=active_tier, fallback_model=model)
         escalation_coder = resolve_escalation_model(role=role, state=state, tier=active_tier)
+        secondary_coder = resolve_secondary_escalation_model(role=role, state=state, tier=active_tier)
         enable_escalation = not getattr(state, "no_escalation", False)
         configured_budget = getattr(state, "retry_budget", None)
         if configured_budget is not None:
@@ -1116,7 +1157,14 @@ def run_dispatch(
             max_retries = 3 if (enable_escalation and escalation_coder != primary_coder) else 2
 
         current_model = primary_coder
-        escalated = False
+        escalated_stage = 1
+
+        user_threshold = getattr(state, "escalation_threshold", None)
+        if user_threshold is not None:
+            stage2_threshold = min(max(1, user_threshold), max_retries)
+        else:
+            stage2_threshold = 1 if max_retries == 1 else 2
+        stage3_threshold = stage2_threshold * 2
 
         # Query and inject lessons from MemoryStore (§4.01)
         relevant_lessons = []
@@ -1219,13 +1267,67 @@ def run_dispatch(
         exec_res = {}
         outputs = {}
 
+        escalated = False
+
         def _check_escalation_before_retry():
-            nonlocal current_model, escalated
-            escalation_threshold = 1 if max_retries == 1 else 2
-            if retries == escalation_threshold and enable_escalation and not escalated and escalation_coder != primary_coder:
+            nonlocal current_model, escalated, escalated_stage
+            if not enable_escalation:
+                return
+
+            # Check Stage 3 escalation first (retries >= stage3_threshold)
+            if (
+                retries >= stage3_threshold
+                and escalated_stage < 3
+                and secondary_coder != current_model
+                and max_retries >= stage3_threshold
+            ):
                 escalated = True
+                escalated_stage = 3
                 send_terminal_mcp(
-                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted {escalation_threshold} attempt(s) on {active_tier} hardware.\n"
+                    f"\n🔄 [MODEL ESCALATION - STAGE 3] Specialized {role} exhausted {stage3_threshold} attempt(s) on {active_tier} hardware.\n"
+                    f"   Escalating attempt {retries + 1}/{max_retries} to secondary heavyweight model: `{secondary_coder}`..."
+                )
+                state.add_event(
+                    "model_escalated_secondary",
+                    f"Escalated {role} for task {tid} from {current_model} to {secondary_coder} on {active_tier} tier (Stage 3)",
+                    "2",
+                )
+                emitter = EventEmitter.get_current()
+                if emitter:
+                    try:
+                        emitter.emit("model_escalated_secondary", {
+                            "task_id": tid,
+                            "prior_model": current_model,
+                            "secondary_model": secondary_coder,
+                            "tier": active_tier,
+                            "attempt": retries + 1,
+                        })
+                    except Exception:
+                        pass
+
+                # VRAM Management: unload prior model before loading secondary escalation model
+                should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
+                if should_unload and not getattr(state, "keep_models", False):
+                    try:
+                        send_terminal_mcp(
+                            f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for Stage 3 '{secondary_coder}' on {active_tier} tier..."
+                        )
+                        handle_unload_model(current_model)
+                    except Exception as e:
+                        send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
+
+                current_model = secondary_coder
+
+            # Check Stage 2 escalation (retries >= stage2_threshold and escalated_stage < 2)
+            elif (
+                retries >= stage2_threshold
+                and escalated_stage < 2
+                and escalation_coder != primary_coder
+            ):
+                escalated = True
+                escalated_stage = 2
+                send_terminal_mcp(
+                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted {stage2_threshold} attempt(s) on {active_tier} hardware.\n"
                     f"   Escalating attempt {retries + 1}/{max_retries} to specialized model: `{escalation_coder}`..."
                 )
                 state.add_event(
@@ -1900,14 +2002,18 @@ def run_pipeline(
     dynamic_auditor: bool = False,
     coder_model: Optional[str] = None,
     escalation_model: Optional[str] = None,
+    secondary_escalation_model: Optional[str] = None,
     no_escalation: bool = False,
     unload_models: bool = False,
     keep_models: bool = False,
     retry_budget: Optional[int] = None,
+    escalation_threshold: Optional[int] = None,
 ) -> dict:
     """Execute the full Arc-Orc-Rev pipeline loop."""
     if retry_budget is not None:
         validate_retry_budget(retry_budget)
+    if escalation_threshold is not None:
+        validate_escalation_threshold(escalation_threshold)
 
     if not run_id:
         run_id = generate_run_id()
@@ -1931,7 +2037,13 @@ def run_pipeline(
             except Exception:
                 effective_tier = "8gb"
 
-    state = PipelineState(run_id=run_id, original_prompt=prompt, retry_budget=retry_budget)
+    state = PipelineState(
+        run_id=run_id,
+        original_prompt=prompt,
+        retry_budget=retry_budget,
+        escalation_threshold=escalation_threshold,
+        secondary_escalation_model=secondary_escalation_model,
+    )
     state.builder_model = model
     state.auditor_model = auditor_model
     state.tier = effective_tier
@@ -2069,10 +2181,12 @@ def resume_pipeline(
     dynamic_auditor: bool = False,
     coder_model: Optional[str] = None,
     escalation_model: Optional[str] = None,
+    secondary_escalation_model: Optional[str] = None,
     no_escalation: bool = False,
     unload_models: bool = False,
     keep_models: bool = False,
     retry_budget: Optional[int] = None,
+    escalation_threshold: Optional[int] = None,
 ) -> dict:
     """Resume an aborted or in-flight pipeline run from state.json."""
     if store is None:
@@ -2084,6 +2198,10 @@ def resume_pipeline(
         state.retry_budget = validate_retry_budget(retry_budget)
         state.architect_budget = state.retry_budget
         state.orchestrator_budget = state.retry_budget
+    if escalation_threshold is not None:
+        state.escalation_threshold = validate_escalation_threshold(escalation_threshold)
+    if secondary_escalation_model:
+        state.secondary_escalation_model = secondary_escalation_model
     if tier:
         state.tier = tier
     if coder_model:
@@ -2196,11 +2314,28 @@ def main():
         default=None,
         help="Configurable retry budget for all stages (min: 1, max: 15, default: phase defaults [3])",
     )
+    parser.add_argument(
+        "--escalation-threshold",
+        type=int,
+        default=None,
+        help="Retry threshold before model escalation (min: 1, max: 15, default: 2)",
+    )
+    parser.add_argument(
+        "--secondary-escalation-model",
+        default=None,
+        help="Model to escalate to for Stage 3 when retries >= 2 * escalation_threshold (default: tier-resolved heavyweight)",
+    )
     args = parser.parse_args()
 
     if args.retry_budget is not None:
         try:
             validate_retry_budget(args.retry_budget)
+        except ValueError as e:
+            parser.error(str(e))
+
+    if args.escalation_threshold is not None:
+        try:
+            validate_escalation_threshold(args.escalation_threshold)
         except ValueError as e:
             parser.error(str(e))
 
@@ -2230,10 +2365,12 @@ def main():
         "tier": args.tier,
         "coder_model": args.coder_model,
         "escalation_model": args.escalation_model,
+        "secondary_escalation_model": args.secondary_escalation_model,
         "no_escalation": args.no_escalation,
         "unload_models": args.unload_models,
         "keep_models": args.keep_models,
         "retry_budget": args.retry_budget,
+        "escalation_threshold": args.escalation_threshold,
     }
     if auditor_model:
         kwargs["auditor_model"] = auditor_model
