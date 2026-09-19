@@ -36,3 +36,9 @@
 - **Local Learning & Dataset Research**: Local models run on self-hosted hardware for learning, evaluation, and fine-tuning. Unfiltered visibility into model outputs, reasoning traces, and error states is required for feedback collection and model improvement.
 - **PTY Streaming**: Always preserve model reasoning and diagnostic sections (`Analysis & Strategy`, `Verification & Testing`, `Risks & Edge Cases`) in stdout and active `terminal-mcp` logs.
 
+## 6. Codebase Navigation & Architecture Search (Graphify)
+- **Graphify First**: For codebase structure, architecture questions, and symbol relationships, query Graphify before falling back to brute-force grep or directory scans.
+  - **Queries**: Use `query_graph` via MCP (always passing `project_path`) or `graphify query "<question>"` via CLI.
+  - **Tracing & Nodes**: Use `shortest_path` / `graphify path "<A>" "<B>"` for dependency chains and `get_node` for specific abstractions.
+  - **Documentation**: Navigate `graphify-out/wiki/index.md` or `graphify-out/GRAPH_REPORT.md` instead of bulk reading raw source files.
+  - **Graph Maintenance**: After modifying code files in a session, run `graphify update .` to keep the knowledge graph synchronized (AST-only, zero API cost).
