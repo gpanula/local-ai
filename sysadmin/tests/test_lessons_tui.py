@@ -195,3 +195,50 @@ def test_edit_modal_validation():
             assert "violation(s) detected" in str(lint_box.render())
 
     asyncio.run(_run())
+
+
+def test_lesson_list_click_selection(temp_env):
+    """Test clicking and keyboard selecting items in LessonListView does not raise TypeError."""
+    db_path, lessons_md, wiki_dir = temp_env
+
+    with MemoryStore(db_path) as store:
+        store.stage_pending_lesson({
+            "id": "pending-item-01",
+            "proposed_rule": "First rule content.",
+            "category": "Testing",
+            "keywords": ["test1"],
+        })
+        store.stage_pending_lesson({
+            "id": "pending-item-02",
+            "proposed_rule": "Second rule content.",
+            "category": "Testing",
+            "keywords": ["test2"],
+        })
+
+    async def _run():
+        from lessons_tui.widgets.lesson_list import LessonItemWidget
+        from textual.widgets._list_item import ListItem
+
+        app = LessonsReviewApp(db_path=db_path, lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            list_view = app.query_one("#lesson-list", LessonListView)
+            detail_view = app.query_one("#lesson-detail", LessonDetailView)
+            assert detail_view.lesson["id"] == "pending-item-01"
+
+            # Simulate mouse click on child of second item (triggers ListItem._ChildClicked -> ListView._on_list_item__child_clicked)
+            item2 = list_view.children[1]
+            assert isinstance(item2, LessonItemWidget)
+            event = ListItem._ChildClicked(item2)
+            list_view._on_list_item__child_clicked(event)
+            await pilot.pause()
+
+            # Verified detail view updated to second item without TypeError
+            assert detail_view.lesson["id"] == "pending-item-02"
+
+            # Also simulate pressing Enter / selecting item
+            list_view.index = 0
+            list_view.post_message(list_view.Selected(list_view, list_view.children[0], 0))
+            await pilot.pause()
+            assert detail_view.lesson["id"] == "pending-item-01"
+
+    asyncio.run(_run())

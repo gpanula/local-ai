@@ -78,7 +78,7 @@ class LessonListView(ListView):
     }
     """
 
-    class Selected(Message):
+    class LessonSelected(Message):
         """Emitted when a lesson is highlighted/selected in the list."""
 
         def __init__(self, lesson: Dict[str, Any], is_pending: bool):
@@ -102,11 +102,15 @@ class LessonListView(ListView):
 
         if self.lessons:
             self.index = 0
-            self.post_message(self.Selected(self.lessons[0], self.is_pending))
+            self.post_message(self.LessonSelected(self.lessons[0], self.is_pending))
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.item and isinstance(event.item, LessonItemWidget):
-            self.post_message(self.Selected(event.item.lesson, self.is_pending))
+            self.post_message(self.LessonSelected(event.item.lesson, self.is_pending))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.item and isinstance(event.item, LessonItemWidget):
+            self.post_message(self.LessonSelected(event.item.lesson, self.is_pending))
 
     def get_selected_lesson(self) -> Optional[Dict[str, Any]]:
         """Return the currently highlighted lesson dictionary."""

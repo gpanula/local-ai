@@ -187,8 +187,8 @@ class LessonsReviewApp(App):
             else:
                 detail_view.display_lesson(None, is_pending=False)
 
-    @on(LessonListView.Selected)
-    def on_lesson_selected(self, event: LessonListView.Selected) -> None:
+    @on(LessonListView.LessonSelected)
+    def on_lesson_selected(self, event: LessonListView.LessonSelected) -> None:
         try:
             detail_view = self.query_one("#lesson-detail", LessonDetailView)
             detail_view.display_lesson(event.lesson, is_pending=event.is_pending)
