@@ -12,10 +12,13 @@ from mcp_core.hardware import (
     get_escalation_model,
     get_primary_coder_model,
     get_secondary_escalation_model,
+    get_coder_stable,
+    WINTER_CODER_STABLE,
     TIER_8GB,
     TIER_16GB,
     TIER_24GB,
 )
+from mcp_core.memory import MemoryStore
 from pipeline import (
     PipelineState,
     resolve_coder_model,
@@ -266,15 +269,95 @@ class TestModelEscalation(unittest.TestCase):
         self.assertEqual(get_secondary_escalation_model("16gb", "coder"), "winter-coder:16gb")
         self.assertEqual(get_secondary_escalation_model("24gb", "coder"), "winter-coder:24gb")
 
-        # Distinct escalation when secondary matches primary
+        # Winter Coder stable escalation
         self.assertEqual(
             resolve_secondary_escalation_model("coder", tier="24gb", primary_model="winter-coder:24gb"),
-            "winter-prime:24gb",
+            "winter-coder:24gb-codestral",
         )
         self.assertEqual(
             resolve_secondary_escalation_model("coder", tier="24gb", primary_model="winter-coder:16gb"),
             "winter-coder:24gb",
         )
+        self.assertEqual(
+            resolve_secondary_escalation_model("coder", tier="8gb", primary_model="winter-coder:8gb"),
+            "winter-coder:8gb-deepseek",
+        )
+        # Fallback to winter-prime if non-coder role matches primary
+        self.assertEqual(
+            resolve_secondary_escalation_model("reviewer", tier="24gb", primary_model="winter-coder:24gb"),
+            "winter-prime:24gb",
+        )
+
+    def test_winter_coder_stable_definitions(self):
+        self.assertIn("winter-coder:8gb-deepseek", WINTER_CODER_STABLE[TIER_8GB])
+        self.assertIn("winter-coder:16gb-deepseek", WINTER_CODER_STABLE[TIER_16GB])
+        self.assertIn("winter-coder:24gb-codestral", WINTER_CODER_STABLE[TIER_24GB])
+        self.assertIn("winter-coder:24gb-deepseek", WINTER_CODER_STABLE[TIER_24GB])
+
+        stable_24 = get_coder_stable("24gb")
+        self.assertEqual(len(stable_24), 3)
+        self.assertEqual(stable_24[0], "winter-coder:24gb")
+        self.assertEqual(stable_24[1], "winter-coder:24gb-codestral")
+        self.assertEqual(stable_24[2], "winter-coder:24gb-deepseek")
+
+    def test_resolve_secondary_escalation_dynamic_ranking(self):
+        mem_db = os.path.join(self.tmp_dir.name, "mem.db")
+        with MemoryStore(mem_db) as store:
+            # Model codestral has high success for "devops"
+            for i in range(5):
+                store.record_model_attempt(
+                    run_id="r1",
+                    task_id=f"t{i}",
+                    model="winter-coder:24gb-codestral",
+                    role="coder",
+                    domain_tags=["devops"],
+                    success=True,
+                    retries=0,
+                )
+            # Model deepseek has 0 successes for "devops"
+            for i in range(3):
+                store.record_model_attempt(
+                    run_id="r2",
+                    task_id=f"t{10+i}",
+                    model="winter-coder:24gb-deepseek",
+                    role="coder",
+                    domain_tags=["devops"],
+                    success=False,
+                    retries=2,
+                )
+
+            # When task is tagged "devops", codestral should be selected
+            picked = resolve_secondary_escalation_model(
+                role="coder",
+                tier="24gb",
+                primary_model="winter-coder:24gb",
+                domain_tags=["devops"],
+                memory_store=store,
+            )
+            self.assertEqual(picked, "winter-coder:24gb-codestral")
+
+            # Now give deepseek overwhelming success for "algorithmic"
+            for i in range(10):
+                store.record_model_attempt(
+                    run_id="r3",
+                    task_id=f"t{20+i}",
+                    model="winter-coder:24gb-deepseek",
+                    role="coder",
+                    domain_tags=["algorithmic"],
+                    success=True,
+                    retries=0,
+                )
+
+            # When task is tagged "algorithmic", deepseek should be selected
+            picked_algo = resolve_secondary_escalation_model(
+                role="coder",
+                tier="24gb",
+                primary_model="winter-coder:24gb",
+                domain_tags=["algorithmic"],
+                memory_store=store,
+            )
+            self.assertEqual(picked_algo, "winter-coder:24gb-deepseek")
+
 
     def test_validate_escalation_threshold(self):
         self.assertEqual(validate_escalation_threshold(1), 1)
@@ -358,8 +441,8 @@ class TestModelEscalation(unittest.TestCase):
         self.assertEqual(models_called[1], "winter-coder:24gb")         # Attempt 2 (Stage 1 Primary)
         self.assertEqual(models_called[2], "deepseek-coder-v2:16b")     # Attempt 3 (Stage 2 Specialist)
         self.assertEqual(models_called[3], "deepseek-coder-v2:16b")     # Attempt 4 (Stage 2 Specialist)
-        self.assertEqual(models_called[4], "winter-prime:24gb")         # Attempt 5 (Stage 3 Winter Heavyweight)
-        self.assertEqual(models_called[5], "winter-prime:24gb")         # Attempt 6 (Stage 3 Winter Heavyweight)
+        self.assertEqual(models_called[4], "winter-coder:24gb-codestral")  # Attempt 5 (Stage 3 Winter Stable)
+        self.assertEqual(models_called[5], "winter-coder:24gb-codestral")  # Attempt 6 (Stage 3 Winter Stable)
 
         events = [e["event"] for e in state.events]
         self.assertIn("model_escalated", events)
@@ -408,7 +491,7 @@ class TestModelEscalation(unittest.TestCase):
         models_called = [c.kwargs["model"] for c in mock_chat.call_args_list]
         self.assertEqual(models_called[0], "winter-coder:24gb")         # Attempt 1
         self.assertEqual(models_called[1], "deepseek-coder-v2:16b")     # Attempt 2
-        self.assertEqual(models_called[2], "winter-prime:24gb")         # Attempt 3
+        self.assertEqual(models_called[2], "winter-coder:24gb-codestral")  # Attempt 3 (Stage 3 Winter Stable)
 
         events = [e["event"] for e in state.events]
         self.assertIn("model_escalated", events)

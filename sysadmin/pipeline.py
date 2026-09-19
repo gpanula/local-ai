@@ -27,6 +27,7 @@ from mcp_core.hardware import (
     get_escalation_model,
     get_secondary_escalation_model,
     get_primary_coder_model,
+    get_coder_stable,
 )
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
 from mcp_core.injection import format_lessons_for_prompt
@@ -649,12 +650,38 @@ def resolve_secondary_escalation_model(
     state: Optional[PipelineState] = None,
     tier: Optional[str] = None,
     primary_model: Optional[str] = None,
+    escalation_model: Optional[str] = None,
+    domain_tags: Optional[list[str]] = None,
+    memory_store: Optional[MemoryStore] = None,
 ) -> str:
-    """Resolve the Stage 3 secondary escalation model ensuring it respects available VRAM."""
+    """Resolve the Stage 3 secondary escalation model ensuring it respects available VRAM and leverages historical performance."""
     if state and getattr(state, "secondary_escalation_model", None):
         return state.secondary_escalation_model.strip()
 
     active_tier = tier or (state.tier if state else None) or get_hardware_tier()
+
+    # If role is coder, draw from the Winter Coder stable for this tier
+    if role == "coder":
+        coder_stable = get_coder_stable(tier=active_tier)
+        excluded = {m for m in (primary_model, escalation_model) if m}
+        alternatives = [m for m in coder_stable if m not in excluded]
+        if not alternatives:
+            alternatives = [m for m in coder_stable if m != primary_model]
+
+        if alternatives:
+            if memory_store and domain_tags:
+                try:
+                    ranked = memory_store.rank_models_for_task(
+                        domain_tags=domain_tags,
+                        candidate_models=alternatives,
+                        role=role,
+                    )
+                    if ranked:
+                        return ranked[0]
+                except Exception:
+                    pass
+            return alternatives[0]
+
     model = get_secondary_escalation_model(tier=active_tier, role=role)
     # If secondary model matches primary model, escalate to winter-prime:<tier> for distinct cognitive framing
     if primary_model and model == primary_model:
@@ -1154,7 +1181,13 @@ def run_dispatch(
         primary_coder = resolve_coder_model(task, state=state, tier=active_tier, fallback_model=model)
         escalation_coder = resolve_escalation_model(role=role, state=state, tier=active_tier)
         secondary_coder = resolve_secondary_escalation_model(
-            role=role, state=state, tier=active_tier, primary_model=primary_coder
+            role=role,
+            state=state,
+            tier=active_tier,
+            primary_model=primary_coder,
+            escalation_model=escalation_coder,
+            domain_tags=task.get("domain_tags", []),
+            memory_store=memory_store,
         )
         enable_escalation = not getattr(state, "no_escalation", False)
         configured_budget = getattr(state, "retry_budget", None)
@@ -1479,6 +1512,19 @@ def run_dispatch(
                         )
                     except Exception:
                         pass
+                if memory_store:
+                    try:
+                        memory_store.record_model_attempt(
+                            run_id=state.run_id,
+                            task_id=tid,
+                            model=current_model,
+                            role=role,
+                            domain_tags=task.get("domain_tags", []),
+                            success=False,
+                            retries=retries,
+                        )
+                    except Exception:
+                        pass
                 retries += 1
                 if retries <= max_retries:
                     _check_escalation_before_retry()
@@ -1569,6 +1615,19 @@ def run_dispatch(
                         )
                     except Exception:
                         pass
+                if memory_store:
+                    try:
+                        memory_store.record_model_attempt(
+                            run_id=state.run_id,
+                            task_id=tid,
+                            model=current_model,
+                            role=role,
+                            domain_tags=task.get("domain_tags", []),
+                            success=False,
+                            retries=retries,
+                        )
+                    except Exception:
+                        pass
                 retries += 1
                 if retries <= max_retries:
                     _check_escalation_before_retry()
@@ -1649,6 +1708,19 @@ def run_dispatch(
                     f"\n🛡️❌ [SECURITY CODE GATE] Task '{tid}' rejected code on security threats:\n{t_desc or 'Threats detected'}"
                 )
                 state.add_event("code_security_rejected", f"Task {tid} rejected by security gate", "2")
+                if memory_store:
+                    try:
+                        memory_store.record_model_attempt(
+                            run_id=state.run_id,
+                            task_id=tid,
+                            model=current_model,
+                            role=role,
+                            domain_tags=task.get("domain_tags", []),
+                            success=False,
+                            retries=retries,
+                        )
+                    except Exception:
+                        pass
                 retries += 1
                 if retries <= max_retries:
                     _check_escalation_before_retry()
@@ -1686,6 +1758,19 @@ def run_dispatch(
             state.add_event("code_security_cleared", f"Task {tid} code cleared security gate", "2")
 
             passed_all_gates = True
+            if memory_store:
+                try:
+                    memory_store.record_model_attempt(
+                        run_id=state.run_id,
+                        task_id=tid,
+                        model=current_model,
+                        role=role,
+                        domain_tags=task.get("domain_tags", []),
+                        success=True,
+                        retries=retries,
+                    )
+                except Exception:
+                    pass
 
             # If remediated successfully after prior retry, capture solved_pattern lesson
             if retries > 0 and memory_store:

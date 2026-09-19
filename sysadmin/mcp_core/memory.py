@@ -96,6 +96,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(
     content='lessons',
     content_rowid='rowid'
 );
+
+CREATE TABLE IF NOT EXISTS model_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'coder',
+    domain_tag TEXT NOT NULL DEFAULT 'general',
+    success INTEGER NOT NULL,
+    retries INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_perf_lookup ON model_performance(domain_tag, model);
+CREATE INDEX IF NOT EXISTS idx_model_perf_model ON model_performance(model);
 """
 
 
@@ -689,3 +704,154 @@ class MemoryStore:
         lesson_id = self.insert_lesson(lesson)
         self.delete_pending_lesson(pending_id)
         return lesson_id
+
+    # ------------------------------------------------------------------
+    # Model Performance & Telemetry Tracking
+    # ------------------------------------------------------------------
+    def record_model_attempt(
+        self,
+        run_id: str,
+        task_id: str,
+        model: str,
+        role: str = "coder",
+        domain_tags: Optional[Any] = None,
+        success: bool = True,
+        retries: int = 0,
+    ) -> None:
+        """Record the outcome of a task execution attempt by a specific model.
+
+        Normalizes domain tags into individual rows so success rates can be
+        queried both globally and per-domain.
+        """
+        tags: list[str] = []
+        if isinstance(domain_tags, str):
+            tags = [t.strip() for t in domain_tags.split(",") if t.strip()]
+        elif isinstance(domain_tags, (list, tuple, set)):
+            tags = [str(t).strip() for t in domain_tags if str(t).strip()]
+        if not tags:
+            tags = ["general"]
+
+        now_str = _now_iso()
+        succ_int = 1 if success else 0
+
+        for tag in tags:
+            self.conn.execute(
+                """
+                INSERT INTO model_performance
+                    (run_id, task_id, model, role, domain_tag, success, retries, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, task_id, model, role, tag.lower(), succ_int, retries, now_str),
+            )
+        self.conn.commit()
+
+    def get_model_performance(
+        self,
+        model: Optional[str] = None,
+        domain_tag: Optional[str] = None,
+        role: str = "coder",
+    ) -> list[dict]:
+        """Query aggregated performance metrics grouped by model and domain_tag.
+
+        Returns a list of dicts with:
+        model, role, domain_tag, attempts, successes, win_rate, avg_retries.
+        """
+        query = """
+            SELECT
+                model,
+                role,
+                domain_tag,
+                COUNT(*) as attempts,
+                SUM(success) as successes,
+                ROUND(AVG(success), 4) as win_rate,
+                ROUND(AVG(success) * 100.0, 1) as win_rate_pct,
+                ROUND(AVG(retries), 2) as avg_retries
+            FROM model_performance
+            WHERE role = ?
+        """
+        params: list[Any] = [role]
+        if model:
+            query += " AND model = ?"
+            params.append(model)
+        if domain_tag:
+            query += " AND domain_tag = ?"
+            params.append(domain_tag.strip().lower())
+
+        query += " GROUP BY model, domain_tag ORDER BY win_rate_pct DESC, attempts DESC"
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def rank_models_for_task(
+        self,
+        domain_tags: Optional[Any] = None,
+        candidate_models: Optional[list[str]] = None,
+        role: str = "coder",
+    ) -> list[str]:
+        """Rank candidate models for a task based on empirical success rates.
+
+        Uses Laplace-smoothed scoring (successes + 1) / (attempts + 2) to evaluate
+        domain-specific success first, falling back to global performance.
+        Preserves candidate ordering when performance is tied or unobserved.
+        """
+        if not candidate_models:
+            return []
+        if len(candidate_models) == 1:
+            return list(candidate_models)
+
+        tags: list[str] = []
+        if isinstance(domain_tags, str):
+            tags = [t.strip().lower() for t in domain_tags.split(",") if t.strip()]
+        elif isinstance(domain_tags, (list, tuple, set)):
+            tags = [str(t).strip().lower() for t in domain_tags if str(t).strip()]
+
+        # Query all attempts for candidate models
+        placeholders = ",".join("?" for _ in candidate_models)
+        params: list[Any] = [role] + list(candidate_models)
+
+        rows = self.conn.execute(
+            f"""
+            SELECT model, domain_tag, success
+            FROM model_performance
+            WHERE role = ? AND model IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+
+        # Aggregate domain-specific and general attempts
+        stats: dict[str, dict[str, int]] = {
+            m: {"domain_succ": 0, "domain_att": 0, "global_succ": 0, "global_att": 0}
+            for m in candidate_models
+        }
+
+        for r in rows:
+            m = r["model"]
+            if m not in stats:
+                continue
+            is_succ = r["success"]
+            tag = r["domain_tag"]
+            stats[m]["global_att"] += 1
+            if is_succ:
+                stats[m]["global_succ"] += 1
+
+            if tags and tag in tags:
+                stats[m]["domain_att"] += 1
+                if is_succ:
+                    stats[m]["domain_succ"] += 1
+
+        def score_model(m: str) -> tuple[float, float, int]:
+            s = stats[m]
+            # If domain data exists, weight domain score 70% and global score 30%
+            if s["domain_att"] > 0:
+                domain_score = (s["domain_succ"] + 1.0) / (s["domain_att"] + 2.0)
+                global_score = (s["global_succ"] + 1.0) / (s["global_att"] + 2.0)
+                combined = 0.7 * domain_score + 0.3 * global_score
+            elif s["global_att"] > 0:
+                combined = (s["global_succ"] + 1.0) / (s["global_att"] + 2.0)
+            else:
+                combined = 0.5  # Neutral unobserved prior
+            # Order tuple: (combined_score, total_successes, -original_index)
+            orig_idx = candidate_models.index(m)
+            return (combined, s["global_succ"], -orig_idx)
+
+        sorted_candidates = sorted(candidate_models, key=score_model, reverse=True)
+        return sorted_candidates

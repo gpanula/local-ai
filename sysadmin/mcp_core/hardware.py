@@ -178,3 +178,27 @@ def get_primary_coder_model(tier: Optional[str] = None) -> str:
     """Resolve the default primary coder model for the active hardware tier."""
     active_tier = tier or get_hardware_tier()
     return f"winter-coder:{active_tier}"
+
+
+# The stable of Winter Coder models available per hardware tier
+WINTER_CODER_STABLE: dict[str, list[str]] = {
+    TIER_8GB: [
+        "winter-coder:8gb",          # Qwen2.5-Coder 7B base
+        "winter-coder:8gb-deepseek", # DeepSeek-R1 8B deep reasoning base
+    ],
+    TIER_16GB: [
+        "winter-coder:16gb",          # Qwen2.5-Coder 14B base
+        "winter-coder:16gb-deepseek", # DeepSeek-Coder-V2 16B MoE base
+    ],
+    TIER_24GB: [
+        "winter-coder:24gb",           # Qwen2.5-Coder 32B flagship base
+        "winter-coder:24gb-codestral", # Codestral 22B high-throughput base
+        "winter-coder:24gb-deepseek",  # DeepSeek-Coder-V2 16B MoE base
+    ],
+}
+
+
+def get_coder_stable(tier: Optional[str] = None) -> list[str]:
+    """Retrieve the list of customized Winter Coder models in the stable for a tier."""
+    active_tier = tier or get_hardware_tier()
+    return list(WINTER_CODER_STABLE.get(active_tier, WINTER_CODER_STABLE[TIER_8GB]))

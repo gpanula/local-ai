@@ -99,9 +99,50 @@ sequenceDiagram
 
 | Hardware Tier | Stage 1: Primary Coder (Attempts 1 to $T$) | Stage 2: Specialist Coder (Attempts $T+1$ to $2T$) | Stage 3: Heavyweight Winter Coder (Attempts $2T+1$ to `max_retries`) |
 | :--- | :--- | :--- | :--- |
-| **8GB Tier** (Laptop) | `winter-coder:8gb` | `deepseek-r1:8b` (CoT Reasoning) | `winter-prime:8gb` (or `winter-coder:8gb`) |
-| **16GB Tier** (Workstation) | `winter-coder:16gb` | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-prime:16gb` (or `winter-coder:16gb`) |
-| **24GB Tier** (Valkyrie / RTX 3090) | `winter-coder:24gb` (or `winter-coder:16gb` dual-model) | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-prime:24gb` / `winter-coder:24gb` (32B Flagship) |
+| **8GB Tier** (Laptop) | `winter-coder:8gb` | `deepseek-r1:8b` (CoT Reasoning) | `winter-coder:8gb-deepseek` (or `winter-prime:8gb`) |
+| **16GB Tier** (Workstation) | `winter-coder:16gb` | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-coder:16gb-deepseek` (or `winter-prime:16gb`) |
+| **24GB Tier** (Valkyrie / RTX 3090) | `winter-coder:24gb` (or `winter-coder:16gb` dual-model) | `deepseek-coder-v2:16b` (Specialist MoE) | `winter-coder:24gb-codestral` / `winter-coder:24gb-deepseek` / `winter-prime:24gb` |
+
+### The "Stable" of Winter Coders
+
+To avoid relying on generic foundation models during failure remediation, the pipeline maintains a dedicated **Stable of Winter Coders** tailored per hardware envelope:
+
+- **8GB Tier**:
+  - `winter-coder:8gb`: Built on `qwen2.5-coder:7b` (high general code generation).
+  - `winter-coder:8gb-deepseek`: Built on `deepseek-r1:8b` (deep chain-of-thought `<think>` reasoning for tricky edge cases under tight VRAM).
+- **16GB Tier**:
+  - `winter-coder:16gb`: Built on `qwen2.5-coder:14b` (strong code synthesis & ShellCheck adherence).
+  - `winter-coder:16gb-deepseek`: Built on `deepseek-coder-v2:16b` (MoE architecture with 32k context for AST diffs and refactoring).
+- **24GB Tier**:
+  - `winter-coder:24gb`: Built on `qwen2.5-coder:32b` (32B flagship precision coder).
+  - `winter-coder:24gb-codestral`: Built on `codestral:latest` (22B high-throughput parameters; exceptional speed and performance on DevOps, Bash, and Ansible tasks).
+  - `winter-coder:24gb-deepseek`: Built on `deepseek-coder-v2:16b` (MoE algorithmic coding powerhouse).
+
+### Telemetry & Domain-Aware Model Ranking
+
+Every attempt executed by a model is recorded in the SQLite database (`.localai/memory.db`) via the `model_performance` table:
+
+```sql
+CREATE TABLE IF NOT EXISTS model_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    role TEXT NOT NULL,
+    domain_tag TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    retries INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+```
+
+When escalating to Stage 3, instead of static model selection, the pipeline evaluates candidate models from the stable using **Laplace smoothing**:
+
+$$\text{Score} = \frac{\text{successes} + 1}{\text{attempts} + 2}$$
+
+- **Domain Specificity (70%) vs Global Reliability (30%)**: If empirical telemetry exists for the task's domain tags (e.g. `devops`, `bash`, `python`, `security`), domain-specific win rate is weighted 70% and global win rate 30%.
+- **Cold-Start Protection**: Unobserved models receive a neutral prior of 0.5 ($\frac{0+1}{0+2}$), ensuring newly built models are explored without being starved of opportunities.
+- **Dynamic Selection**: Tasks tagged with `devops` will dynamically favor `winter-coder:24gb-codestral`, while tasks tagged with `algorithmic` or `refactoring` will favor `winter-coder:24gb-deepseek`.
 
 ### Escalation Parameters & Thresholds
 
@@ -111,15 +152,15 @@ sequenceDiagram
   - Controlled via `--escalation-threshold <N>` (min: 1, max: 15, default: 2; or 1 if `max_retries == 1`).
   - **Stage 1 (Primary)**: Handles attempts 1 through $T$.
   - **Stage 2 (Specialist)**: Promoted when `retries >= stage2_threshold` ($T$). Runs through attempt $2T$.
-  - **Stage 3 (Heavyweight)**: Promoted when `retries >= stage3_threshold` ($2T$). Runs for all remaining attempts up to `max_retries`. If the secondary model matches the primary model on this tier, it automatically escalates to `winter-prime:<tier>` for fresh multi-persona cognitive framing.
+  - **Stage 3 (Stable Escalation)**: Promoted when `retries >= stage3_threshold` ($2T$). Dynamically ranks alternative Winter Coders in the stable using historical domain performance. If all alternatives match the primary model, it automatically escalates to `winter-prime:<tier>` for fresh multi-persona cognitive framing.
 - **Immediate Escalation Example ($T = 1$)**:
   - Attempt 1: Stage 1 Primary (`winter-coder:24gb`)
   - Attempt 2: Stage 2 Specialist (`deepseek-coder-v2:16b`)
-  - Attempt 3+: Stage 3 Heavyweight (`winter-prime:24gb`)
+  - Attempt 3+: Stage 3 Winter Stable (`winter-coder:24gb-codestral` or top-ranked alternative)
 - **Standard Escalation Example ($T = 2, \text{retry\_budget} = 6$)**:
-  - Attempts 1 & 2: Stage 1 Primary (`winter-coder:24gb` or `winter-coder:16gb`)
-  - Attempts 3 & 4: Stage 2 Specialist (`deepseek-coder-v2:16b` / `deepseek-r1:8b`)
-  - Attempts 5 & 6: Stage 3 Heavyweight (`winter-prime:24gb` or `winter-coder:24gb`)
+  - Attempts 1 & 2: Stage 1 Primary (`winter-coder:24gb`)
+  - Attempts 3 & 4: Stage 2 Specialist (`deepseek-coder-v2:16b`)
+  - Attempts 5 & 6: Stage 3 Winter Stable (`winter-coder:24gb-codestral` or `winter-coder:24gb-deepseek`)
 - **Strict Single-Model (`--no-escalation`)**:
   - Disables both Stage 2 and Stage 3 escalations; all retries execute exclusively against the primary model.
 - **VRAM Cleanup Guard**:
