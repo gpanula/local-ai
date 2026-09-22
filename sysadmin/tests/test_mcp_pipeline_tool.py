@@ -195,4 +195,26 @@ def test_mcp_run_pipeline_dynamic_auditor():
         mock_run.assert_called_once_with("Valid task prompt", model="winter-prime:16gb", dynamic_auditor=True)
 
 
+def test_mcp_tool_runtime_error_transparency():
+    """Verify runtime errors propagate specific diagnostic error messages instead of generic internal errors."""
+    with patch("pipeline.run_pipeline", side_effect=RuntimeError("Dispatch aborted: Task t-002 execution failed")):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "prompt": "Failing task prompt"
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert resp["result"].get("isError") is True
+        content = resp["result"]["content"][0]["text"]
+        assert "Error executing run_pipeline: Dispatch aborted: Task t-002 execution failed" in content
+
+
+
 

@@ -44,6 +44,15 @@ PROTOCOL_VERSION = "2024-11-05"
 # invoked via subprocess by mcp_core.transport.call_mcp), then share the canonical
 # workspace helpers instead of redefining them locally.
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), "..")))
+# Ensure the sysadmin virtual environment site-packages are resolvable even if invoked from system python
+_venv_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "venv"))
+if os.path.isdir(_venv_dir):
+    import site
+    _py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    _site_pkg = os.path.join(_venv_dir, "lib", _py_ver, "site-packages")
+    if os.path.isdir(_site_pkg) and _site_pkg not in sys.path:
+        site.addsitedir(_site_pkg)
+
 from mcp_core.workspace import WORKSPACE_ROOT, validate_workspace_path, is_valid_mcp_socket
 from mcp_core.hardware import get_default_model
 
@@ -1357,7 +1366,7 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         except Exception as e:
             sys.stderr.write(f"[ERROR] Tool execution failed for {tool_name}: {e}\n")
             sys.stderr.flush()
-            err_msg = str(e) if isinstance(e, ValueError) else "An internal error occurred. Check server logs."
+            err_msg = str(e) if str(e).strip() else f"{type(e).__name__}: An error occurred during execution."
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,

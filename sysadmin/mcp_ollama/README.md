@@ -36,9 +36,14 @@ A lightweight, zero-dependency JSON-RPC 2.0 stdio MCP server bridging AI orchest
 
 ---
 
-## ⚙️ MCP Registration
+## ⚙️ MCP Registration & Environment Isolation
 
-To expose the `local-ollama` tools directly to IDE clients (e.g. Antigravity / Gemini Code Assist) without permission prompts, register the server in `~/.gemini/config/mcp_config.json`:
+> [!IMPORTANT]
+> **Virtual Environment Python Mandatory**: The `local-ollama` MCP server orchestrates the full `pipeline.py` workflow, state persistence, AST parsing, and trajectory compression. These features require dependencies installed in `${REPO_ROOT}/sysadmin/venv` (such as `zstandard`, `yaml`, `pytest`, `ansible-lint`, etc.).
+> 
+> Running the MCP server with the system `/usr/bin/python3` or an ambient `$PATH` interpreter will cause `ModuleNotFoundError` (e.g. `No module named 'zstandard'`). Always configure `mcp_config.json` with the explicit virtual environment Python binary.
+
+To expose the `local-ollama` tools directly to IDE clients (e.g. Antigravity / Gemini Code Assist) without permission prompts, register the server in `~/.gemini/antigravity-ide/mcp_config.json` or `~/.gemini/config/mcp_config.json`:
 
 ```json
 {

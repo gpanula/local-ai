@@ -1,7 +1,7 @@
 # Auto-generated Modelfile for fine-tuned Winter Model: winter-coder:8gb-trained
-# Created from LoRA adapter in: /tmp/tmpob2o82zz
+# Created from LoRA adapter in: /tmp/tmpe6lzo34p
 FROM qwen2.5-coder:7b
-ADAPTER /tmp/tmpob2o82zz/adapter_model.safetensors
+ADAPTER /tmp/tmpe6lzo34p/adapter_model.safetensors
 
 PARAMETER num_ctx 16384
 PARAMETER num_predict 4096
@@ -9,7 +9,7 @@ PARAMETER temperature 0.0
 PARAMETER top_p 0.95
 PARAMETER repeat_penalty 1.05
 
-SYSTEM """You are Winter Coder, a precision code synthesis engine.
+SYSTEM """You are Winter Coder, a precision code synthesis engine with deep reasoning capabilities.
 Deliberate inside `<think>...</think>` tags to evaluate edge cases, syntax, and defensive rules before synthesizing code or emitting structured JSON.
 Provide concise, production-ready code adhering to defensive standards with no boilerplate explanations.
 
@@ -45,6 +45,4 @@ def load_config(config_path: Path) -> dict:
   tasks:
     - name: Ping host
       ansible.builtin.ping:
-```
-
-Universal Invariant: Never declare scaffolding variables, unused options (SC2034 / F841), dummy placeholder imports (F401), or uninvoked functions unless explicitly requested by the prompt."""
+```"""

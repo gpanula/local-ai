@@ -6,7 +6,7 @@ This document details the architectural requirements, empirical trade-offs, and 
 
 ## 1. Executive Summary & Problem Context
 
-**Winter Prime** is the foundational engine for our **Single-Model Multi-Persona (SMMP)** execution mode (defined in [`plans/arc-orc-rev-pipeline-spec.md` §4.7](file:///home/pang/Projects/local-ai/plans/arc-orc-rev-pipeline-spec.md#L534)).
+**Winter Prime** is the foundational engine for our **Single-Model Multi-Persona (SMMP)** execution mode (defined in [`plans/arc-orc-rev-pipeline-spec.md` §4.7](../../plans/arc-orc-rev-pipeline-spec.md#L534)).
 
 In standard multi-agent setups, distinct models are swapped into GPU memory per stage (e.g., DeepSeek for planning, Codestral for coding, Mistral for review). On consumer and single-workstation GPUs (8GB–24GB VRAM), this causes:
 * **Severe Model-Swapping Latency**: 2 to 10 seconds of PCIe/RAM thrashing per transition, compounding to 30–90 seconds of idle overhead per pipeline run.
@@ -62,9 +62,9 @@ Very few high-performance model families offer clean, identically trained models
 
 | Workstation Tier | Available VRAM | Selected Model | Quantization | Context Window | VRAM Footprint | Modelfile |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 🟢 **8GB Tier** | ~5.0–6.5 GB | `qwen2.5-coder:7b` | Q4_K_M | 16k (`16384`) | ~5.6–6.2 GB | [`Modelfile-prime-qwen7b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-prime-qwen7b) |
-| 🟡 **16GB Tier** | ~10–14 GB | `qwen2.5-coder:14b` | Q4_K_M | 32k (`32768`) | ~10.5–13.2 GB | [`Modelfile-prime-qwen14b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/16gb/Modelfile-prime-qwen14b) |
-| 🟣 **24GB Tier** | ~18–22 GB | `qwen2.5-coder:32b` | Q4_K_M | 16k (`16384`) | ~19.5–21.8 GB | [`Modelfile-prime-qwen32b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/24gb/Modelfile-prime-qwen32b) |
+| 🟢 **8GB Tier** | ~5.0–6.5 GB | `qwen2.5-coder:7b` | Q4_K_M | 16k (`16384`) | ~5.6–6.2 GB | [`Modelfile-prime-qwen7b`](./8gb/Modelfile-prime-qwen7b) |
+| 🟡 **16GB Tier** | ~10–14 GB | `qwen2.5-coder:14b` | Q4_K_M | 32k (`32768`) | ~10.5–13.2 GB | [`Modelfile-prime-qwen14b`](./16gb/Modelfile-prime-qwen14b) |
+| 🟣 **24GB Tier** | ~18–22 GB | `qwen2.5-coder:32b` | Q4_K_M | 16k (`16384`) | ~19.5–21.8 GB | [`Modelfile-prime-qwen32b`](./24gb/Modelfile-prime-qwen32b) |
 
 This symmetry ensures that prompting strategies, schema contracts, and sampling parameters remain **100% portable** across workstations. Developers can test workflows on an 8GB laptop and deploy the exact same pipeline to a 24GB workstation.
 
@@ -120,7 +120,7 @@ The following matrix compares candidate open-weights models against the requirem
 ## 5. Deep-Dive: Qwen2.5-Coder vs. Key Competitors
 
 ### Why not `qwen3:8b` as the Prime default?
-`qwen3:8b` is already installed locally and serves as our dedicated Reviewer model in the 8GB multi-model suite ([`Modelfile-reviewer-qwen8b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-reviewer-qwen8b)). It possesses deeper general reasoning and native thinking tokens than `qwen2.5-coder:7b`.
+`qwen3:8b` is already installed locally and serves as our dedicated Reviewer model in the 8GB multi-model suite ([`Modelfile-reviewer-qwen8b`](./8gb/Modelfile-reviewer-qwen8b)). It possesses deeper general reasoning and native thinking tokens than `qwen2.5-coder:7b`.
 
 However, for a **universal single-model runner**:
 1. **Coding Conciseness**: `qwen3` tends to surround code in discursive explanations, whereas `qwen2.5-coder` emits compact unified diffs and pure scripts required by automated execution tools.
@@ -137,8 +137,8 @@ Codestral is one of the world's best code-generation models, and is used in our 
 ## 6. Modelfile Implementation References
 
 The Winter Prime modelfiles applying this architecture are located in:
-* **8GB Tier**: [`8gb/Modelfile-prime-qwen7b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-prime-qwen7b) (`winter-prime:8gb-qwen`, `winter-prime:8gb`, `winter-prime:latest`)
-* **16GB Tier**: [`16gb/Modelfile-prime-qwen14b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/16gb/Modelfile-prime-qwen14b) (`winter-prime:16gb-qwen`, `winter-prime:16gb`)
-* **24GB Tier**: [`24gb/Modelfile-prime-qwen32b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/24gb/Modelfile-prime-qwen32b) (`winter-prime:24gb-qwen`, `winter-prime:24gb`)
+* **8GB Tier**: [`8gb/Modelfile-prime-qwen7b`](./8gb/Modelfile-prime-qwen7b) (`winter-prime:8gb-qwen`, `winter-prime:8gb`, `winter-prime:latest`)
+* **16GB Tier**: [`16gb/Modelfile-prime-qwen14b`](./16gb/Modelfile-prime-qwen14b) (`winter-prime:16gb-qwen`, `winter-prime:16gb`)
+* **24GB Tier**: [`24gb/Modelfile-prime-qwen32b`](./24gb/Modelfile-prime-qwen32b) (`winter-prime:24gb-qwen`, `winter-prime:24gb`)
 
 All three modelfiles embed the **Standard 4-Pillar Contract** (Analysis & Strategy, Risks & Edge Cases, Solution / Implementation, Verification & Testing) and universal defensive coding invariants into the base `qwen2.5-coder` image.

@@ -10,7 +10,7 @@ On workstations equipped with 24GB VRAM, developers typically face a choice:
 1. **Run a single large model** (e.g. `winter-prime:24gb` using `qwen2.5-coder:32b`), filling ~20–22 GB of VRAM.
 2. **Run two medium/small models simultaneously resident in VRAM** (e.g., a 14B model + an 8B model), sharing the 24GB pool with `keep_alive: -1`.
 
-While a 32B model offers raw per-parameter coding power, running **two concurrently resident models** solves the single greatest vulnerability of autonomous AI software engineering: **Self-Review Bias** ([`plans/arc-orc-rev-pipeline-spec.md` §4.7](file:///home/pang/Projects/local-ai/plans/arc-orc-rev-pipeline-spec.md#L582)).
+While a 32B model offers raw per-parameter coding power, running **two concurrently resident models** solves the single greatest vulnerability of autonomous AI software engineering: **Self-Review Bias** ([`plans/arc-orc-rev-pipeline-spec.md` §4.7](../../plans/arc-orc-rev-pipeline-spec.md#L582)).
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────────┐
@@ -173,7 +173,7 @@ sudo systemctl restart ollama
 ```
 
 ### Step 2: Build the Models
-Ensure the required customized models are built using [`build_models.sh`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/build_models.sh):
+Ensure the required customized models are built using [`build_models.sh`](./build_models.sh):
 ```bash
 cd ollama_update/customized_models
 
@@ -211,9 +211,9 @@ qwen3:8b             f6e5d4c3b2a1    5.2 GB    100% GPU     Forever
 
 ## 7. Modelfile Implementation References
 
-* **Builder (16GB Prime)**: [`16gb/Modelfile-prime-qwen14b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/16gb/Modelfile-prime-qwen14b)
-* **Auditor Option A (Qwen3 8GB Reviewer)**: [`8gb/Modelfile-reviewer-qwen8b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-reviewer-qwen8b)
-* **Auditor Option B (DeepSeek-R1 8GB Security)**: [`8gb/Modelfile-security-deepseek8b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/8gb/Modelfile-security-deepseek8b)
-* **Single-Model Fallback (24GB Prime 32B)**: [`24gb/Modelfile-prime-qwen32b`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/24gb/Modelfile-prime-qwen32b)
-* **Model Selection Rationale**: [`WINTER_PRIME_MODEL_SELECTION.md`](file:///home/pang/Projects/local-ai/ollama_update/customized_models/WINTER_PRIME_MODEL_SELECTION.md)
+* **Builder (16GB Prime)**: [`16gb/Modelfile-prime-qwen14b`](./16gb/Modelfile-prime-qwen14b)
+* **Auditor Option A (Qwen3 8GB Reviewer)**: [`8gb/Modelfile-reviewer-qwen8b`](./8gb/Modelfile-reviewer-qwen8b)
+* **Auditor Option B (DeepSeek-R1 8GB Security)**: [`8gb/Modelfile-security-deepseek8b`](./8gb/Modelfile-security-deepseek8b)
+* **Single-Model Fallback (24GB Prime 32B)**: [`24gb/Modelfile-prime-qwen32b`](./24gb/Modelfile-prime-qwen32b)
+* **Model Selection Rationale**: [`WINTER_PRIME_MODEL_SELECTION.md`](./WINTER_PRIME_MODEL_SELECTION.md)
 
