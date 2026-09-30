@@ -30,6 +30,12 @@
     - Antigravity directly authors, patches, and tests code (`sysadmin/*.py`, `sysadmin/*.sh`, modelfiles, datasets, unit tests) for fast iteration.
   - 🤖 **Pipeline Delegation Mode** *(Activated explicitly by keywords: `"run pipeline"`, `"delegate"`, `"test local ai"`)*:
     - Antigravity writes the prompt spec (`sysadmin/prompts/*.md`); awaits human review approval; then delegates execution to the local Ollama multi-agent pipeline.
+    - **Delegation Convention**: When directed to run or execute the pipeline, immediately invoke the native MCP tool `call_mcp_tool('local-ollama', 'run_pipeline', ...)` with `async_run=True` (or as specified) directly without pre-inspecting server or pipeline source files. The MCP server is self-documenting (via parameter descriptions and `help="<param>"`).
+- **Prompt Specification Standards (`sysadmin/prompts/*.md`)**:
+  - **Ban Stacked Negatives**: Never use phrasing like "validate negative error detection", "verify failures are handled", or "negative syntax checking". Use direct positive terms: **"Fault Detection"** or **"Error Catching"**.
+  - **Specify Exit Codes Directly**: Every test suite in Section 2 MUST explicitly state expected process exit boundaries (e.g. *“Malformed input must exit non-zero; valid input must exit 0”*).
+  - **Provide Direct Assertion Pattern**: In Section 3 Defensive Standards, ALWAYS mandate testing error-catching directly without bash negation:
+    `if command >/dev/null 2>&1; then echo "❌ Failed to detect error"; exit 1; fi`
 
 ## 5. Observability & Local AI Transparency
 - **Full Model Transparency**: When executing or querying local Ollama models (`ollama_chat`, `ollama_task_agent`, `build-and-run`, `pipeline-run`), prioritize full visibility. Never truncate, mute, or suppress the local model's reasoning, chain-of-thought, or structured tool calls.
@@ -42,3 +48,9 @@
   - **Tracing & Nodes**: Use `shortest_path` / `graphify path "<A>" "<B>"` for dependency chains and `get_node` for specific abstractions.
   - **Documentation**: Navigate `graphify-out/wiki/index.md` or `graphify-out/GRAPH_REPORT.md` instead of bulk reading raw source files.
   - **Graph Maintenance**: After modifying code files in a session, run `graphify update .` to keep the knowledge graph synchronized (AST-only, zero API cost).
+
+## 7. Local Ollama MCP Server Protocol
+- **Direct Native Tool Calling**: Always interact with Ollama, model lifecycle, and pipelines directly via native MCP tool calling (`call_mcp_tool` on the `local-ollama` server, e.g., `run_pipeline`, `ollama_list_models`, `ollama_chat`, `ollama_task_agent`).
+- **No Script or Curl Bypasses**: Never bypass native MCP tool calling by running Python CLI scripts (`sysadmin/mcp_client.py`, `sysadmin/scripts/run_pipeline_mcp.py`), subshell wrappers, or raw `curl` commands against `http://127.0.0.1:11434`.
+- **Halt on Tool Failure**: If any native MCP call fails or encounters an error, halt immediately and report the exact error and context. Do NOT attempt automated troubleshooting, diagnostic workarounds, or speculative fixes before discussing it with the user.
+

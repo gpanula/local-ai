@@ -126,6 +126,119 @@ build_prime() {
     echo "🎉 All Prime models built successfully!"
 }
 
+build_by_file() {
+    local target="$1"
+    local filename="$(basename "${target}")"
+    local tier_dir=""
+
+    if [[ "${target}" == *"8gb"* ]]; then
+        tier_dir="8gb"
+    elif [[ "${target}" == *"16gb"* ]]; then
+        tier_dir="16gb"
+    elif [[ "${target}" == *"24gb"* ]]; then
+        tier_dir="24gb"
+    else
+        if [[ -f "${SCRIPT_DIR}/8gb/${filename}" ]]; then
+            tier_dir="8gb"
+        elif [[ -f "${SCRIPT_DIR}/16gb/${filename}" ]]; then
+            tier_dir="16gb"
+        elif [[ -f "${SCRIPT_DIR}/24gb/${filename}" ]]; then
+            tier_dir="24gb"
+        fi
+    fi
+
+    case "${tier_dir}/${filename}" in
+        8gb/Modelfile-orchestrator-deepseek8b)
+            build_model "8gb" "${filename}" "winter-orchestrator:8gb-deepseek" "winter-orchestrator:8gb" ;;
+        8gb/Modelfile-architect-qwen7b)
+            build_model "8gb" "${filename}" "winter-architect:8gb-qwen" "winter-architect:8gb" ;;
+        8gb/Modelfile-coder-qwen7b)
+            build_model "8gb" "${filename}" "winter-coder:8gb-qwen" "winter-coder:8gb" ;;
+        8gb/Modelfile-coder-deepseek8b)
+            build_model "8gb" "${filename}" "winter-coder:8gb-deepseek" "winter-coder:8gb-deepseek" ;;
+        8gb/Modelfile-sysadmin-qwen7b)
+            build_model "8gb" "${filename}" "winter-sysadmin:8gb-qwen" "winter-sysadmin:8gb" ;;
+        8gb/Modelfile-security-deepseek8b)
+            build_model "8gb" "${filename}" "winter-security:8gb-deepseek" "winter-security:8gb" ;;
+        8gb/Modelfile-reviewer-qwen8b)
+            build_model "8gb" "${filename}" "winter-reviewer:8gb-qwen" "winter-reviewer:8gb" ;;
+        8gb/Modelfile-coder-trained)
+            build_model "8gb" "${filename}" "winter-coder:8gb-trained" "" ;;
+        8gb/Modelfile-prime-qwen7b)
+            build_prime_8gb ;;
+
+        16gb/Modelfile-orchestrator-deepseek16b)
+            build_model "16gb" "${filename}" "winter-orchestrator:16gb-deepseek" "winter-orchestrator:16gb" ;;
+        16gb/Modelfile-architect-deepseek16b)
+            build_model "16gb" "${filename}" "winter-architect:16gb-deepseek" "winter-architect:16gb" ;;
+        16gb/Modelfile-coder-qwen14b)
+            build_model "16gb" "${filename}" "winter-coder:16gb-qwen" "winter-coder:16gb" ;;
+        16gb/Modelfile-coder-deepseek16b)
+            build_model "16gb" "${filename}" "winter-coder:16gb-deepseek" "winter-coder:16gb-deepseek" ;;
+        16gb/Modelfile-sysadmin-qwen14b)
+            build_model "16gb" "${filename}" "winter-sysadmin:16gb-qwen" "winter-sysadmin:16gb" ;;
+        16gb/Modelfile-security-deepseek16b)
+            build_model "16gb" "${filename}" "winter-security:16gb-deepseek" "winter-security:16gb" ;;
+        16gb/Modelfile-reviewer-deepseek16b)
+            build_model "16gb" "${filename}" "winter-reviewer:16gb-deepseek" "winter-reviewer:16gb" ;;
+        16gb/Modelfile-prime-qwen14b)
+            build_prime_16gb ;;
+
+        24gb/Modelfile-orchestrator-qwen32b)
+            build_model "24gb" "${filename}" "winter-orchestrator:24gb-qwen" "winter-orchestrator:24gb" ;;
+        24gb/Modelfile-architect-qwen32b)
+            build_model "24gb" "${filename}" "winter-architect:24gb-qwen" "winter-architect:24gb" ;;
+        24gb/Modelfile-coder-qwen32b)
+            build_model "24gb" "${filename}" "winter-coder:24gb-qwen" "winter-coder:24gb" ;;
+        24gb/Modelfile-coder-codestral)
+            build_model "24gb" "${filename}" "winter-coder:24gb-codestral" "winter-coder:24gb-codestral" ;;
+        24gb/Modelfile-coder-deepseek16b)
+            build_model "24gb" "${filename}" "winter-coder:24gb-deepseek" "winter-coder:24gb-deepseek" ;;
+        24gb/Modelfile-sysadmin-codestral)
+            build_model "24gb" "${filename}" "winter-sysadmin:24gb-codestral" "winter-sysadmin:24gb" ;;
+        24gb/Modelfile-security-codestral)
+            build_model "24gb" "${filename}" "winter-security:24gb-codestral" "winter-security:24gb" ;;
+        24gb/Modelfile-reviewer-codestral)
+            build_model "24gb" "${filename}" "winter-reviewer:24gb-codestral" "winter-reviewer:24gb" ;;
+        24gb/Modelfile-prime-qwen32b)
+            build_prime_24gb ;;
+
+        *)
+            echo "⚠️ [WARNING] Unknown or unmapped modelfile: ${target}"
+            return 1
+            ;;
+    esac
+}
+
+build_updated() {
+    echo "🔍 [Detecting Modified Modelfiles via git...]"
+    local repo_root="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+    local modified_files
+    modified_files="$(git -C "${repo_root}" status --porcelain | awk '{print $2}' | grep -E 'Modelfile' || true)"
+    
+    if [[ -z "${modified_files}" ]]; then
+        modified_files="$(git -C "${repo_root}" diff --name-only HEAD | grep -E 'Modelfile' || true)"
+    fi
+
+    if [[ -z "${modified_files}" ]]; then
+        echo "ℹ️  No modified Modelfiles detected."
+        return 0
+    fi
+
+    echo "Found modified Modelfiles:"
+    echo "${modified_files}"
+    echo ""
+
+    local count=0
+    for f in ${modified_files}; do
+        if [[ -f "${repo_root}/${f}" ]] && [[ "${f}" == *"ollama_update/customized_models"* ]]; then
+            build_by_file "${f}"
+            count=$((count + 1))
+        fi
+    done
+    echo "🎉 Successfully rebuilt ${count} modified model(s)!"
+}
+
 list_models() {
     echo "Winter Multi-Agent Model Matrix (6 Roles x 3 Tiers):"
     echo ""
@@ -149,6 +262,8 @@ list_models() {
     echo "  • winter-orchestrator:24gb-qwen   (alias: winter-orchestrator:24gb)"
     echo "  • winter-architect:24gb-qwen      (alias: winter-architect:24gb)"
     echo "  • winter-coder:24gb-qwen          (alias: winter-coder:24gb)"
+    echo "  • winter-coder:24gb-codestral     (alias: winter-coder:24gb-codestral)"
+    echo "  • winter-coder:24gb-deepseek      (alias: winter-coder:24gb-deepseek)"
     echo "  • winter-sysadmin:24gb-codestral  (alias: winter-sysadmin:24gb)"
     echo "  • winter-security:24gb-codestral  (alias: winter-security:24gb)"
     echo "  • winter-reviewer:24gb-codestral  (alias: winter-reviewer:24gb)"
@@ -188,6 +303,14 @@ case "${TARGET}" in
     prime|prime-all|smmp|smmp-all)
         build_prime
         ;;
+    updated|changed|diff)
+        build_updated
+        ;;
+    *Modelfile*)
+        for arg in "$@"; do
+            build_by_file "${arg}"
+        done
+        ;;
     pull-8gb)
         pull_8gb
         ;;
@@ -204,7 +327,7 @@ case "${TARGET}" in
         list_models
         ;;
     *)
-        echo "Usage: $0 [8gb | 16gb | 24gb | all | prime-8gb | prime-16gb | prime-24gb | prime | pull-8gb | pull-16gb | pull-24gb | pull-all | list]"
+        echo "Usage: $0 [8gb | 16gb | 24gb | all | prime-8gb | prime-16gb | prime-24gb | prime | updated | <modelfile>... | pull-8gb | pull-16gb | pull-24gb | pull-all | list]"
         exit 1
         ;;
 esac

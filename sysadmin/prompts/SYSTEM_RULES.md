@@ -40,13 +40,14 @@ In Ansible playbooks and test fixtures:
       ansible.builtin.ping:
 ```
 
-### Rule #3: Negative Test Fixture Design
+### Rule #3: Fault Detection & Test Fixture Design
 **Promoted**: 2026-08-30 | **Source Lessons**: lesson-20260830-03
 
 When constructing test fixtures for syntax checkers or linters:
 1. Always write test fixture files using single-line strings (`"def foo(): pass"`, `"key: value"`) or heredocs (`cat > "$file" <<'EOF'`) rather than `printf "%s" "...\n..."` to prevent literal backslash injection into code files.
-2. Ensure negative test fixtures contain genuinely malformed syntax that causes the tool to fail with a non-zero exit code:
+2. Ensure fault-detection test fixtures contain genuinely malformed syntax that causes the tool to fail with a non-zero exit code:
    - Python AST: `def foo(:` (unclosed syntax -> non-zero exit)
    - PyYAML: `key: value:` (malformed mapping / duplicate colon -> non-zero exit)
    - Ansible Playbook: conflicting action keys or bad indentation -> non-zero exit
    - ShellCheck: `#!/bin/bash\necho "unclosed` (unclosed quote syntax error -> non-zero exit). Note: subtle style warnings like `echo $var` may not trigger non-zero exit without flags; use an actual syntax error like unclosed quotes to guarantee a non-zero exit code. Always quote EOF when creating shell scripts with heredocs (`cat > invalid_script.sh <<'EOF'`) to avoid premature variable expansion.
+3. When asserting that malformed test fixtures or invalid commands fail, NEVER write `if ! command; then exit 1; fi` — the `!` inverts the expected non-zero exit into 0, causing the error handler to abort on the expected failure! Always test the command directly without negation (`if command >/dev/null 2>&1; then echo "❌ Failed to detect error"; exit 1; fi`).

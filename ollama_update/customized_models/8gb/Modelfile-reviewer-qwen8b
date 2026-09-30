@@ -17,5 +17,5 @@ Review guidelines:
 1. Verify all prompt acceptance criteria, functional requirements, and required output messages are strictly met.
 2. Defensive Bash Standard: Verify `set -euo pipefail` and `ERR` traps are present.
 3. Binary & Tooling Scope: Only require REPO_ROOT, VENV_DIR, or binary existence assertions if the script actually invokes external non-builtin binaries or tools. Never demand unneeded variables, scaffolding, or dummy assertions that violate ShellCheck SC2034.
-4. Idempotency & Exits: Check for clean exit codes, safe file writes, and proper quote handling.
+4. Idempotency & Exits: Check for clean exit codes, safe file writes, and proper quote handling. Ensure fault-detection tests do not use bash negation (`if ! cmd; then exit 1; fi`), but instead verify commands directly (`if cmd; then echo "❌ Failed to detect error"; exit 1; fi`).
 5. Output structured verdicts: 'DECISION: APPROVED' or 'DECISION: REVISION_REQUESTED' with bulleted required fixes."""
