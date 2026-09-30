@@ -216,5 +216,147 @@ def test_mcp_tool_runtime_error_transparency():
         assert "Error executing run_pipeline: Dispatch aborted: Task t-002 execution failed" in content
 
 
+def test_mcp_tools_list_schema_retry_budget():
+    """Verify tools/list exposes retry_budget for run_pipeline and process_prompt."""
+    req = {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/list",
+        "params": {}
+    }
+    resp = process_jsonrpc(req)
+    assert resp is not None
+    tools = {t["name"]: t for t in resp["result"]["tools"]}
+    assert "retry_budget" in tools["run_pipeline"]["inputSchema"]["properties"]
+    assert tools["run_pipeline"]["inputSchema"]["properties"]["retry_budget"]["type"] == "integer"
+    assert "retry_budget" in tools["process_prompt"]["inputSchema"]["properties"]
+    assert tools["process_prompt"]["inputSchema"]["properties"]["retry_budget"]["type"] == "integer"
 
+
+def test_mcp_run_pipeline_with_retry_budget():
+    """Verify run_pipeline passes retry_budget integer to pipeline.run_pipeline."""
+    mock_result = {"run_id": "test-retry-budget", "status": "complete"}
+    with patch("pipeline.run_pipeline", return_value=mock_result) as mock_run:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "prompt": "Valid task prompt",
+                    "retry_budget": 5,
+                    "dual_model": True,
+                    "dynamic_auditor": True
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert not resp["result"].get("isError")
+        mock_run.assert_called_once_with(
+            "Valid task prompt",
+            model="winter-prime:16gb",
+            dynamic_auditor=True,
+            retry_budget=5
+        )
+
+
+def test_mcp_run_pipeline_resume_only():
+    """Verify run_pipeline with resume only calls resume_pipeline."""
+    mock_result = {"run_id": "run-resume-123", "status": "resumed"}
+    with patch("pipeline.resume_pipeline", return_value=mock_result) as mock_resume:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "resume": "run-resume-123"
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert not resp["result"].get("isError")
+        content = json.loads(resp["result"]["content"][0]["text"])
+        assert content["run_id"] == "run-resume-123"
+        mock_resume.assert_called_once_with("run-resume-123", model="winter-prime:latest")
+
+
+def test_mcp_run_pipeline_keep_models():
+    """Verify run_pipeline with keep_models=True forwards keep_models to pipeline runner."""
+    mock_result = {"run_id": "test-keep-models", "status": "complete"}
+    with patch("pipeline.run_pipeline", return_value=mock_result) as mock_run:
+        req = {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": "run_pipeline",
+                "arguments": {
+                    "prompt": "Test keep models prompt",
+                    "keep_models": True,
+                    "dual_model": True
+                }
+            }
+        }
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert not resp["result"].get("isError")
+        mock_run.assert_called_once_with(
+            "Test keep models prompt",
+            model="winter-prime:16gb",
+            auditor_model="qwen3:8b",
+            keep_models=True
+        )
+
+
+def test_mcp_run_pipeline_help_parameter():
+    """Verify run_pipeline with help=True or help='all' returns full self-documenting help."""
+    req = {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "tools/call",
+        "params": {
+            "name": "run_pipeline",
+            "arguments": {
+                "help": True
+            }
+        }
+    }
+    with patch("pipeline.run_pipeline") as mock_run:
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert "result" in resp
+        content = resp["result"]["content"][0]["text"]
+        assert "Arc-Orc-Rev Multi-Agent Pipeline Runner" in content
+        assert "Parameter: `keep_models`" in content
+        assert "Parameter: `dual_model`" in content
+        assert "Parameter: `dynamic_auditor`" in content
+        assert not mock_run.called
+
+
+def test_mcp_run_pipeline_help_specific_param():
+    """Verify run_pipeline with help='<param>' returns specific verbose documentation."""
+    req = {
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "tools/call",
+        "params": {
+            "name": "run_pipeline",
+            "arguments": {
+                "help": "keep_models"
+            }
+        }
+    }
+    with patch("pipeline.run_pipeline") as mock_run:
+        resp = process_jsonrpc(req)
+        assert resp is not None
+        assert "result" in resp
+        content = resp["result"]["content"][0]["text"]
+        assert "### Parameter: `keep_models`" in content
+        assert "GPU VRAM" in content
+        assert not mock_run.called
 

@@ -6,6 +6,7 @@ chat, code generation, and model management to a local Ollama instance.
 """
 
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -15,10 +16,26 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+MCP_LOG_FILE = os.environ.get("MCP_LOG_FILE", "/tmp/mcp_ollama_wire.log")
+ACTIVE_PIPELINE_RUNS: Dict[str, Dict[str, Any]] = {}
+_MCP_STDOUT = sys.__stdout__ if sys.__stdout__ is not None else sys.stdout
+
+
+
+def _wire_log(msg: str) -> None:
+    try:
+        ts = datetime.datetime.now().isoformat()
+        with open(MCP_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] [PID {os.getpid()}] {msg}\n")
+    except Exception:
+        pass
 
 
 def _validate_ollama_host(raw: str) -> str:
@@ -106,6 +123,24 @@ def handle_list_models() -> str:
         result.append(f"- **{name}** ({size_gb:.2f} GB) | Params: {param_size} | Family: {family} | Quant: {quant}")
     
     return "\n".join(result)
+
+
+def get_installed_model_names() -> List[str]:
+    """Returns a list of all model names currently installed in local Ollama."""
+    try:
+        data = _http_request("/api/tags", method="GET")
+        models = data.get("models", [])
+        names = []
+        for m in models:
+            name = m.get("name", "")
+            if name:
+                names.append(name)
+                if name.endswith(":latest"):
+                    names.append(name[:-7])
+        return names
+    except Exception as e:
+        _wire_log(f"Failed to query installed models: {e}")
+        return []
 
 
 AVAILABLE_OLLAMA_TOOLS = [
@@ -398,12 +433,19 @@ def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: i
 
         s.close()
 
-        # Extract exit code from marker
-        ec_match = re.search(r"__LOCALAI_EXIT:(\d+)__", last_text)
-        if ec_match:
-            exit_code = int(ec_match.group(1))
+        # Extract exit code from marker (use last match to avoid stale scrollback markers)
+        ec_matches = re.findall(r"__LOCALAI_EXIT:(\d+)__", last_text)
+        if ec_matches:
+            exit_code = int(ec_matches[-1])
         else:
             exit_code = 0
+
+        # Scope error indicator inspection to current command execution output
+        eval_text = last_text
+        if inner_cmd in last_text:
+            eval_text = last_text.rsplit(inner_cmd, 1)[-1]
+        elif command.strip() in last_text:
+            eval_text = last_text.rsplit(command.strip(), 1)[-1]
 
         # Safety override (AGENTS.md Rule 2): Never rely solely on exit 0.
         # Inspect buffer for hidden tracebacks, syntax errors, or permission faults.
@@ -415,7 +457,7 @@ def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: i
             "SyntaxError:",
             "Permission denied",
         ]
-        if exit_code == 0 and any(err in last_text for err in error_indicators):
+        if exit_code == 0 and any(err in eval_text for err in error_indicators):
             exit_code = 1
 
         cleaned_text = re.sub(r"__LOCALAI_EXIT:\d+__\r?\n?", "", last_text)
@@ -442,7 +484,7 @@ def handle_execute_task(
     captures output, and asks Ollama to verify and analyze the execution outcome.
     """
     import subprocess
-    work_dir = os.path.expanduser(cwd) if cwd else os.getcwd()
+    work_dir = os.path.expanduser(cwd) if cwd else WORKSPACE_ROOT
     execution_target = "host subprocess"
 
     terminal_sock = os.environ.get("TERMINAL_MCP_SOCKET", "/tmp/terminal-mcp.sock")
@@ -516,44 +558,149 @@ def handle_execute_task(
     return "\n".join(report)
 
 
+PIPELINE_PARAMETER_HELP: Dict[str, str] = {
+    "prompt": (
+        "### Parameter: `prompt`\n"
+        "- **Type**: `string` (required unless `resume` is specified)\n"
+        "- **Description**: Task prompt text or workspace-relative path to a Markdown prompt specification file.\n"
+        "- **Behavior**: If the value matches an existing file (e.g. 'sysadmin/prompts/task.md'), the file contents are automatically read and supplied to the pipeline. Otherwise, raw text is treated as the direct prompt.\n"
+        "- **Role Handling**: Passed to the Architect for problem decomposition, risk assessment, and DAG synthesis.\n"
+        "- **Example**: `prompt='sysadmin/prompts/verify_code_quality_toolchain.md'`"
+    ),
+    "model": (
+        "### Parameter: `model`\n"
+        "- **Type**: `string` (optional, default: 'winter-prime:latest' or 'winter-prime:16gb')\n"
+        "- **Description**: Primary Ollama model used for Builder roles (Architect, Orchestrator, Coder, Sysadmin).\n"
+        "- **Residency Resolution**: When `dual_model=True` or `dynamic_auditor=True`, this defaults to 'winter-prime:16gb' to preserve 24GB VRAM residency alongside the auditor model.\n"
+        "- **Example**: `model='winter-prime:16gb'`"
+    ),
+    "auditor_model": (
+        "### Parameter: `auditor_model`\n"
+        "- **Type**: `string` (optional, default: 'qwen3:8b' in dual-model mode, or dynamically chosen)\n"
+        "- **Description**: Secondary Critic/Auditor model for Reviewer Gate, Security Gate, and Code Review.\n"
+        "- **Anti-Self-Review Invariant**: Enforces Check 10 by ensuring plans and code are audited by an independent model instance rather than the authoring Builder model.\n"
+        "- **Example**: `auditor_model='qwen3:8b'`"
+    ),
+    "dual_model": (
+        "### Parameter: `dual_model`\n"
+        "- **Type**: `boolean` (optional, default: false)\n"
+        "- **Description**: Enables 24GB dual-model residency (Builder: 'winter-prime:16gb', Auditor: 'qwen3:8b').\n"
+        "- **VRAM & Lifecycle**: Activates the 24GB hardware tier which disables inter-stage model unloading (`state.unload_models = False`). Both models stay resident in VRAM for zero-reload transition speed.\n"
+        "- **Example**: `dual_model=True`"
+    ),
+    "dynamic_auditor": (
+        "### Parameter: `dynamic_auditor`\n"
+        "- **Type**: `boolean` (optional, default: false)\n"
+        "- **Description**: Enables dynamic Auditor selection by the Orchestrator/Architect based on task domain tags and risk vectors.\n"
+        "- **Specialization**: Selects reasoning models (e.g. `deepseek-r1:8b`) for logic/math, `qwen3:8b` for architecture/sysadmin, or `codestral` for polyglot code.\n"
+        "- **VRAM & Lifecycle**: Activates 24GB residency tier with model unloading disabled (`state.unload_models = False`).\n"
+        "- **Example**: `dynamic_auditor=True`"
+    ),
+    "keep_models": (
+        "### Parameter: `keep_models`\n"
+        "- **Type**: `boolean` (optional, default: false)\n"
+        "- **Description**: Explicitly forces models to remain loaded in GPU VRAM across all stages without unloading.\n"
+        "- **Behavioral Mapping**: Overrides tier-based auto-unloading (such as the default 8GB tier laptop behavior which unloads models between stages to conserve memory). Setting `keep_models=True` prevents all unloading calls to Ollama, eliminating cold-load latency.\n"
+        "- **Example**: `keep_models=True`"
+    ),
+    "retry_budget": (
+        "### Parameter: `retry_budget`\n"
+        "- **Type**: `integer` (optional, default: 3, range: 1 to 15)\n"
+        "- **Description**: Configurable maximum retry attempts per cognitive stage (Architect, Orchestrator, Coder, Sysadmin) upon failed validation checks, linter errors, or gate rejections.\n"
+        "- **Example**: `retry_budget=5`"
+    ),
+    "resume": (
+        "### Parameter: `resume`\n"
+        "- **Type**: `string` (optional, default: None)\n"
+        "- **Description**: Existing Run ID (e.g. 'run-20260924-051544-1db8b9') used to resume an aborted run from its checkpoint in `runs/<run_id>/state.json`.\n"
+        "- **Example**: `resume='run-20260924-051544-1db8b9'`"
+    ),
+    "async_run": (
+        "### Parameter: `async_run`\n"
+        "- **Type**: `boolean` (optional, default: false)\n"
+        "- **Description**: Executes the pipeline asynchronously in a background thread and immediately returns a JSON response containing `status: 'started'` and the `run_id`.\n"
+        "- **Client Protection**: Prevents client-side JSON-RPC / MCP stdio timeouts on long-running multi-agent runs (5-15 mins). Progress streams live to `terminal-mcp` and can be checked via `pipeline_status(run_id=...)`.\n"
+        "- **Example**: `async_run=True`"
+    ),
+    "help": (
+        "### Parameter: `help`\n"
+        "- **Type**: `string` or `boolean` (optional, default: None)\n"
+        "- **Description**: Request verbose self-documenting help directly from the server.\n"
+        "- **Usage Modes**:\n"
+        "  - `help=True` or `help='all'`: Full documentation of the pipeline runner and all parameters.\n"
+        "  - `help='<param_name>'` (e.g. `help='keep_models'`, `help='dual_model'`): In-depth help, VRAM implications, and examples for that specific parameter.\n"
+        "- **Examples**:\n"
+        "  - `run_pipeline(help=True)`\n"
+        "  - `run_pipeline(help='keep_models')`"
+    ),
+}
+
+
+def get_pipeline_help(param: Optional[Union[bool, str]] = None) -> str:
+    """Generates comprehensive or parameter-specific verbose documentation."""
+    if isinstance(param, str):
+        key = param.strip().lower()
+        if key in PIPELINE_PARAMETER_HELP:
+            return PIPELINE_PARAMETER_HELP[key]
+        for k, text in PIPELINE_PARAMETER_HELP.items():
+            if key == k or key in k:
+                return text
+
+    overview = [
+        "### Arc-Orc-Rev Multi-Agent Pipeline Runner (`run_pipeline` / `process_prompt`)\n",
+        "Executes the autonomous 6-role multi-agent pipeline:",
+        "Architect ➔ Orchestrator ➔ Reviewer Gate ➔ Security Gate ➔ Coder ➔ Sysadmin (Live PTY) ➔ Continuous Memory Persistence.\n",
+        "**Available Parameters:**\n",
+    ]
+    for param_name in [
+        "prompt", "model", "auditor_model", "dual_model", "dynamic_auditor",
+        "keep_models", "retry_budget", "resume", "async_run", "help"
+    ]:
+        if param_name in PIPELINE_PARAMETER_HELP:
+            overview.append(f"{PIPELINE_PARAMETER_HELP[param_name]}\n")
+
+    overview.append(
+        "\n**Parameter Deep-Dive Query:**\n"
+        "To view deep-dive help for a single parameter, pass `help='<parameter_name>'`, e.g.:\n"
+        "- `run_pipeline(help='keep_models')`\n"
+        "- `run_pipeline(help='dual_model')`\n"
+        "- `run_pipeline(help='dynamic_auditor')`\n\n"
+        "**Execution Examples:**\n"
+        "- `run_pipeline(prompt='sysadmin/prompts/task.md', dual_model=True, dynamic_auditor=True, keep_models=True, async_run=True)`\n"
+        "- `run_pipeline(prompt='sysadmin/prompts/task.md', retry_budget=5, async_run=True)`\n"
+        "- `run_pipeline(resume='run-20260907-...')`"
+    )
+    return "\n".join(overview)
+
+
 def handle_run_pipeline(
-    prompt: str,
+    prompt: str = "",
     model: Optional[str] = None,
     resume: Optional[str] = None,
     auditor_model: Optional[str] = None,
     dual_model: bool = False,
     dynamic_auditor: bool = False,
+    keep_models: bool = False,
+    retry_budget: Optional[int] = None,
+    async_run: bool = False,
+    help: Optional[Union[bool, str]] = None,
 ) -> str:
     """
     Executes the full Arc-Orc-Rev multi-agent pipeline (Architect -> Orchestrator ->
     Reviewer Gate -> Security Gate -> Multi-Tier Code Verification -> Live PTY Execution ->
-    Continuous Memory & Trajectory Persistence).
+    Continuous Memory & Trajectory Persistence). Supports synchronous and asynchronous background execution.
     """
     prompt_raw = (prompt or "").strip()
     resume_raw = (resume or "").strip()
 
+    if help is not None and help is not False:
+        return get_pipeline_help(help)
+
     if prompt_raw.lower() in ("--help", "-h", "help"):
-        return (
-            "### Arc-Orc-Rev Multi-Agent Pipeline Runner (`run_pipeline`)\n\n"
-            "Executes the autonomous multi-agent pipeline:\n"
-            "Architect -> Orchestrator -> Reviewer Gate -> Security Gate -> Multi-Tier Code Verification -> Live PTY Execution -> Memory & Trajectory Persistence.\n\n"
-            "**Parameters:**\n"
-            "- `prompt` (str): Task prompt text or workspace path to a prompt file (e.g. 'sysadmin/prompts/task.md'). Required unless `resume` is specified.\n"
-            "- `model` (str, optional): Ollama model to use across all pipeline stages (default: 'winter-prime:latest').\n"
-            "- `auditor_model` (str, optional): Secondary Auditor model for Reviewer and Security stages (e.g. 'qwen3:8b').\n"
-            "- `dual_model` (bool, optional): Enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b).\n"
-            "- `dynamic_auditor` (bool, optional): Allow the Orchestrator/Architect to dynamically select the Auditor model/strategy based on task domain tags and risk vectors.\n"
-            "- `resume` (str, optional): Run ID to resume an aborted run from state.json.\n\n"
-            "**Examples:**\n"
-            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md')`\n"
-            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md', dual_model=True)`\n"
-            "- `run_pipeline(prompt='sysadmin/prompts/hello_world_test.md', dynamic_auditor=True)`\n"
-            "- `run_pipeline(prompt='Write a python script to check service health', model='winter-prime:latest')`\n"
-            "- `run_pipeline(prompt='', resume='run-20260907-...')`"
-        )
+        return get_pipeline_help(True)
 
     if not resume_raw and not prompt_raw:
-        raise ValueError("A non-empty 'prompt' (or prompt file path) or a 'resume' Run ID is required.")
+        raise ValueError("A non-empty 'prompt' (or prompt file path) or a 'resume' Run ID is required (or pass 'help=True').")
 
     prompt_content = prompt_raw
     if prompt_content:
@@ -580,15 +727,330 @@ def handle_run_pipeline(
         kwargs["auditor_model"] = selected_auditor
     if dynamic_auditor:
         kwargs["dynamic_auditor"] = True
+    if keep_models:
+        kwargs["keep_models"] = True
+    if retry_budget is not None:
+        kwargs["retry_budget"] = int(retry_budget)
 
-    from pipeline import run_pipeline, resume_pipeline
-    with contextlib.redirect_stdout(sys.stderr):
-        if resume_raw:
-            result = resume_pipeline(resume_raw, **kwargs)
-        else:
-            result = run_pipeline(prompt_content, **kwargs)
+    from pipeline import run_pipeline, resume_pipeline, generate_run_id
+
+    if async_run:
+        target_run_id = resume_raw if resume_raw else generate_run_id()
+        record = {
+            "run_id": target_run_id,
+            "status": "running",
+            "started_at": datetime.datetime.now().isoformat(),
+            "prompt_preview": prompt_content[:200],
+            "builder_model": selected_model,
+            "auditor_model": selected_auditor,
+            "keep_models": keep_models,
+            "error": None,
+            "result": None,
+        }
+        ACTIVE_PIPELINE_RUNS[target_run_id] = record
+
+        def _worker():
+            try:
+                if resume_raw:
+                    res = resume_pipeline(resume_raw, **kwargs)
+                else:
+                    res = run_pipeline(prompt_content, run_id=target_run_id, **kwargs)
+                record["status"] = "complete"
+                record["result"] = res
+                _wire_log(f"Async pipeline worker completed for {target_run_id}")
+            except Exception as ex:
+                record["status"] = "failed"
+                record["error"] = str(ex)
+                _wire_log(f"Async pipeline worker failed for {target_run_id}: {ex}\n{traceback.format_exc()}")
+
+        thread = threading.Thread(target=_worker, name=f"pipeline-{target_run_id}", daemon=False)
+        thread.start()
+        record["thread"] = thread
+
+        return json.dumps({
+            "status": "started",
+            "run_id": target_run_id,
+            "async": True,
+            "message": f"Pipeline run {target_run_id} launched in background thread. Track progress via 'pipeline_status' tool or terminal-mcp.",
+            "builder_model": selected_model,
+            "auditor_model": selected_auditor,
+            "keep_models": keep_models,
+            "tier": "24gb" if (dual_model or dynamic_auditor) else "latest",
+        }, indent=2)
+
+    if resume_raw:
+        result = resume_pipeline(resume_raw, **kwargs)
+    else:
+        result = run_pipeline(prompt_content, **kwargs)
 
     return json.dumps(result, indent=2)
+
+
+def handle_pipeline_status(run_id: Optional[str] = None, verbose: bool = False, **kwargs) -> str:
+    """
+    Queries execution status, phase, events, and task outcomes for a pipeline run.
+    If verbose=True or diagnostic flags are passed, delegates to handle_inspect_pipeline_run.
+    """
+    if verbose or kwargs.get("diagnostics") or kwargs.get("inspect"):
+        return handle_inspect_pipeline_run(run_id=run_id, **kwargs)
+
+    from mcp_core.context_store import ContextStore
+    store = ContextStore()
+
+    target_run_id = (run_id or "").strip()
+    if not target_run_id:
+        if ACTIVE_PIPELINE_RUNS:
+            target_run_id = list(ACTIVE_PIPELINE_RUNS.keys())[-1]
+        else:
+            candidates = []
+            if os.path.isdir(store.runs_dir):
+                for item in os.listdir(store.runs_dir):
+                    if item.startswith("run-"):
+                        p = os.path.join(store.runs_dir, item)
+                        mtime = os.path.getmtime(p)
+                        clean_id = item[:-8] if item.endswith(".tar.zst") else (item[:-4] if item.endswith(".tar") else item)
+                        candidates.append((mtime, clean_id))
+            if candidates:
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                target_run_id = candidates[0][1]
+
+    if not target_run_id:
+        return json.dumps({"error": "No pipeline runs found and no run_id specified."}, indent=2)
+
+    mem_record = ACTIVE_PIPELINE_RUNS.get(target_run_id, {})
+    is_thread_alive = False
+    if mem_record and "thread" in mem_record:
+        is_thread_alive = mem_record["thread"].is_alive()
+
+    try:
+        state_dict = store.load(f"runs/{target_run_id}/state.json")
+        status = state_dict.get("status", "unknown")
+        if is_thread_alive and status != "complete":
+            status = "running"
+
+        events = state_dict.get("events", [])
+        recent_events = events[-5:] if len(events) > 5 else events
+
+        out = {
+            "run_id": target_run_id,
+            "status": status,
+            "current_phase": state_dict.get("current_phase", "unknown"),
+            "builder_model": state_dict.get("builder_model"),
+            "auditor_model": state_dict.get("auditor_model"),
+            "tasks": state_dict.get("tasks", {}),
+            "recent_events": recent_events,
+            "thread_alive": is_thread_alive,
+        }
+        if mem_record.get("error"):
+            out["error"] = mem_record["error"]
+
+        return json.dumps(out, indent=2)
+    except FileNotFoundError:
+        if is_thread_alive:
+            return json.dumps({
+                "run_id": target_run_id,
+                "status": "running",
+                "current_phase": "initializing",
+                "message": "Pipeline background thread is active; state.json is being initialized.",
+                "thread_alive": True,
+            }, indent=2)
+        return json.dumps({
+            "run_id": target_run_id,
+            "status": "not_found",
+            "error": f"Run '{target_run_id}' state.json could not be located.",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "run_id": target_run_id,
+            "status": "error",
+            "error": f"Error inspecting run: {e}",
+        }, indent=2)
+
+
+def handle_inspect_pipeline_run(
+    run_id: Optional[str] = None,
+    tail_events: int = 50,
+    include_failures: bool = True,
+    include_tasks: bool = True,
+    include_messages: bool = True,
+    include_terminal_output: bool = True,
+) -> str:
+    """
+    Deep-dive inspection of a pipeline run, returning comprehensive diagnostic details:
+    status, failure chronology (linter rejections, shellcheck findings, review critiques),
+    model escalations, terminal PTY execution outputs, task progress, and milestone events.
+    """
+    from mcp_core.context_store import ContextStore
+    store = ContextStore()
+
+    target_run_id = (run_id or "").strip()
+    if not target_run_id:
+        if ACTIVE_PIPELINE_RUNS:
+            target_run_id = list(ACTIVE_PIPELINE_RUNS.keys())[-1]
+        else:
+            candidates = []
+            if os.path.isdir(store.runs_dir):
+                for item in os.listdir(store.runs_dir):
+                    if item.startswith("run-"):
+                        p = os.path.join(store.runs_dir, item)
+                        mtime = os.path.getmtime(p)
+                        clean_id = item[:-8] if item.endswith(".tar.zst") else (item[:-4] if item.endswith(".tar") else item)
+                        candidates.append((mtime, clean_id))
+            localai_runs = os.path.join(WORKSPACE_ROOT, ".localai", "runs")
+            if os.path.isdir(localai_runs):
+                for item in os.listdir(localai_runs):
+                    if item.startswith("run-") and item.endswith(".jsonl"):
+                        clean_id = item[:-6]
+                        p = os.path.join(localai_runs, item)
+                        mtime = os.path.getmtime(p)
+                        candidates.append((mtime, clean_id))
+            if candidates:
+                candidates.sort(key=lambda c: c[0], reverse=True)
+                target_run_id = candidates[0][1]
+
+    if not target_run_id:
+        return json.dumps({"error": "No pipeline runs found and no run_id specified."}, indent=2)
+
+    mem_record = ACTIVE_PIPELINE_RUNS.get(target_run_id, {})
+    is_thread_alive = False
+    if mem_record and "thread" in mem_record:
+        is_thread_alive = mem_record["thread"].is_alive()
+
+    diagnostics: Dict[str, Any] = {
+        "run_id": target_run_id,
+        "status": "unknown",
+        "current_phase": "unknown",
+        "outcome": None,
+        "abort_reason": None,
+        "thread_alive": is_thread_alive,
+        "models": {},
+        "tasks": {},
+        "failure_chronology": [],
+        "escalations": [],
+        "terminal_execution": None,
+        "recent_events": [],
+    }
+
+    try:
+        state_dict = store.load(f"runs/{target_run_id}/state.json")
+        diagnostics["status"] = state_dict.get("status", "unknown")
+        diagnostics["current_phase"] = state_dict.get("current_phase", "unknown")
+        diagnostics["models"]["builder"] = state_dict.get("builder_model")
+        diagnostics["models"]["auditor"] = state_dict.get("auditor_model")
+        if include_tasks:
+            diagnostics["tasks"] = state_dict.get("tasks", {})
+        events = state_dict.get("events", [])
+        diagnostics["recent_events"] = events[-tail_events:] if len(events) > tail_events else events
+    except Exception:
+        pass
+
+    if is_thread_alive and diagnostics["status"] != "complete":
+        diagnostics["status"] = "running"
+
+    jsonl_path = os.path.join(WORKSPACE_ROOT, ".localai", "runs", f"{target_run_id}.jsonl")
+    if os.path.isfile(jsonl_path):
+        diagnostics["log_file"] = os.path.relpath(jsonl_path, WORKSPACE_ROOT)
+        current_stage = "unknown"
+        current_attempt = 1
+        current_model = diagnostics["models"].get("builder") or "unknown"
+        terminal_chunks: List[str] = []
+
+        try:
+            with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = entry.get("type")
+                    edata = entry.get("data", {})
+                    ts = entry.get("timestamp", "")
+
+                    if etype == "pipeline_start":
+                        diagnostics["models"].update(edata.get("models", {}))
+                        diagnostics["tier"] = edata.get("tier")
+                        diagnostics["max_retries"] = edata.get("max_retries")
+                        prompt_str = edata.get("prompt", "")
+                        if prompt_str:
+                            diagnostics["prompt_summary"] = prompt_str[:300] + ("..." if len(prompt_str) > 300 else "")
+                    elif etype == "stage_transition":
+                        current_stage = edata.get("stage", current_stage)
+                        current_attempt = edata.get("iteration", current_attempt)
+                    elif etype in ("model_escalated_secondary", "model_escalated_algorithmic"):
+                        escalation_info = {
+                            "timestamp": ts,
+                            "task_id": edata.get("task_id"),
+                            "prior_model": edata.get("prior_model"),
+                            "escalated_model": edata.get("secondary_model") or edata.get("target_model"),
+                            "attempt": edata.get("attempt"),
+                            "tier": edata.get("tier"),
+                            "type": etype,
+                        }
+                        diagnostics["escalations"].append(escalation_info)
+                        current_model = escalation_info["escalated_model"]
+                    elif etype == "linter_result":
+                        passed = edata.get("passed", True)
+                        if not passed and include_failures:
+                            diagnostics["failure_chronology"].append({
+                                "timestamp": ts,
+                                "type": "linter_rejection",
+                                "stage": current_stage,
+                                "attempt": edata.get("iteration", current_attempt),
+                                "model": current_model,
+                                "returncode": edata.get("returncode"),
+                                "output": edata.get("output", "")
+                            })
+                    elif etype == "review_result":
+                        verdict = edata.get("verdict")
+                        if verdict and verdict != "approved" and include_failures:
+                            diagnostics["failure_chronology"].append({
+                                "timestamp": ts,
+                                "type": "review_rejection",
+                                "stage": "reviewer",
+                                "attempt": edata.get("iteration", current_attempt),
+                                "reviewer_model": edata.get("reviewer_model"),
+                                "verdict": verdict,
+                                "critique": edata.get("critique", "")
+                            })
+                    elif etype == "code_security_verdict":
+                        verdict = edata.get("verdict")
+                        if verdict and verdict != "cleared" and include_failures:
+                            diagnostics["failure_chronology"].append({
+                                "timestamp": ts,
+                                "type": "security_rejection",
+                                "stage": "security",
+                                "verdict": verdict,
+                                "threats": edata.get("threats", []),
+                                "behavioral_summary": edata.get("behavioral_summary", "")
+                            })
+                    elif etype == "terminal_chunk" and include_terminal_output:
+                        text = edata.get("text", "")
+                        if any(marker in text for marker in ("### 🖥️ Shell Command Execution", "❌", "Exit Code:", "🚨", "FAILED")):
+                            terminal_chunks.append(text)
+                    elif etype == "pipeline_end":
+                        diagnostics["outcome"] = edata.get("outcome")
+                        diagnostics["abort_reason"] = edata.get("abort_reason")
+                        diagnostics["iterations"] = edata.get("iterations")
+                        diagnostics["duration_sec"] = edata.get("duration_sec")
+        except Exception as e:
+            diagnostics["log_parse_error"] = str(e)
+
+        if terminal_chunks and include_terminal_output:
+            diagnostics["terminal_execution"] = "\n".join(terminal_chunks[-5:])
+
+    if include_messages:
+        try:
+            plan = store.load(f"runs/{target_run_id}/messages/plan.json")
+            diagnostics["plan_goal"] = plan.get("goal_summary")
+        except Exception:
+            pass
+
+    return json.dumps(diagnostics, indent=2)
+
 
 
 def _find_executable(name: str, venv_path: Optional[str] = None, bin_dir: Optional[str] = None) -> Optional[str]:
@@ -950,11 +1412,18 @@ TOOLS = [
             "properties": {
                 "model": {
                     "type": "string",
-                    "description": "The name of the local Ollama model to use (e.g., 'qwen3:8b', 'mistral-nemo:12b', 'qwen2.5-coder:7b')."
+                    "description": "The name of the local Ollama model to use (e.g., 'qwen3:8b', 'mistral-nemo:12b', 'qwen2.5-coder:7b'). Defaults to system coder model."
                 },
                 "prompt": {
                     "type": "string",
                     "description": "The user prompt to generate a response for."
+                },
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "type": "object"
+                    },
+                    "description": "Optional list of chat messages [{'role': 'user', 'content': '...'}, ...] for multi-turn conversation."
                 },
                 "system_prompt": {
                     "type": "string",
@@ -964,12 +1433,16 @@ TOOLS = [
                     "type": "number",
                     "description": "Sampling temperature (default: 0.7)."
                 },
+                "top_p": {
+                    "type": "number",
+                    "description": "Optional nucleus sampling parameter (top_p)."
+                },
                 "num_ctx": {
                     "type": "integer",
                     "description": "Context window size in tokens (default: 4096)."
                 }
             },
-            "required": ["model", "prompt"]
+            "required": []
         }
     },
     {
@@ -993,6 +1466,10 @@ TOOLS = [
                 "task_type": {
                     "type": "string",
                     "description": "Category of the task: 'sysadmin', 'ansible', 'coding', 'reasoning', or 'general'."
+                },
+                "enable_tools": {
+                    "type": "boolean",
+                    "description": "If true, enables native file editing/reading tools for the task agent (default: true)."
                 },
                 "num_ctx": {
                     "type": "integer",
@@ -1054,7 +1531,7 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Execution timeout in seconds (default: 120)."
+                    "description": "Execution timeout in seconds (default: 180)."
                 }
             },
             "required": ["command"]
@@ -1160,30 +1637,46 @@ TOOLS = [
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/hello_world_test.md')."
+                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/verify_code_quality_toolchain.md'). Required unless 'resume' is specified."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional local Ollama model to use for all pipeline stages or as Builder model (default: 'winter-prime:latest')."
+                    "description": "Optional local Ollama model to use for Builder roles (default: 'winter-prime:latest', or 'winter-prime:16gb' when dual_model/dynamic_auditor is enabled)."
                 },
                 "auditor_model": {
                     "type": "string",
-                    "description": "Optional secondary Auditor model for Reviewer and Security stages (e.g., 'qwen3:8b')."
+                    "description": "Optional secondary Auditor model for Reviewer Gate, Security Gate, and Code Review (e.g., 'qwen3:8b', 'deepseek-r1:8b', 'codestral')."
                 },
                 "dual_model": {
                     "type": "boolean",
-                    "description": "Optional flag to enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b)."
+                    "description": "Optional flag enabling 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b). Sets 24GB tier and disables model unloading between stages."
                 },
                 "dynamic_auditor": {
                     "type": "boolean",
-                    "description": "Optional flag to enable dynamic Auditor selection by the Orchestrator based on task domain tags and risk vectors."
+                    "description": "Optional flag enabling dynamic Auditor model selection by the Orchestrator based on task domain tags and risk vectors. Sets 24GB tier and disables model unloading between stages."
+                },
+                "keep_models": {
+                    "type": "boolean",
+                    "description": "Optional flag to explicitly keep models loaded in GPU VRAM between stages without unloading, eliminating cold-load latency across any tier."
+                },
+                "retry_budget": {
+                    "type": "integer",
+                    "description": "Configurable maximum retry attempts per cognitive stage upon failed validation, lint, or gate checks (range: 1 to 15, default: 3)."
                 },
                 "resume": {
                     "type": "string",
-                    "description": "Optional Run ID to resume an aborted run from state.json."
+                    "description": "Optional Run ID (e.g., 'run-20260924-051544-1db8b9') to resume an aborted run from state.json."
+                },
+                "async_run": {
+                    "type": "boolean",
+                    "description": "Optional flag to execute the pipeline asynchronously in a background thread to prevent client RPC timeouts (default: false). Streams output to terminal-mcp."
+                },
+                "help": {
+                    "type": "string",
+                    "description": "Optional self-documentation query. Pass true or 'all' for full documentation, or pass a specific parameter name (e.g., 'keep_models', 'dual_model', 'dynamic_auditor') for deep-dive verbose documentation."
                 }
             },
-            "required": ["prompt"]
+            "required": []
         }
     },
     {
@@ -1194,33 +1687,98 @@ TOOLS = [
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/hello_world_test.md')."
+                    "description": "Task prompt text or path to a markdown prompt file (e.g., 'sysadmin/prompts/verify_code_quality_toolchain.md'). Required unless 'resume' is specified."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional local Ollama model to use for all pipeline stages or as Builder model (default: 'winter-prime:latest')."
+                    "description": "Optional local Ollama model to use for Builder roles (default: 'winter-prime:latest', or 'winter-prime:16gb' when dual_model/dynamic_auditor is enabled)."
                 },
                 "auditor_model": {
                     "type": "string",
-                    "description": "Optional secondary Auditor model for Reviewer and Security stages (e.g., 'qwen3:8b')."
+                    "description": "Optional secondary Auditor model for Reviewer Gate, Security Gate, and Code Review (e.g., 'qwen3:8b', 'deepseek-r1:8b', 'codestral')."
                 },
                 "dual_model": {
                     "type": "boolean",
-                    "description": "Optional flag to enable 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b)."
+                    "description": "Optional flag enabling 24GB dual-model residency (Builder: winter-prime:16gb, Auditor: qwen3:8b). Sets 24GB tier and disables model unloading between stages."
                 },
                 "dynamic_auditor": {
                     "type": "boolean",
-                    "description": "Optional flag to enable dynamic Auditor selection by the Orchestrator based on task domain tags and risk vectors."
+                    "description": "Optional flag enabling dynamic Auditor model selection by the Orchestrator based on task domain tags and risk vectors. Sets 24GB tier and disables model unloading between stages."
+                },
+                "keep_models": {
+                    "type": "boolean",
+                    "description": "Optional flag to explicitly keep models loaded in GPU VRAM between stages without unloading, eliminating cold-load latency across any tier."
+                },
+                "retry_budget": {
+                    "type": "integer",
+                    "description": "Configurable maximum retry attempts per cognitive stage upon failed validation, lint, or gate checks (range: 1 to 15, default: 3)."
                 },
                 "resume": {
                     "type": "string",
-                    "description": "Optional Run ID to resume an aborted run from state.json."
+                    "description": "Optional Run ID (e.g., 'run-20260924-051544-1db8b9') to resume an aborted run from state.json."
+                },
+                "async_run": {
+                    "type": "boolean",
+                    "description": "Optional flag to execute the pipeline asynchronously in a background thread to prevent client RPC timeouts (default: false). Streams output to terminal-mcp."
+                },
+                "help": {
+                    "type": "string",
+                    "description": "Optional self-documentation query. Pass true or 'all' for full documentation, or pass a specific parameter name (e.g., 'keep_models', 'dual_model', 'dynamic_auditor') for deep-dive verbose documentation."
                 }
             },
-            "required": ["prompt"]
+            "required": []
+        }
+    },
+    {
+        "name": "pipeline_status",
+        "description": "Inspects the status, current phase, task progress, and recent milestone events of a local Ollama multi-agent pipeline run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Optional Run ID to inspect (e.g. 'run-20260924-051544-1db8b9'). If omitted, defaults to the latest active or completed run."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "inspect_pipeline_run",
+        "description": "Performs deep-dive diagnostic inspection of a pipeline run, retrieving failure chronology, linter critiques, ShellCheck findings, model escalations, terminal PTY execution outputs, and task progress.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Optional Run ID to inspect (e.g. 'run-20260930-031018-495040'). If omitted, defaults to the latest active or completed run."
+                },
+                "tail_events": {
+                    "type": "integer",
+                    "description": "Number of recent milestone events to return (default: 50)."
+                },
+                "include_failures": {
+                    "type": "boolean",
+                    "description": "Whether to extract and structure all failure events, linter rejections, and critiques (default: true)."
+                },
+                "include_tasks": {
+                    "type": "boolean",
+                    "description": "Whether to include task breakdown and attempt counts (default: true)."
+                },
+                "include_messages": {
+                    "type": "boolean",
+                    "description": "Whether to inspect stored messages like plan and verdicts (default: true)."
+                },
+                "include_terminal_output": {
+                    "type": "boolean",
+                    "description": "Whether to capture terminal PTY execution logs and exit codes (default: true)."
+                }
+            },
+            "required": []
         }
     }
 ]
+
 
 
 def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1228,6 +1786,16 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     method = request.get("method")
     req_id = request.get("id")
     params = request.get("params", {})
+    _wire_log(f"process_jsonrpc: method={method} req_id={req_id} params_keys={list(params.keys()) if isinstance(params, dict) else type(params)}")
+    
+    # JSON-RPC 2.0 Specification:
+    # A Notification is a Request object without an 'id' member (req_id is None).
+    # The server MUST NOT reply to a Notification under any circumstances.
+    # Replying with {"id": null} causes Go's net/rpc/jsonrpc client in CORTEX
+    # to throw 'invalid request' and abruptly drop the connection.
+    if req_id is None:
+        _wire_log(f"NOTIFICATION (suppressing response): method={method}")
+        return None
     
     if method == "initialize":
         return {
@@ -1245,10 +1813,16 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             }
         }
     
-    if method == "notifications/initialized":
-        return None  # Notifications do not return responses
-    
     if method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+    
+    if method == "resources/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": []}}
+    
+    if method == "prompts/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": []}}
+    
+    if method == "logging/setLevel":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
     
     if method == "tools/list":
@@ -1263,6 +1837,7 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if method == "tools/call":
         tool_name = params.get("name")
         args = params.get("arguments", {})
+        _wire_log(f"tools/call: tool_name={tool_name} args={json.dumps(args)[:300]}")
         
         try:
             if tool_name == "write_file":
@@ -1286,8 +1861,10 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 text = handle_chat(
                     model=args.get("model") or default_chat_model,
                     prompt=args.get("prompt"),
+                    messages=args.get("messages"),
                     system_prompt=args.get("system_prompt"),
                     temperature=float(args.get("temperature", 0.7)),
+                    top_p=float(args["top_p"]) if ("top_p" in args and args["top_p"] is not None) else None,
                     num_ctx=int(args["num_ctx"]) if ("num_ctx" in args and args["num_ctx"]) else None
                 )
             elif tool_name == "ollama_task_agent":
@@ -1297,6 +1874,7 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     model=args.get("model") or default_task_model,
                     context=args.get("context"),
                     task_type=args.get("task_type", "general"),
+                    enable_tools=bool(args.get("enable_tools", True)),
                     num_ctx=int(args["num_ctx"]) if ("num_ctx" in args and args["num_ctx"]) else None
                 )
             elif tool_name == "ollama_pull_model":
@@ -1310,7 +1888,7 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     task_description=args.get("task_description"),
                     cwd=args.get("cwd"),
                     model=args.get("model") or default_exec_model,
-                    timeout=int(args.get("timeout", 120))
+                    timeout=int(args.get("timeout", 180))
                 )
             elif tool_name == "ansible_syntax_check":
                 text = handle_ansible_syntax_check(
@@ -1345,6 +1923,29 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     auditor_model=args.get("auditor_model"),
                     dual_model=bool(args.get("dual_model", False)),
                     dynamic_auditor=bool(args.get("dynamic_auditor", False)),
+                    keep_models=bool(args.get("keep_models", False)),
+                    retry_budget=args.get("retry_budget"),
+                    async_run=bool(args.get("async_run", False)),
+                    help=args.get("help"),
+                )
+            elif tool_name in ("pipeline_status", "get_pipeline_status"):
+                text = handle_pipeline_status(
+                    run_id=args.get("run_id"),
+                    verbose=bool(args.get("verbose", False) or args.get("diagnostics", False) or args.get("inspect", False)),
+                    tail_events=int(args.get("tail_events", 50)),
+                    include_failures=bool(args.get("include_failures", True)),
+                    include_tasks=bool(args.get("include_tasks", True)),
+                    include_messages=bool(args.get("include_messages", True)),
+                    include_terminal_output=bool(args.get("include_terminal_output", True)),
+                )
+            elif tool_name in ("inspect_pipeline_run", "inspect_run", "pipeline_inspect", "pipeline_diagnostics"):
+                text = handle_inspect_pipeline_run(
+                    run_id=args.get("run_id"),
+                    tail_events=int(args.get("tail_events", 50)),
+                    include_failures=bool(args.get("include_failures", True)),
+                    include_tasks=bool(args.get("include_tasks", True)),
+                    include_messages=bool(args.get("include_messages", True)),
+                    include_terminal_output=bool(args.get("include_terminal_output", True)),
                 )
             else:
                 return {
@@ -1364,52 +1965,82 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 }
             }
         except Exception as e:
+            tb = traceback.format_exc()
+            _wire_log(f"[ERROR] Tool execution failed for {tool_name}: {e}\n{tb}")
             sys.stderr.write(f"[ERROR] Tool execution failed for {tool_name}: {e}\n")
             sys.stderr.flush()
             err_msg = str(e) if str(e).strip() else f"{type(e).__name__}: An error occurred during execution."
+            full_error_text = f"Error executing {tool_name}: {err_msg}\n\n=== Traceback ===\n{tb}"
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
                     "isError": True,
-                    "content": [{"type": "text", "text": f"Error executing {tool_name}: {err_msg}"}]
+                    "content": [{"type": "text", "text": full_error_text}]
                 }
             }
     
     # Method not found
+    _wire_log(f"METHOD NOT FOUND: method={method} req_id={req_id}")
     return {
         "jsonrpc": "2.0",
         "id": req_id,
         "error": {
             "code": -32601,
-            "message": f"Method not found: {method}"
+            "message": f"Method not found: {method}",
+            "data": {
+                "requested_method": method,
+                "supported_methods": [
+                    "initialize",
+                    "ping",
+                    "tools/list",
+                    "tools/call",
+                    "resources/list",
+                    "prompts/list",
+                    "logging/setLevel"
+                ]
+            }
         }
     }
 
 
+
 def main():
     """Main stdio loop for MCP server."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-            response = process_jsonrpc(request)
-            if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
-        except json.JSONDecodeError:
-            err_response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error"}
-            }
-            sys.stdout.write(json.dumps(err_response) + "\n")
-            sys.stdout.flush()
-        except Exception as e:
-            sys.stderr.write(f"Unexpected error in MCP loop: {e}\n")
-            sys.stderr.flush()
+    _wire_log(f"MCP server process started: PID={os.getpid()} PPID={os.getppid()} argv={sys.argv}")
+    # Decouple process stdout from MCP protocol stdout:
+    # Route generic sys.stdout to sys.stderr so background threads and libraries
+    # writing or printing to stdout never corrupt or intercept the JSON-RPC wire.
+    sys.stdout = sys.stderr
+    try:
+        for line in sys.stdin:
+            line_clean = line.strip()
+            if not line_clean:
+                continue
+            _wire_log(f"RECV RAW ({len(line_clean)} bytes): {line_clean[:300]}")
+            try:
+                request = json.loads(line_clean)
+                response = process_jsonrpc(request)
+                if response is not None:
+                    resp_str = json.dumps(response)
+                    _wire_log(f"SEND (id={response.get('id')} len={len(resp_str)}): {resp_str[:300]}")
+                    _MCP_STDOUT.write(resp_str + "\n")
+                    _MCP_STDOUT.flush()
+            except json.JSONDecodeError as jde:
+                _wire_log(f"JSONDecodeError: {jde} for: {line_clean[:200]}")
+                sys.stderr.write(f"JSONDecodeError in MCP server: {jde}\n")
+                sys.stderr.flush()
+            except Exception as e:
+                tb = traceback.format_exc()
+                _wire_log(f"Unexpected error in MCP loop: {e}\n{tb}")
+                sys.stderr.write(f"Unexpected error in MCP loop: {e}\n")
+                sys.stderr.flush()
+    except Exception as e:
+        tb = traceback.format_exc()
+        _wire_log(f"Fatal exception reading stdin: {e}\n{tb}")
+    finally:
+        _wire_log(f"MCP server process exiting: PID={os.getpid()}")
+
 
 
 
