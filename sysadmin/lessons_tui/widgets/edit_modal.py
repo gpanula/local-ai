@@ -81,10 +81,18 @@ class EditLessonModal(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("ctrl+s", "save", "Save & Promote"),
     ]
 
-    def __init__(self, lesson: Dict[str, Any], **kwargs):
+    def __init__(
+        self,
+        lesson: Dict[str, Any],
+        title: Optional[str] = None,
+        save_label: str = "Save & Keep [Ctrl+S]",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.lesson = lesson
         self.lesson_id = lesson.get("id") or lesson.get("lesson_id") or "unknown"
+        self.title = title or f"✏️ Modify Pending Lesson: {self.lesson_id}"
+        self.save_label = save_label
         self.initial_category = lesson.get("category", "")
         self.initial_rule = lesson.get("rule") or lesson.get("proposed_rule") or ""
         keywords = lesson.get("keywords", [])
@@ -95,7 +103,7 @@ class EditLessonModal(ModalScreen[Optional[Dict[str, Any]]]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-container"):
-            yield Label(f"✏️ Modify Pending Lesson: {self.lesson_id}", id="modal-title")
+            yield Label(self.title, id="modal-title")
 
             yield Label("Category:", classes="field-label")
             yield Input(value=self.initial_category, id="cat-input", placeholder="e.g. Defensive Bash Scripting")
@@ -110,7 +118,7 @@ class EditLessonModal(ModalScreen[Optional[Dict[str, Any]]]):
 
             with Horizontal(id="buttons-bar"):
                 yield Button("Cancel [Esc]", variant="default", id="btn-cancel")
-                yield Button("Save & Keep [Ctrl+S]", variant="primary", id="btn-save")
+                yield Button(self.save_label, variant="primary", id="btn-save")
 
     def on_mount(self) -> None:
         self._update_lint_preview(self.initial_rule)
