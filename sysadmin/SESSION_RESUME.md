@@ -179,7 +179,19 @@
   - Expanded candidate fetch limits (`max(top_k * 4, 12)`) to prevent duplicate clusters from depleting `top_k`.
 - **Pipeline Aggregation Standardized ([`sysadmin/pipeline.py`](./pipeline.py), [`mcp_cli/commands/pipeline.py`](./mcp_cli/commands/pipeline.py))**:
   - Standardized all 5 pipeline phases to use `collect_relevant_lessons()`, preventing duplicate rule accumulation across phase tags.
-  - Synchronized `_inject_lessons()` so prompt injection text, terminal banners, and attribution telemetry match 1:1.
+### 19. Near-Duplicate & Semantic Phrasing Lesson Deduplication
+- **Root Cause Analysis (`run-20260930-054329-169356`)**:
+  - Investigation of `.localai/runs/run-20260930-054329-169356.jsonl` revealed the Orchestrator received both `lesson-20260918-44` (*"All pipeline runs that receive an 'audit pass' with 'no risks' should be automatically approved."*) and `lesson-20260918-10` (*"All pipeline runs that receive an 'audit pass' with no reported risks should be automatically approved."*).
+  - Exact string normalization (`normalize_lesson_rule`) only removed punctuation and collapsed whitespace, failing on minor phrasing variations (e.g. `"with 'no risks'"` vs `"with no reported risks"`).
+  - Similarly, the Reviewer stage was injected with `lesson-20260918-11` and `lesson-20260918-25` (*"with no identified risks"* vs *"with no risks"*).
+- **Fuzzy & Token Jaccard Similarity Engine ([`mcp_core/injection.py`](./mcp_core/injection.py))**:
+  - Added `are_rules_similar(rule1, rule2, threshold=0.75)` combining word-level Jaccard similarity and character-level `difflib.SequenceMatcher` ratio.
+  - Guarded against false positives on short test labels (`"Rule A"` vs `"Rule C"`, `"bash lesson 0"` vs `"bash lesson 1"`) by requiring significant token overlap (`jaccard >= 0.75` and `ratio >= 0.70`) or overwhelmingly high character match on longer rules (`ratio >= 0.92`, length > 25).
+  - Enhanced `deduplicate_lessons()` to evaluate all incoming rules against previously accepted candidates using `are_rules_similar()`, retaining the highest-utility rule and dropping semantic duplicates.
+- **Pipeline Collection Headroom & Delegation ([`sysadmin/pipeline.py`](./pipeline.py))**:
+  - Refactored `collect_relevant_lessons()` to query candidate pools with headroom (`max(top_k * 3, 10)`) and delegate all deduplication to `deduplicate_lessons()`, ensuring near-duplicate pruning does not prematurely starve `top_k` results.
+- **Verification ([`sysadmin/tests/test_injection.py`](./tests/test_injection.py))**:
+  - Added unit tests specifically verifying that `lesson-20260918-44`/`lesson-20260918-10` and `lesson-20260918-11`/`lesson-20260918-25` pairs are deduplicated, while distinct rules remain unpruned. All 363 tests in repository pass cleanly.
 
 ---
 

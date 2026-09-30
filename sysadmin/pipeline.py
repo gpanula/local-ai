@@ -851,13 +851,11 @@ def collect_relevant_lessons(
     """Query memory store for lessons matching tags, falling back to terms if empty.
 
     Guarantees that all returned lessons are strictly deduplicated by both ID
-    and normalized rule text.
+    and normalized rule text (including semantic near-duplicate variations).
     """
     if not memory_store:
         return []
     try:
-        seen_ids = set()
-        seen_rules = set()
         candidates = []
 
         if isinstance(primary_tags, (list, tuple, set)):
@@ -867,21 +865,17 @@ def collect_relevant_lessons(
         else:
             tag_list = []
 
+        # Query candidates with extra headroom so near-duplicate pruning does not
+        # starve the final top_k distinct selection.
+        search_limit = max(top_k * 3, 10)
         for tag in tag_list:
             if not isinstance(tag, str) or not tag.strip():
                 continue
-            for l in memory_store.search_lessons(tag.strip(), top_k=top_k):
-                lid = l.get("id")
-                nrule = normalize_lesson_rule(l.get("rule") or l.get("proposed_rule") or "")
-                if (lid and lid in seen_ids) or (nrule and nrule in seen_rules):
-                    continue
-                if lid:
-                    seen_ids.add(lid)
-                if nrule:
-                    seen_rules.add(nrule)
-                candidates.append(l)
+            candidates.extend(memory_store.search_lessons(tag.strip(), top_k=search_limit))
 
-        if not candidates and fallback_terms:
+        deduped = deduplicate_lessons(candidates)
+
+        if not deduped and fallback_terms:
             if isinstance(fallback_terms, (list, tuple, set)):
                 term_list = list(fallback_terms)
             elif isinstance(fallback_terms, str) and fallback_terms.strip():
@@ -892,18 +886,11 @@ def collect_relevant_lessons(
             for term in term_list:
                 if not isinstance(term, str) or not term.strip():
                     continue
-                for l in memory_store.search_lessons(term.strip(), top_k=2):
-                    lid = l.get("id")
-                    nrule = normalize_lesson_rule(l.get("rule") or l.get("proposed_rule") or "")
-                    if (lid and lid in seen_ids) or (nrule and nrule in seen_rules):
-                        continue
-                    if lid:
-                        seen_ids.add(lid)
-                    if nrule:
-                        seen_rules.add(nrule)
-                    candidates.append(l)
+                candidates.extend(memory_store.search_lessons(term.strip(), top_k=search_limit))
 
-        return candidates[:top_k]
+            deduped = deduplicate_lessons(candidates)
+
+        return deduped[:top_k]
     except Exception:
         return []
 

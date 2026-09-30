@@ -7,6 +7,7 @@ no Ollama calls, no raw JSON in the output.
 
 from __future__ import annotations
 
+import difflib
 import re
 from typing import Any
 
@@ -23,17 +24,46 @@ def normalize_lesson_rule(rule: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip().lower()
 
 
-def deduplicate_lessons(lessons: list) -> list:
+def are_rules_similar(rule1: str, rule2: str, threshold: float = 0.75) -> bool:
+    """Determine whether two normalized rule texts are near-duplicates.
+
+    Evaluates word-level Jaccard similarity and character-level SequenceMatcher ratio.
+    Requires significant token overlap (jaccard >= threshold and ratio >= 0.70)
+    or an overwhelmingly high character match on sufficiently long rules (ratio >= 0.92
+    and min(len(rule1), len(rule2)) > 25) to avoid false positives on short test
+    labels (e.g. 'Rule A' vs 'Rule C' or 'bash lesson 0' vs 'bash lesson 1').
+    """
+    if not rule1 or not rule2:
+        return False
+    if rule1 == rule2:
+        return True
+
+    ratio = difflib.SequenceMatcher(None, rule1, rule2).ratio()
+    if ratio >= 0.92 and min(len(rule1), len(rule2)) > 25:
+        return True
+
+    tokens1 = set(rule1.split())
+    tokens2 = set(rule2.split())
+    if tokens1 and tokens2:
+        jaccard = len(tokens1 & tokens2) / len(tokens1 | tokens2)
+        if jaccard >= threshold and ratio >= 0.70:
+            return True
+
+    return False
+
+
+def deduplicate_lessons(lessons: list, similarity_threshold: float = 0.78) -> list:
     """Deduplicate a list of lesson dicts by ID and normalized rule text.
 
     Preserves the original ranking/relevance order so the highest-scoring
-    version of a lesson is retained while subsequent duplicates are dropped.
+    version of a lesson is retained while subsequent exact duplicates or
+    near-duplicate variations (evaluated via `are_rules_similar`) are dropped.
     """
     if not lessons:
         return []
 
     seen_ids = set()
-    seen_rules = set()
+    seen_rules: list[str] = []
     deduped = []
 
     for lesson in lessons:
@@ -45,13 +75,19 @@ def deduplicate_lessons(lessons: list) -> list:
 
         if lesson_id and lesson_id in seen_ids:
             continue
-        if norm_rule and norm_rule in seen_rules:
-            continue
+        if norm_rule:
+            is_dup = False
+            for prev_rule in seen_rules:
+                if norm_rule == prev_rule or are_rules_similar(norm_rule, prev_rule, threshold=similarity_threshold):
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
 
         if lesson_id:
             seen_ids.add(lesson_id)
         if norm_rule:
-            seen_rules.add(norm_rule)
+            seen_rules.append(norm_rule)
 
         deduped.append(lesson)
 
