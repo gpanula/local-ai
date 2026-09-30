@@ -27,6 +27,7 @@ from pipeline import (
     run_dispatch,
     validate_escalation_threshold,
     validate_retry_budget,
+    validate_model_exists,
 )
 
 
@@ -497,6 +498,31 @@ class TestModelEscalation(unittest.TestCase):
         self.assertIn("model_escalated", events)
         self.assertIn("model_escalated_secondary", events)
 
+    def test_validate_model_exists_and_fallback(self):
+        # 1. Target model exists directly in installed models
+        installed = {"winter-coder:24gb", "winter-prime:24gb", "codestral:latest"}
+        res = validate_model_exists("winter-coder:24gb", installed_models=installed, tier="24gb")
+        self.assertEqual(res, "winter-coder:24gb")
+
+        # 2. Target model missing, falls back to direct base model
+        res = validate_model_exists("winter-coder:24gb-codestral", installed_models=installed, tier="24gb")
+        self.assertEqual(res, "codestral:latest")
+
+        # 3. Target model missing, no base installed, falls back to tier coder stable candidate
+        installed_only_coder = {"winter-coder:24gb", "winter-prime:24gb"}
+        res = validate_model_exists("nonexistent-model", installed_models=installed_only_coder, tier="24gb", role="coder")
+        self.assertEqual(res, "winter-coder:24gb")
+
+        # 4. Target model missing, fallback model provided
+        installed_custom = {"my-custom-fallback:latest"}
+        res = validate_model_exists("missing-model", installed_models=installed_custom, tier="24gb", fallback_model="my-custom-fallback:latest")
+        self.assertEqual(res, "my-custom-fallback:latest")
+
+        # 5. Empty installed set (e.g. mocked/unreachable) returns target model unchanged
+        res = validate_model_exists("winter-coder:24gb-codestral", installed_models=set(), tier="24gb")
+        self.assertEqual(res, "winter-coder:24gb-codestral")
+
 
 if __name__ == "__main__":
     unittest.main()
+

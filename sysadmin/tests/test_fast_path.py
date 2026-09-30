@@ -153,6 +153,38 @@ class TestFastPath(unittest.TestCase):
         self.assertEqual(next_phase, "architect")
         self.assertEqual(state.architect_revisions_used, 1)
 
+    @patch("pipeline.stage_chat")
+    def test_run_architect_clarification_needed_bailout(self, mock_stage_chat):
+        state = PipelineState("run-clarify-001", "Validate negative error detection of failures")
+        plan_content = {
+            "schema_version": "2.0",
+            "message_type": "plan",
+            "run_id": state.run_id,
+            "revision": 0,
+            "original_prompt": state.original_prompt,
+            "goal_summary": "Ambiguous negative assertion test",
+            "workflow_mode": "clarification_needed",
+            "tasks": [],
+            "open_questions": [
+                "Prompt contains confusing stacked negatives ('validate negative error detection of failures'). Is the test asserting failure or success?"
+            ],
+            "cognition": {
+                "analysis": "Prompt contains contradictory pass/fail polarity.",
+                "risks": "Coder will invert assertions and fail runtime.",
+                "solution": "Bail out early for human clarification.",
+                "verification": "Halt pipeline before spending retry budget.",
+            },
+        }
+        mock_stage_chat.return_value = f"```json\n{json.dumps(plan_content)}\n```"
+
+        next_phase = run_architect(state, self.store, model="winter-prime:16gb")
+
+        self.assertEqual(next_phase, "aborted")
+        self.assertEqual(state.status, "clarification_needed")
+        self.assertIn("Architect clarification required", state.abort_reason)
+        event_types = [e["event"] for e in state.events]
+        self.assertIn("architect_clarification_bailout", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

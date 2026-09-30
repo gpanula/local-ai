@@ -157,7 +157,15 @@ def test_run_pipeline_mocked_success(tmp_path, monkeypatch):
                 "task_id": "t-001",
                 "role": "coder",
                 "status": "success",
-                "outputs": {},
+                "outputs": {
+                    "backup.sh": (
+                        "#!/usr/bin/env bash\n"
+                        "set -euo pipefail\n"
+                        "trap 'echo \"error\" >&2; exit 1' ERR\n"
+                        "echo \"backup complete\"\n"
+                        "exit 0\n"
+                    )
+                },
                 "cognition": {
                     "analysis": "Coder analysis of implementation.",
                     "risks": "No execution risks encountered.",
@@ -168,6 +176,8 @@ def test_run_pipeline_mocked_success(tmp_path, monkeypatch):
         raise ValueError(f"Unexpected role: {role}")
 
     monkeypatch.setattr("pipeline.stage_chat", fake_stage_chat)
+    monkeypatch.setattr("pipeline.handle_execute_task", lambda *a, **kw: "- **Exit Code**: `0`\nSuccess")
+    monkeypatch.setattr("pipeline.handle_write_file", lambda *a, **kw: "Wrote file")
 
     final_state = run_pipeline(prompt=prompt, run_id=run_id, store=store)
 
@@ -535,6 +545,99 @@ def test_run_pipeline_dynamic_auditor_resolution(tmp_path, monkeypatch):
     assert models_received["orchestrator"] == "winter-prime:16gb"
     assert models_received["reviewer"] == "deepseek-r1:8b"
     assert models_received["security"] == "deepseek-r1:8b"
+
+
+def test_resume_pipeline_message_hydration(tmp_path, monkeypatch):
+    """Verify that deserializing state.json with message paths hydrates dictionaries."""
+    runs_dir = str(tmp_path / "runs")
+    store = ContextStore(runs_dir=runs_dir)
+    run_id = "run-test-resume-hydrate"
+
+    plan = {
+        "schema_version": "2.0",
+        "message_type": "annotated_plan",
+        "run_id": run_id,
+        "tasks": [
+            {
+                "task_id": "t-001",
+                "description": "Test task",
+                "assigned_agent": "coder",
+                "domain_tags": ["Python"],
+            }
+        ],
+    }
+    store.save_message(run_id, "annotated_plan", plan)
+    store.save_message(run_id, "plan", {"run_id": run_id, "tasks": plan["tasks"]})
+    store.save_message(run_id, "review_verdict", {"verdict": "approved"})
+    store.save_message(run_id, "security_verdict", {"verdict": "cleared"})
+
+    state = PipelineState(run_id=run_id, original_prompt="Test resume prompt")
+    state.current_phase = "dispatch"
+    state.messages = {
+        "plan": f"runs/{run_id}/messages/plan.json",
+        "annotated_plan": f"runs/{run_id}/messages/annotated_plan.json",
+        "review_verdict": f"runs/{run_id}/messages/review_verdict.json",
+        "security_verdict": f"runs/{run_id}/messages/security_verdict.json",
+    }
+    store.save_state(run_id, state.to_dict())
+
+    # 1. from_dict with store hydrates messages
+    state_dict = store.load(f"runs/{run_id}/state.json")
+    restored = PipelineState.from_dict(state_dict, store=store)
+    assert isinstance(restored.messages["annotated_plan"], dict)
+    assert restored.messages["annotated_plan"]["tasks"][0]["task_id"] == "t-001"
+
+    # 2. get_message works when unhydrated
+    unhydrated = PipelineState.from_dict(state_dict)
+    assert isinstance(unhydrated.messages["annotated_plan"], str)
+    got = unhydrated.get_message("annotated_plan", store=store)
+    assert isinstance(got, dict)
+    assert got["tasks"][0]["task_id"] == "t-001"
+
+    # 3. resume_pipeline completes without AttributeError
+    def fake_stage_chat(role, system_prompt, user_content, model="winter-prime:latest", tools=None):
+        if role == "coder":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "execution_result",
+                "run_id": run_id,
+                "task_id": "t-001",
+                "role": "coder",
+                "status": "success",
+                "outputs": {
+                    "test.sh": "#!/usr/bin/env bash\nset -euo pipefail\ntrap 'echo err' ERR\necho ok\n"
+                },
+                "cognition": {"analysis": "ok", "risks": "none", "solution": "done", "verification": "tested"},
+            })
+        elif role == "reviewer":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "review_verdict",
+                "run_id": run_id,
+                "verdict": "approved",
+                "violations": [],
+            })
+        elif role == "security":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "security_verdict",
+                "run_id": run_id,
+                "verdict": "cleared",
+                "threats": [],
+            })
+        return json.dumps({"status": "ok"})
+
+    monkeypatch.setattr("pipeline.stage_chat", fake_stage_chat)
+    monkeypatch.setattr("pipeline.validate_code_output", lambda *args, **kwargs: {"verdict": "approved", "violations": []})
+
+    resumed_result = resume_pipeline(run_id=run_id, store=store)
+    assert resumed_result["status"] == "complete"
+    assert resumed_result["tasks"]["t-001"]["status"] == "success"
+
+    import os
+    if os.path.exists("test.sh"):
+        os.remove("test.sh")
+
 
 
 

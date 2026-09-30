@@ -30,7 +30,11 @@ from mcp_core.hardware import (
     get_coder_stable,
 )
 from mcp_core.memory import MemoryStore, DEFAULT_DB_PATH
-from mcp_core.injection import format_lessons_for_prompt
+from mcp_core.injection import (
+    format_lessons_for_prompt,
+    deduplicate_lessons,
+    normalize_lesson_rule,
+)
 from mcp_core.extraction import extract_lesson_from_critique
 from mcp_core.attribution import attribute_lessons
 from mcp_core.trajectories import record_trajectory, DEFAULT_TRAJECTORIES_PATH
@@ -39,6 +43,7 @@ from mcp_ollama.server import (
     handle_write_file,
     handle_execute_task,
     handle_unload_model,
+    get_installed_model_names,
     _get_model_context_length,
 )
 from validator import validate_annotated_plan, validate_code_output
@@ -180,7 +185,7 @@ class PipelineState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "PipelineState":
+    def from_dict(cls, data: dict, store: Optional[Any] = None) -> "PipelineState":
         """Deserialize from state.json for --resume support."""
         state = cls(
             run_id=data["run_id"],
@@ -197,7 +202,14 @@ class PipelineState:
         state.orchestrator_budget = data.get("orchestrator_budget", state.orchestrator_budget)
         state.tasks = data.get("tasks", {})
         state.events = data.get("events", [])
-        state.messages = data.get("messages", {})
+        state.messages = dict(data.get("messages", {}))
+        if store is not None and isinstance(state.messages, dict):
+            for k, v in list(state.messages.items()):
+                if isinstance(v, str) and (v.endswith(".json") or "/" in v):
+                    try:
+                        state.messages[k] = store.load(v)
+                    except Exception:
+                        pass
         state.builder_model = data.get("builder_model", "winter-prime:latest")
         state.auditor_model = data.get("auditor_model", None)
         state.tier = data.get("tier", "8gb")
@@ -207,6 +219,18 @@ class PipelineState:
         state.unload_models = data.get("unload_models", False)
         state.keep_models = data.get("keep_models", False)
         return state
+
+    def get_message(self, key: str, store: Optional[Any] = None, default: Any = None) -> Any:
+        """Retrieve a message dict, hydrating from store if stored as a file path."""
+        val = self.messages.get(key, default)
+        if isinstance(val, str) and (val.endswith(".json") or "/" in val) and store is not None:
+            try:
+                loaded = store.load(val)
+                self.messages[key] = loaded
+                return loaded
+            except Exception:
+                return val
+        return val
 
     def add_event(self, event_type: str, detail: str, pillar: Optional[str] = None) -> None:
         """Append a timestamped event to self.events."""
@@ -632,17 +656,101 @@ def resolve_coder_model(
     return get_default_model(role, tier=active_tier)
 
 
+MODEL_BASE_FALLBACKS: Dict[str, List[str]] = {
+    "winter-coder:24gb-codestral": ["codestral:latest", "codestral", "qwen2.5-coder:32b", "winter-coder:24gb"],
+    "winter-coder:24gb-deepseek": ["deepseek-coder-v2:16b", "winter-coder:16gb-deepseek", "winter-coder:24gb"],
+    "winter-coder:24gb-qwen": ["qwen2.5-coder:32b", "winter-coder:24gb"],
+    "winter-coder:16gb-deepseek": ["deepseek-coder-v2:16b", "winter-coder:16gb"],
+    "winter-coder:16gb-qwen": ["qwen2.5-coder:14b", "winter-coder:16gb"],
+    "winter-coder:8gb-deepseek": ["deepseek-r1:8b", "winter-coder:8gb"],
+    "winter-coder:8gb-qwen": ["qwen2.5-coder:7b", "winter-coder:8gb"],
+}
+
+
+def validate_model_exists(
+    target_model: str,
+    installed_models: Optional[set[str]] = None,
+    tier: Optional[str] = None,
+    role: str = "coder",
+    fallback_model: Optional[str] = None,
+) -> str:
+    """
+    Validates that target_model is installed in Ollama.
+    If not, searches for an appropriate installed fallback and logs a diagnostic warning.
+    If installed_models is empty (e.g. mocked test environment or Ollama unqueried), returns target_model.
+    """
+    if not target_model:
+        return fallback_model or "winter-prime:latest"
+
+    if installed_models is None:
+        try:
+            installed_models = set(get_installed_model_names())
+        except Exception:
+            installed_models = set()
+
+    if not installed_models:
+        return target_model
+
+    clean_target = target_model.strip()
+    if clean_target in installed_models or f"{clean_target}:latest" in installed_models:
+        return clean_target
+
+    # Model not found in Ollama! Search fallbacks.
+    candidates: List[str] = []
+    # 1. Direct base model fallback
+    if clean_target in MODEL_BASE_FALLBACKS:
+        candidates.extend(MODEL_BASE_FALLBACKS[clean_target])
+
+    # 2. Coder stable for tier
+    if role == "coder":
+        active_tier = tier or get_hardware_tier()
+        stable = get_coder_stable(tier=active_tier)
+        candidates.extend([m for m in stable if m != clean_target])
+
+    # 3. Fallback model if provided
+    if fallback_model and fallback_model != clean_target:
+        candidates.append(fallback_model)
+
+    # 4. Standard tier prime models
+    active_tier = tier or get_hardware_tier()
+    candidates.extend([f"winter-prime:{active_tier}", "winter-prime:latest"])
+
+    for candidate in candidates:
+        if candidate in installed_models or f"{candidate}:latest" in installed_models:
+            send_terminal_mcp(
+                f"⚠️ [MODEL VALIDATION] Target escalation model '{clean_target}' is not installed in Ollama. "
+                f"Gracefully falling back to installed model '{candidate}'."
+            )
+            return candidate
+
+    send_terminal_mcp(
+        f"⚠️ [MODEL VALIDATION] Target model '{clean_target}' not found in Ollama and no installed fallback matched. Proceeding with '{clean_target}'."
+    )
+    return clean_target
+
+
 def resolve_escalation_model(
     role: str = "coder",
     state: Optional[PipelineState] = None,
     tier: Optional[str] = None,
+    validate: bool = False,
+    installed_models: Optional[set[str]] = None,
 ) -> str:
-    """Resolve the escalation model ensuring it respects available VRAM."""
-    if state and getattr(state, "escalation_model", None):
-        return state.escalation_model.strip()
-
+    """Resolve the escalation model ensuring it respects available VRAM and optionally validates Ollama installation."""
     active_tier = tier or (state.tier if state else None) or get_hardware_tier()
-    return get_escalation_model(tier=active_tier, role=role)
+    if state and getattr(state, "escalation_model", None):
+        target = state.escalation_model.strip()
+    else:
+        target = get_escalation_model(tier=active_tier, role=role)
+
+    if validate or (installed_models is not None):
+        return validate_model_exists(
+            target,
+            installed_models=installed_models,
+            tier=active_tier,
+            role=role,
+        )
+    return target
 
 
 def resolve_secondary_escalation_model(
@@ -653,10 +761,15 @@ def resolve_secondary_escalation_model(
     escalation_model: Optional[str] = None,
     domain_tags: Optional[list[str]] = None,
     memory_store: Optional[MemoryStore] = None,
+    validate: bool = False,
+    installed_models: Optional[set[str]] = None,
 ) -> str:
     """Resolve the Stage 3 secondary escalation model ensuring it respects available VRAM and leverages historical performance."""
     if state and getattr(state, "secondary_escalation_model", None):
-        return state.secondary_escalation_model.strip()
+        target = state.secondary_escalation_model.strip()
+        if validate or (installed_models is not None):
+            return validate_model_exists(target, installed_models=installed_models, tier=tier, role=role, fallback_model=primary_model)
+        return target
 
     active_tier = tier or (state.tier if state else None) or get_hardware_tier()
 
@@ -669,6 +782,18 @@ def resolve_secondary_escalation_model(
             alternatives = [m for m in coder_stable if m != primary_model]
 
         if alternatives:
+            if validate or (installed_models is not None):
+                if installed_models is None:
+                    try:
+                        installed_models = set(get_installed_model_names())
+                    except Exception:
+                        installed_models = set()
+
+                if installed_models:
+                    installed_alts = [m for m in alternatives if (m in installed_models or f"{m}:latest" in installed_models)]
+                    if installed_alts:
+                        alternatives = installed_alts
+
             if memory_store and domain_tags:
                 try:
                     ranked = memory_store.rank_models_for_task(
@@ -677,16 +802,110 @@ def resolve_secondary_escalation_model(
                         role=role,
                     )
                     if ranked:
-                        return ranked[0]
+                        chosen = ranked[0]
+                        if validate or (installed_models is not None):
+                            return validate_model_exists(
+                                chosen,
+                                installed_models=installed_models,
+                                tier=active_tier,
+                                role=role,
+                                fallback_model=primary_model,
+                            )
+                        return chosen
                 except Exception:
                     pass
-            return alternatives[0]
+
+            chosen = alternatives[0]
+            if validate or (installed_models is not None):
+                return validate_model_exists(
+                    chosen,
+                    installed_models=installed_models,
+                    tier=active_tier,
+                    role=role,
+                    fallback_model=primary_model,
+                )
+            return chosen
 
     model = get_secondary_escalation_model(tier=active_tier, role=role)
     # If secondary model matches primary model, escalate to winter-prime:<tier> for distinct cognitive framing
     if primary_model and model == primary_model:
-        return f"winter-prime:{active_tier}"
+        model = f"winter-prime:{active_tier}"
+
+    if validate or (installed_models is not None):
+        return validate_model_exists(
+            model,
+            installed_models=installed_models,
+            tier=active_tier,
+            role=role,
+            fallback_model=primary_model,
+        )
     return model
+
+
+def collect_relevant_lessons(
+    memory_store: Optional[MemoryStore],
+    primary_tags: Any,
+    fallback_terms: Optional[Any] = None,
+    top_k: int = 3,
+) -> List[dict]:
+    """Query memory store for lessons matching tags, falling back to terms if empty.
+
+    Guarantees that all returned lessons are strictly deduplicated by both ID
+    and normalized rule text.
+    """
+    if not memory_store:
+        return []
+    try:
+        seen_ids = set()
+        seen_rules = set()
+        candidates = []
+
+        if isinstance(primary_tags, (list, tuple, set)):
+            tag_list = list(primary_tags)
+        elif isinstance(primary_tags, str) and primary_tags.strip():
+            tag_list = [primary_tags]
+        else:
+            tag_list = []
+
+        for tag in tag_list:
+            if not isinstance(tag, str) or not tag.strip():
+                continue
+            for l in memory_store.search_lessons(tag.strip(), top_k=top_k):
+                lid = l.get("id")
+                nrule = normalize_lesson_rule(l.get("rule") or l.get("proposed_rule") or "")
+                if (lid and lid in seen_ids) or (nrule and nrule in seen_rules):
+                    continue
+                if lid:
+                    seen_ids.add(lid)
+                if nrule:
+                    seen_rules.add(nrule)
+                candidates.append(l)
+
+        if not candidates and fallback_terms:
+            if isinstance(fallback_terms, (list, tuple, set)):
+                term_list = list(fallback_terms)
+            elif isinstance(fallback_terms, str) and fallback_terms.strip():
+                term_list = [fallback_terms]
+            else:
+                term_list = []
+
+            for term in term_list:
+                if not isinstance(term, str) or not term.strip():
+                    continue
+                for l in memory_store.search_lessons(term.strip(), top_k=2):
+                    lid = l.get("id")
+                    nrule = normalize_lesson_rule(l.get("rule") or l.get("proposed_rule") or "")
+                    if (lid and lid in seen_ids) or (nrule and nrule in seen_rules):
+                        continue
+                    if lid:
+                        seen_ids.add(lid)
+                    if nrule:
+                        seen_rules.add(nrule)
+                    candidates.append(l)
+
+        return candidates[:top_k]
+    except Exception:
+        return []
 
 
 def run_architect(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
@@ -717,25 +936,13 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
         return "aborted"
 
     # Query and inject lessons from MemoryStore (§4.01)
-    relevant_lessons = []
-    if memory_store:
-        try:
-            seen_ids = set()
-            candidates = []
-            for tag in ("System Architecture", "Decomposition"):
-                for l in memory_store.search_lessons(tag, top_k=2):
-                    if l["id"] not in seen_ids:
-                        seen_ids.add(l["id"])
-                        candidates.append(l)
-            words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", state.original_prompt) if len(w) > 3]
-            for w in words[:3]:
-                for l in memory_store.search_lessons(w, top_k=2):
-                    if l["id"] not in seen_ids:
-                        seen_ids.add(l["id"])
-                        candidates.append(l)
-            relevant_lessons = candidates[:3]
-        except Exception:
-            relevant_lessons = []
+    words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", state.original_prompt) if len(w) > 3]
+    relevant_lessons = collect_relevant_lessons(
+        memory_store,
+        primary_tags=("System Architecture", "Decomposition"),
+        fallback_terms=words[:3],
+        top_k=3,
+    )
 
     lesson_ids = [l["id"] for l in relevant_lessons]
     if relevant_lessons and memory_store:
@@ -760,7 +967,7 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
         user_payload["injected_lessons"] = relevant_lessons
 
     if state.architect_revisions_used > 0:
-        feedback = state.messages.get("review_verdict") or state.messages.get("security_verdict")
+        feedback = state.get_message("review_verdict", store=store) or state.get_message("security_verdict", store=store)
         if feedback:
             user_payload["prior_feedback"] = feedback
 
@@ -794,10 +1001,43 @@ def run_architect(state: PipelineState, store: ContextStore, model: str = "winte
         "1",
     )
 
+    # Pre-Flight Ambiguity & Semantic Contradiction Gate:
+    # If the Architect identifies confusing stacked negatives, contradictions, or unresolvable
+    # ambiguities in the prompt, bail out early to prevent burning the GPU retry budget.
+    workflow_mode = str(plan.get("workflow_mode", "")).strip().lower()
+    open_questions = plan.get("open_questions", [])
+    if isinstance(open_questions, str):
+        open_questions = [open_questions] if open_questions.strip() else []
+
+    if workflow_mode == "clarification_needed" or (open_questions and plan.get("status") == "clarification_needed"):
+        formatted_questions = "\n".join(f"  ❓ {q}" for q in open_questions) if open_questions else "  ❓ Unspecified semantic ambiguity in prompt"
+        send_terminal_mcp(
+            f"\n🚨 [ARCHITECT PRE-FLIGHT BAILOUT] Ambiguous or contradictory prompt detected:\n"
+            f"{formatted_questions}\n"
+            f"Pipeline aborted early to protect GPU compute budget. Please clarify the prompt specification."
+        )
+        state.status = "clarification_needed"
+        summary_str = "; ".join(str(q) for q in open_questions)
+        state.abort_reason = f"Architect clarification required: {summary_str}"
+        state.add_event(
+            "architect_clarification_bailout",
+            f"Pre-flight ambiguity detected: {summary_str[:200]}",
+            "3",
+        )
+        emitter = EventEmitter.get_current()
+        if emitter:
+            try:
+                emitter.emit("architect_clarification_bailout", {
+                    "open_questions": open_questions,
+                    "reason": state.abort_reason,
+                })
+            except Exception:
+                pass
+        return "aborted"
+
     # Fast-Path direct mode check:
     # If the Architect designates workflow_mode == "direct" (or 1 task and not explicitly orchestrated),
     # bypass the Orchestrator stage and advance directly to Reviewer.
-    workflow_mode = str(plan.get("workflow_mode", "")).strip().lower()
     is_direct = (workflow_mode == "direct")
 
     if is_direct:
@@ -856,27 +1096,21 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
         return "aborted"
 
     # Query and inject lessons from MemoryStore (§4.01)
-    plan = state.messages.get("plan", {})
-    relevant_lessons = []
-    if memory_store:
-        try:
-            seen_ids = set()
-            candidates = []
-            for tag in ("Multi-Agent Orchestration", "DAG Construction"):
-                for l in memory_store.search_lessons(tag, top_k=2):
-                    if l["id"] not in seen_ids:
-                        seen_ids.add(l["id"])
-                        candidates.append(l)
-            for t in plan.get("tasks", []):
-                for dtag in t.get("domain_tags", []):
-                    if isinstance(dtag, str) and dtag.strip():
-                        for l in memory_store.search_lessons(dtag.strip(), top_k=2):
-                            if l["id"] not in seen_ids:
-                                seen_ids.add(l["id"])
-                                candidates.append(l)
-            relevant_lessons = candidates[:3]
-        except Exception:
-            relevant_lessons = []
+    plan = state.get_message("plan", store=store, default={})
+    if not isinstance(plan, dict):
+        plan = {}
+    task_domain_tags = [
+        dtag.strip()
+        for t in plan.get("tasks", [])
+        for dtag in t.get("domain_tags", [])
+        if isinstance(dtag, str) and dtag.strip()
+    ]
+    relevant_lessons = collect_relevant_lessons(
+        memory_store,
+        primary_tags=("Multi-Agent Orchestration", "DAG Construction"),
+        fallback_terms=task_domain_tags,
+        top_k=3,
+    )
 
     lesson_ids = [l["id"] for l in relevant_lessons]
     if relevant_lessons and memory_store:
@@ -901,7 +1135,7 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
         user_payload["injected_lessons"] = relevant_lessons
 
     if state.orchestrator_revisions_used > 0:
-        feedback = state.messages.get("review_verdict") or state.messages.get("security_verdict")
+        feedback = state.get_message("review_verdict", store=store) or state.get_message("security_verdict", store=store)
         if feedback:
             user_payload["prior_feedback"] = feedback
 
@@ -932,7 +1166,9 @@ def run_orchestrator(state: PipelineState, store: ContextStore, model: str = "wi
 
 def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter-prime:latest") -> str:
     """Reviewer Phase: Deterministic pre-filter + LLM review audit (ReviewVerdict)."""
-    annotated_plan = state.messages.get("annotated_plan", {})
+    annotated_plan = state.get_message("annotated_plan", store=store, default={})
+    if not isinstance(annotated_plan, dict):
+        annotated_plan = {}
     builder_model = getattr(state, "builder_model", "winter-prime:16gb")
 
     try:
@@ -969,19 +1205,11 @@ def run_reviewer(state: PipelineState, store: ContextStore, model: str = "winter
     send_terminal_mcp("\n✅ [REVIEWER PRE-FILTER] Passed deterministic validation checks (0 violations)")
 
     # Dynamic Rubric Injection for Reviewer
-    relevant_lessons = []
-    if memory_store:
-        try:
-            seen_ids = set()
-            candidates = []
-            for tag in ("Code Quality Toolchain", "Code Review", "Audit"):
-                for l in memory_store.search_lessons(tag, top_k=2):
-                    if l["id"] not in seen_ids:
-                        seen_ids.add(l["id"])
-                        candidates.append(l)
-            relevant_lessons = candidates[:3]
-        except Exception:
-            relevant_lessons = []
+    relevant_lessons = collect_relevant_lessons(
+        memory_store,
+        primary_tags=("Code Quality Toolchain", "Code Review", "Audit"),
+        top_k=3,
+    )
 
     lesson_ids = [l["id"] for l in relevant_lessons]
     if relevant_lessons and memory_store:
@@ -1039,22 +1267,16 @@ def run_security(state: PipelineState, store: ContextStore, model: str = "winter
     except Exception:
         memory_store = None
 
-    annotated_plan = state.messages.get("annotated_plan", {})
+    annotated_plan = state.get_message("annotated_plan", store=store, default={})
+    if not isinstance(annotated_plan, dict):
+        annotated_plan = {}
 
     # Dynamic Rubric Injection for Security Gate
-    relevant_lessons = []
-    if memory_store:
-        try:
-            seen_ids = set()
-            candidates = []
-            for tag in ("Security & Hardening", "Threat Modeling", "STRIDE"):
-                for l in memory_store.search_lessons(tag, top_k=2):
-                    if l["id"] not in seen_ids:
-                        seen_ids.add(l["id"])
-                        candidates.append(l)
-            relevant_lessons = candidates[:3]
-        except Exception:
-            relevant_lessons = []
+    relevant_lessons = collect_relevant_lessons(
+        memory_store,
+        primary_tags=("Security & Hardening", "Threat Modeling", "STRIDE"),
+        top_k=3,
+    )
 
     lesson_ids = [l["id"] for l in relevant_lessons]
     if relevant_lessons and memory_store:
@@ -1156,8 +1378,14 @@ def run_dispatch(
     tier: Optional[str] = None,
 ) -> str:
     """Dispatch Phase: Prepares executor tasks, snapshots, and task messages."""
-    annotated_plan = state.messages.get("annotated_plan", {})
-    tasks = annotated_plan.get("tasks", [])
+    annotated_plan = state.get_message("annotated_plan", store=store, default={})
+    if isinstance(annotated_plan, str):
+        try:
+            annotated_plan = store.load(annotated_plan)
+            state.messages["annotated_plan"] = annotated_plan
+        except Exception:
+            annotated_plan = {}
+    tasks = annotated_plan.get("tasks", []) if isinstance(annotated_plan, dict) else []
 
     try:
         memory_store = MemoryStore(DEFAULT_DB_PATH)
@@ -1207,28 +1435,13 @@ def run_dispatch(
         stage3_threshold = stage2_threshold * 2
 
         # Query and inject lessons from MemoryStore (§4.01)
-        relevant_lessons = []
-        if memory_store:
-            try:
-                seen_ids = set()
-                candidates = []
-                for tag in task.get("domain_tags", []):
-                    if not isinstance(tag, str) or not tag.strip():
-                        continue
-                    for l in memory_store.search_lessons(tag.strip(), top_k=3):
-                        if l["id"] not in seen_ids:
-                            seen_ids.add(l["id"])
-                            candidates.append(l)
-                if not candidates and task_desc:
-                    words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", task_desc) if len(w) > 3]
-                    for w in words[:3]:
-                        for l in memory_store.search_lessons(w, top_k=2):
-                            if l["id"] not in seen_ids:
-                                seen_ids.add(l["id"])
-                                candidates.append(l)
-                relevant_lessons = candidates[:3]
-            except Exception:
-                relevant_lessons = []
+        fallback_words = [w for w in re.findall(r"[a-zA-Z0-9_-]+", task_desc) if len(w) > 3] if task_desc else None
+        relevant_lessons = collect_relevant_lessons(
+            memory_store,
+            primary_tags=task.get("domain_tags", []),
+            fallback_terms=fallback_words[:3] if fallback_words else None,
+            top_k=3,
+        )
 
         lesson_ids = [l["id"] for l in relevant_lessons]
         if relevant_lessons and memory_store:
@@ -1321,42 +1534,53 @@ def run_dispatch(
                 and secondary_coder != current_model
                 and max_retries >= stage3_threshold
             ):
-                escalated = True
-                escalated_stage = 3
-                send_terminal_mcp(
-                    f"\n🔄 [MODEL ESCALATION - STAGE 3] Specialized {role} exhausted {stage3_threshold} attempt(s) on {active_tier} hardware.\n"
-                    f"   Escalating attempt {retries + 1}/{max_retries} to secondary heavyweight model: `{secondary_coder}`..."
+                target_secondary = validate_model_exists(
+                    secondary_coder,
+                    tier=active_tier,
+                    role=role,
+                    fallback_model=current_model,
                 )
-                state.add_event(
-                    "model_escalated_secondary",
-                    f"Escalated {role} for task {tid} from {current_model} to {secondary_coder} on {active_tier} tier (Stage 3)",
-                    "2",
-                )
-                emitter = EventEmitter.get_current()
-                if emitter:
-                    try:
-                        emitter.emit("model_escalated_secondary", {
-                            "task_id": tid,
-                            "prior_model": current_model,
-                            "secondary_model": secondary_coder,
-                            "tier": active_tier,
-                            "attempt": retries + 1,
-                        })
-                    except Exception:
-                        pass
+                if target_secondary == current_model:
+                    send_terminal_mcp(
+                        f"⚠️ [MODEL ESCALATION] Secondary escalation model '{secondary_coder}' is not available and fallback matches active model. Continuing with '{current_model}'."
+                    )
+                else:
+                    escalated = True
+                    escalated_stage = 3
+                    send_terminal_mcp(
+                        f"\n🔄 [MODEL ESCALATION - STAGE 3] Specialized {role} exhausted {stage3_threshold} attempt(s) on {active_tier} hardware.\n"
+                        f"   Escalating attempt {retries + 1}/{max_retries} to secondary heavyweight model: `{target_secondary}`..."
+                    )
+                    state.add_event(
+                        "model_escalated_secondary",
+                        f"Escalated {role} for task {tid} from {current_model} to {target_secondary} on {active_tier} tier (Stage 3)",
+                        "2",
+                    )
+                    emitter = EventEmitter.get_current()
+                    if emitter:
+                        try:
+                            emitter.emit("model_escalated_secondary", {
+                                "task_id": tid,
+                                "prior_model": current_model,
+                                "secondary_model": target_secondary,
+                                "tier": active_tier,
+                                "attempt": retries + 1,
+                            })
+                        except Exception:
+                            pass
 
-                # VRAM Management: unload prior model before loading secondary escalation model
-                should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
-                if should_unload and not getattr(state, "keep_models", False):
-                    try:
-                        send_terminal_mcp(
-                            f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for Stage 3 '{secondary_coder}' on {active_tier} tier..."
-                        )
-                        handle_unload_model(current_model)
-                    except Exception as e:
-                        send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
+                    # VRAM Management: unload prior model before loading secondary escalation model
+                    should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
+                    if should_unload and not getattr(state, "keep_models", False):
+                        try:
+                            send_terminal_mcp(
+                                f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for Stage 3 '{target_secondary}' on {active_tier} tier..."
+                            )
+                            handle_unload_model(current_model)
+                        except Exception as e:
+                            send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
 
-                current_model = secondary_coder
+                    current_model = target_secondary
 
             # Check Stage 2 escalation (retries >= stage2_threshold and escalated_stage < 2)
             elif (
@@ -1364,42 +1588,53 @@ def run_dispatch(
                 and escalated_stage < 2
                 and escalation_coder != primary_coder
             ):
-                escalated = True
-                escalated_stage = 2
-                send_terminal_mcp(
-                    f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted {stage2_threshold} attempt(s) on {active_tier} hardware.\n"
-                    f"   Escalating attempt {retries + 1}/{max_retries} to specialized model: `{escalation_coder}`..."
+                target_escalation = validate_model_exists(
+                    escalation_coder,
+                    tier=active_tier,
+                    role=role,
+                    fallback_model=current_model,
                 )
-                state.add_event(
-                    "model_escalated",
-                    f"Escalated {role} for task {tid} from {primary_coder} to {escalation_coder} on {active_tier} tier",
-                    "2",
-                )
-                emitter = EventEmitter.get_current()
-                if emitter:
-                    try:
-                        emitter.emit("model_escalated", {
-                            "task_id": tid,
-                            "primary_model": primary_coder,
-                            "escalated_model": escalation_coder,
-                            "tier": active_tier,
-                        })
-                    except Exception:
-                        pass
+                if target_escalation == current_model:
+                    send_terminal_mcp(
+                        f"⚠️ [MODEL ESCALATION] Escalation model '{escalation_coder}' is not available and fallback matches active model. Continuing with '{current_model}'."
+                    )
+                else:
+                    escalated = True
+                    escalated_stage = 2
+                    send_terminal_mcp(
+                        f"\n🔄 [MODEL ESCALATION] Primary {role} ({primary_coder}) exhausted {stage2_threshold} attempt(s) on {active_tier} hardware.\n"
+                        f"   Escalating attempt {retries + 1}/{max_retries} to specialized model: `{target_escalation}`..."
+                    )
+                    state.add_event(
+                        "model_escalated",
+                        f"Escalated {role} for task {tid} from {primary_coder} to {target_escalation} on {active_tier} tier",
+                        "2",
+                    )
+                    emitter = EventEmitter.get_current()
+                    if emitter:
+                        try:
+                            emitter.emit("model_escalated", {
+                                "task_id": tid,
+                                "primary_model": primary_coder,
+                                "escalated_model": target_escalation,
+                                "tier": active_tier,
+                            })
+                        except Exception:
+                            pass
 
-                # VRAM Management: On 8GB or 16GB tier (or if unload_models is requested),
-                # unload the primary model before loading the escalation model.
-                should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
-                if should_unload and not getattr(state, "keep_models", False):
-                    try:
-                        send_terminal_mcp(
-                            f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for '{escalation_coder}' on {active_tier} tier..."
-                        )
-                        handle_unload_model(current_model)
-                    except Exception as e:
-                        send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
+                    # VRAM Management: On 8GB or 16GB tier (or if unload_models is requested),
+                    # unload the primary model before loading the escalation model.
+                    should_unload = (active_tier in ("8gb", "16gb")) or getattr(state, "unload_models", False)
+                    if should_unload and not getattr(state, "keep_models", False):
+                        try:
+                            send_terminal_mcp(
+                                f"🧹 [VRAM CLEANUP] Unloading '{current_model}' to ensure 100% GPU VRAM for '{target_escalation}' on {active_tier} tier..."
+                            )
+                            handle_unload_model(current_model)
+                        except Exception as e:
+                            send_terminal_mcp(f"⚠️ [VRAM CLEANUP] Warning: failed to unload {current_model}: {e}")
 
-                current_model = escalation_coder
+                    current_model = target_escalation
 
         while retries <= max_retries:
             raw_result = stage_chat(
@@ -1424,7 +1659,7 @@ def run_dispatch(
 
             outputs = exec_res.get("outputs", {})
             if not outputs:
-                code_blocks = re.findall(r"```(?:bash|sh)?\s*\n([\s\S]*?)```", raw_result)
+                code_blocks = re.findall(r"```(?:bash|sh|python|py|yaml|yml|json)?\s*\n([\s\S]*?)```", raw_result)
                 if code_blocks and declared_outputs:
                     target_file = declared_outputs[0]
                     outputs = {target_file: max(code_blocks, key=len).strip()}
@@ -1443,10 +1678,19 @@ def run_dispatch(
                         if p in declared_set:
                             filtered_outputs[p] = c
                         else:
-                            send_terminal_mcp(
-                                f"⚠️ [OUTPUT GUARD] Task '{tid}' emitted undeclared output `{p}` "
-                                f"(declared: {list(declared_set)}). Dropping undeclared file output."
-                            )
+                            # Match by basename or relative suffix to accommodate model path variations
+                            matched_decl = None
+                            for decl in declared_set:
+                                if os.path.basename(decl) == os.path.basename(p) or decl.endswith(p) or p.endswith(decl):
+                                    matched_decl = decl
+                                    break
+                            if matched_decl:
+                                filtered_outputs[matched_decl] = c
+                            else:
+                                send_terminal_mcp(
+                                    f"⚠️ [OUTPUT GUARD] Task '{tid}' emitted undeclared output `{p}` "
+                                    f"(declared: {list(declared_set)}). Dropping undeclared file output."
+                                )
                     else:
                         # Task declared NO file outputs (e.g. execution/verification task)
                         if p in verified_task_files:
@@ -1475,9 +1719,55 @@ def run_dispatch(
                         is_code_output = True
                         code_files[p] = c
 
+            declared_code_files = [
+                decl for decl in declared_outputs
+                if decl.endswith((".sh", ".bash", ".py", ".yml", ".yaml", ".json"))
+            ]
+            expected_code_synthesis = bool(declared_code_files) or (
+                role == "coder" and bool(declared_outputs)
+            )
+
             if not is_code_output:
-                passed_all_gates = True
-                break
+                if expected_code_synthesis:
+                    target_decl = declared_code_files or declared_outputs
+                    critique = (
+                        f"Task '{tid}' ({role}) failed to produce valid code output for declared files: {target_decl}. "
+                        "Please output valid JSON matching the schema with code in the `outputs` map."
+                    )
+                    send_terminal_mcp(
+                        f"\n❌ [CODE OUTPUT GATE] Task '{tid}' produced no valid code output for declared files {target_decl}."
+                    )
+                    state.add_event("code_output_missing", f"Task {tid} produced no valid code output", "3")
+                    if memory_store:
+                        try:
+                            memory_store.record_model_attempt(
+                                run_id=state.run_id,
+                                task_id=tid,
+                                model=current_model,
+                                role=role,
+                                domain_tags=task.get("domain_tags", []),
+                                success=False,
+                                retries=retries,
+                            )
+                        except Exception:
+                            pass
+                    retries += 1
+                    if retries <= max_retries:
+                        _check_escalation_before_retry()
+                        send_terminal_mcp(
+                            f"🔄 [REMEDIATION] Requesting {role.capitalize()} retry {retries}/{max_retries} with format critique using `{current_model}`..."
+                        )
+                        task_msg["prior_critique"] = critique
+                        task_msg["revision"] = retries
+                        continue
+                    else:
+                        send_terminal_mcp(
+                            f"🚨 [CODE OUTPUT GATE] Retry budget exhausted ({max_retries}/{max_retries}). Task '{tid}' failed."
+                        )
+                        break
+                else:
+                    passed_all_gates = True
+                    break
 
             if code_files:
                 first_path, first_code = next(iter(code_files.items()))
@@ -1800,7 +2090,7 @@ def run_dispatch(
                 pass
 
         state.tasks[tid]["retries"] = retries
-        if is_code_output and not passed_all_gates:
+        if not passed_all_gates:
             state.tasks[tid]["status"] = "failed"
             store.save_message(state.run_id, f"execution_result_{tid}", exec_res)
             state.add_event("task_failed", f"Task {tid} failed pre-execution verification gates", "3")
@@ -1866,7 +2156,7 @@ def run_dispatch(
         for target in targets_to_execute:
             send_terminal_mcp(f"\n⚡ [{role.upper()}] Executing target script `{target}` live in terminal-mcp...")
             run_cmd = target if target.startswith("./") else f"./{target}"
-            run_out = handle_execute_task(run_cmd, task_description=task_desc, model=model)
+            run_out = handle_execute_task(run_cmd, task_description=task_desc, cwd=WORKSPACE_ROOT, model=model)
             send_terminal_mcp(f"📋 [Execution Output]\n{run_out}")
 
             # Verify exit code and explicit error signatures
@@ -1986,13 +2276,13 @@ def _finalize_pipeline_run(state: PipelineState, store: ContextStore, model: str
         roles_dict: Dict[str, Any] = {}
         for role_name in ("architect", "orchestrator", "reviewer", "security"):
             if role_name == "architect":
-                msg = state.messages.get("plan", {})
+                msg = state.get_message("plan", store=store, default={})
             elif role_name == "orchestrator":
-                msg = state.messages.get("annotated_plan", {})
+                msg = state.get_message("annotated_plan", store=store, default={})
             elif role_name == "reviewer":
-                msg = state.messages.get("review_verdict") or state.messages.get("reviewer_verdict") or {}
+                msg = state.get_message("review_verdict", store=store) or state.get_message("reviewer_verdict", store=store) or {}
             elif role_name == "security":
-                msg = state.messages.get("security_verdict", {})
+                msg = state.get_message("security_verdict", store=store, default={})
             else:
                 msg = {}
 
@@ -2285,7 +2575,13 @@ def resume_pipeline(
         store = ContextStore()
 
     state_dict = store.load(f"runs/{run_id}/state.json")
-    state = PipelineState.from_dict(state_dict)
+    state = PipelineState.from_dict(state_dict, store=store)
+    for msg_key, msg_val in list(state.messages.items()):
+        if isinstance(msg_val, str) and (msg_val.endswith(".json") or "/" in msg_val):
+            try:
+                state.messages[msg_key] = store.load(msg_val)
+            except Exception:
+                pass
     if retry_budget is not None:
         state.retry_budget = validate_retry_budget(retry_budget)
         state.architect_budget = state.retry_budget

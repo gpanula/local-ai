@@ -588,3 +588,221 @@ def test_execute_in_terminal_mcp_extracts_exit_code_and_safety_override():
         assert "__LOCALAI_EXIT" not in tail
 
 
+def test_dispatch_missing_code_output_triggers_remediation():
+    """Verify that if Coder outputs no valid code in declared files on attempt 1, it retries and verifies gates on attempt 2."""
+    state = PipelineState("test-run-missing-code-01", "Create script with missing code on attempt 1")
+    state.messages["annotated_plan"] = {
+        "tasks": [
+            {
+                "task_id": "t-001",
+                "description": "Create a defensive bash script",
+                "domain_tags": ["Defensive Bash Scripting"],
+                "assigned_agent": "coder",
+                "tools_required": ["write_file"],
+                "inputs": [],
+                "outputs": ["sysadmin/test_script.sh"],
+                "constraints": ["set -euo pipefail"],
+            }
+        ]
+    }
+    store = ContextStore()
+
+    attempt = 0
+    def mock_stage_chat(role, system_prompt, user_content, model):
+        nonlocal attempt
+        if role == "coder":
+            attempt += 1
+            if attempt == 1:
+                # Attempt 1: Model replies with conversational text / empty outputs
+                return json.dumps({
+                    "schema_version": "2.0",
+                    "message_type": "execution_result",
+                    "run_id": "test-run-missing-code-01",
+                    "task_id": "t-001",
+                    "role": "coder",
+                    "status": "success",
+                    "outputs": {},
+                    "cognition": {"analysis": "I am thinking", "risks": "none", "solution": "no code yet", "verification": "none"}
+                })
+            else:
+                # Attempt 2: Valid defensive code
+                return json.dumps({
+                    "schema_version": "2.0",
+                    "message_type": "execution_result",
+                    "run_id": "test-run-missing-code-01",
+                    "task_id": "t-001",
+                    "role": "coder",
+                    "status": "success",
+                    "outputs": {
+                        "sysadmin/test_script.sh": (
+                            "#!/usr/bin/env bash\n"
+                            "set -euo pipefail\n"
+                            "trap 'echo \"error\" >&2; exit 1' ERR\n"
+                            "echo \"Fixed\"\n"
+                            "exit 0\n"
+                        )
+                    },
+                    "cognition": {"analysis": "Fixed", "risks": "none", "solution": "valid code", "verification": "none"}
+                })
+        elif role == "reviewer":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "code_review_verdict",
+                "run_id": "test-run-missing-code-01",
+                "task_id": "t-001",
+                "verdict": "approved",
+                "violations": [],
+            })
+        elif role == "security":
+            return json.dumps({
+                "schema_version": "2.0",
+                "message_type": "code_security_verdict",
+                "run_id": "test-run-missing-code-01",
+                "task_id": "t-001",
+                "verdict": "cleared",
+                "threats": [],
+            })
+        return "{}"
+
+    with patch("pipeline.stage_chat", side_effect=mock_stage_chat), \
+         patch("pipeline.handle_write_file", return_value="Wrote file") as mock_write, \
+         patch("pipeline.handle_execute_task", return_value="Exit Code: 0\nSuccess") as mock_exec, \
+         patch("pipeline.MemoryStore") as mock_mem:
+
+        mock_mem_inst = MagicMock()
+        mock_mem_inst.search_lessons.return_value = []
+        mock_mem.return_value = mock_mem_inst
+
+        run_dispatch(state, store)
+
+        assert state.tasks["t-001"]["retries"] == 1
+        assert state.tasks["t-001"]["status"] == "success"
+        assert any(e["event"] == "code_output_missing" for e in state.events)
+        assert any(e["event"] == "code_reviewed" for e in state.events)
+        assert any(e["event"] == "code_security_cleared" for e in state.events)
+        mock_write.assert_called_once()
+
+
+def test_dispatch_missing_code_output_exhausts_budget_and_aborts():
+    """Verify that if Coder persistently outputs no code, retry budget is exhausted and dispatch aborts."""
+    state = PipelineState("test-run-missing-code-02", "Persistent missing code")
+    state.messages["annotated_plan"] = {
+        "tasks": [
+            {
+                "task_id": "t-001",
+                "description": "Create script",
+                "domain_tags": ["Defensive Bash Scripting"],
+                "assigned_agent": "coder",
+                "tools_required": ["write_file"],
+                "inputs": [],
+                "outputs": ["sysadmin/target.sh"],
+                "constraints": [],
+            }
+        ]
+    }
+    store = ContextStore()
+
+    coder_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "execution_result",
+        "task_id": "t-001",
+        "role": "coder",
+        "status": "success",
+        "outputs": {},
+    })
+
+    with patch("pipeline.stage_chat", return_value=coder_response), \
+         patch("pipeline.handle_write_file") as mock_write, \
+         patch("pipeline.MemoryStore") as mock_mem:
+
+        mock_mem_inst = MagicMock()
+        mock_mem_inst.search_lessons.return_value = []
+        state.retry_budget = 2
+        ret = run_dispatch(state, store)
+
+        assert ret == "aborted"
+        assert state.status == "aborted"
+        assert state.tasks["t-001"]["status"] == "failed"
+        assert state.tasks["t-001"]["retries"] == 3
+        mock_write.assert_not_called()
+
+
+def test_dispatch_output_guard_normalizes_basename_matches():
+    """Verify that when a model outputs basename 'test_script.sh', it matches declared 'sysadmin/test_script.sh'."""
+    state = PipelineState("test-run-basename-01", "Create script with basename")
+    state.messages["annotated_plan"] = {
+        "tasks": [
+            {
+                "task_id": "t-001",
+                "description": "Create a defensive bash script",
+                "domain_tags": ["Defensive Bash Scripting"],
+                "assigned_agent": "coder",
+                "tools_required": ["write_file"],
+                "inputs": [],
+                "outputs": ["sysadmin/test_script.sh"],
+                "constraints": ["set -euo pipefail"],
+            }
+        ]
+    }
+    store = ContextStore()
+
+    coder_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "execution_result",
+        "task_id": "t-001",
+        "role": "coder",
+        "status": "success",
+        "outputs": {
+            "test_script.sh": (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "trap 'echo \"error\" >&2; exit 1' ERR\n"
+                "echo \"Normalized\"\n"
+                "exit 0\n"
+            )
+        },
+    })
+
+    reviewer_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "code_review_verdict",
+        "verdict": "approved",
+        "violations": [],
+    })
+
+    security_response = json.dumps({
+        "schema_version": "2.0",
+        "message_type": "code_security_verdict",
+        "verdict": "cleared",
+        "threats": [],
+    })
+
+    def mock_stage_chat(role, system_prompt, user_content, model):
+        if role == "coder":
+            return coder_response
+        elif role == "reviewer":
+            return reviewer_response
+        elif role == "security":
+            return security_response
+        return "{}"
+
+    with patch("pipeline.stage_chat", side_effect=mock_stage_chat), \
+         patch("pipeline.handle_write_file", return_value="Wrote file") as mock_write, \
+         patch("pipeline.handle_execute_task", return_value="Exit Code: 0\nSuccess") as mock_exec, \
+         patch("pipeline.MemoryStore") as mock_mem:
+
+        mock_mem_inst = MagicMock()
+        mock_mem_inst.search_lessons.return_value = []
+        mock_mem.return_value = mock_mem_inst
+
+        run_dispatch(state, store)
+
+        assert state.tasks["t-001"]["status"] == "success"
+        mock_write.assert_called_once_with(
+            "sysadmin/test_script.sh",
+            "#!/usr/bin/env bash\nset -euo pipefail\ntrap 'echo \"error\" >&2; exit 1' ERR\necho \"Normalized\"\nexit 0\n",
+            make_executable=True,
+        )
+
+
+
