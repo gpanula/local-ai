@@ -1,7 +1,7 @@
 # Local AI Multi-Agent Pipeline: Session Summary & Resume Guide
 
-**Date**: September 18, 2026  
-**Status**: Arc-Orc-Rev Pipeline Operational with Dynamic Dual-Model Critic Selection (`--dual-model`, `--dynamic-auditor`); 24GB Multi-Model Residency Architecture Active; Deterministic Check 10 Anti-Self-Review Invariant Enforced; PTY Sentinel Exit Code & Rule 2 Safety Override Verified; Fail-Fast Dispatch Verification Gates Enforced; Self-Contained Run Capture & Query-Once Context Caching Active; 306 Unit/Integration Tests Passing Cleanly  
+**Date**: September 30, 2026  
+**Status**: Arc-Orc-Rev Multi-Agent Pipeline Operational with Fast-Path & Dynamic Coder Escalation Cascade; Output Boundary & Atomic Synthesis Protection Enforced; Architect Confusion Gate Operational; Banned Stacked Negatives & Rebuilt 14 Modelfiles; Multi-Layer Lesson Deduplication Engine Active; 360 Unit/Integration Tests Passing Cleanly  
 **Active Branch**: `feat/arc-orc-rev-pipeline`  
 
 ---
@@ -128,8 +128,58 @@
   - Fixed `ContextWindowDrawer` mount NameError bug and enabled exact context window limit display across 16GB and 24GB tiers.
 
 ### 13. Verification & Knowledge Graph
-- **306 Passing Unit/Integration Tests**: All tests across `sysadmin/tests/` passing cleanly in ~22s.
-- **AST Knowledge Graph Synchronized**: Updated via `graphify update .` (2,132 nodes, 3,498 edges, 154 communities).
+- **360 Passing Unit/Integration Tests**: Full test suite across `sysadmin/tests/` passing cleanly.
+- **AST Knowledge Graph Synchronized**: Updated via `graphify update .` (2,552 nodes, 4,641 edges, 177 communities).
+
+### 14. Interactive Lessons TUI & Compact Review Queue
+- **Interactive Lessons TUI ([`sysadmin/lessons_tui/`](./lessons_tui/))**:
+  - Full Textual dashboard for browsing, filtering, and editing active lessons in SQLite and Markdown.
+  - Resolved event collision on list selection (`ListView.Selected`) and added auto-safe review mode.
+- **Clustered Pending Lessons Compact Queue ([`bin/localai-compact-queue`](../bin/localai-compact-queue), [`compact_app.py`](./lessons_tui/compact_app.py))**:
+  - Implemented compact queue TUI for batch-triaging semantically clustered pending lessons.
+
+### 15. Fast-Path & Dynamic Coder Model Escalation Cascade
+- **Fast-Path Runner ([`sysadmin/pipeline.py`](./pipeline.py))**:
+  - Direct single-step execution commands route via fast-path, bypassing full DAG decomposition while preserving verification gates.
+- **VRAM-Aware Coder Model Escalation Cascade**:
+  - Dynamically escalates coder models upon retries across 3 stages per tier:
+    - **8GB Tier**: `winter-coder:8gb` ➔ `winter-coder:8gb-deepseek` ➔ `winter-prime:8gb`
+    - **16GB Tier**: `winter-coder:16gb` ➔ `winter-coder:16gb-deepseek` ➔ `winter-prime:16gb`
+    - **24GB Tier**: `winter-coder:24gb` ➔ `winter-coder:24gb-codestral` ➔ `winter-prime:24gb`
+  - Replaced raw upstream Qwen base models with Winter customized/fine-tuned models for consistent system instructions.
+  - Added configurable `--retry-budget` (1 to 15, default: 3) and `--escalation-threshold`.
+- **Domain-Aware Model Performance Tracking**:
+  - Added `record_model_attempt()` in `MemoryStore`, recording success/retry metrics partitioned by domain tags.
+
+### 16. Output Boundary Protection & Atomic Script Synthesis
+- **Output Guard & Fuzzy Path Matching ([`sysadmin/pipeline.py`](./pipeline.py))**:
+  - Rejects undeclared file writes emitted by models.
+  - Accommodates relative vs absolute paths and basename matching so minor model path formatting differences don't trigger false-positive file drops.
+- **Pre-Execution Code Output Gate**:
+  - If a coder model fails to emit declared files in `outputs` or emits unstructured text, triggers structured format remediation rather than silently passing execution.
+
+### 17. Defensive Standards Alignment & Modelfile Rebuilds (Ban Stacked Negatives)
+- **Architect Pre-Flight Confusion Gate**:
+  - Pre-flight review in `run_architect` bailing out early if user prompt contains confusing or contradictory statements.
+- **Elimination of Inverted Bash Negation**:
+  - Replaced inverted error testing (`if ! cmd 2>/dev/null; then exit 1; fi`) with positive fault-detection pattern:
+    `if cmd >/dev/null 2>&1; then echo "❌ Failed to detect error"; exit 1; fi`.
+  - Updated [`AGENTS.md`](../AGENTS.md), [`SYSTEM_RULES.md`](./prompts/SYSTEM_RULES.md), [`roles/coder.md`](./prompts/roles/coder.md), and [`verify_code_quality_toolchain.md`](./prompts/verify_code_quality_toolchain.md).
+- **Modelfile Synchronization & Rebuild ([`build_models.sh`](../ollama_update/customized_models/build_models.sh))**:
+  - Patched 14 customized Modelfiles across 8GB, 16GB, and 24GB tiers.
+  - Enhanced `build_models.sh` with `updated` target and individual modelfile targeting.
+  - Rebuilt all 14 models and aliases in Ollama (`winter-coder:*`, `winter-reviewer:*`, `winter-prime:*`, and `winter-coder:8gb-trained`).
+
+### 18. Multi-Layer Lesson Deduplication Engine
+- **Normalization & Pruning Core ([`mcp_core/injection.py`](./mcp_core/injection.py))**:
+  - Implemented `normalize_lesson_rule()` (whitespace collapse, lowercase, punctuation stripping) and `deduplicate_lessons()`.
+  - `format_lessons_for_prompt()` automatically deduplicates before generating prompt headers.
+- **Store-Level Deduplication ([`mcp_core/memory.py`](./mcp_core/memory.py))**:
+  - Added `dedup: bool = True` across `search_lessons()`, `search_lessons_vector()`, and `search_lessons_hybrid()`.
+  - Expanded candidate fetch limits (`max(top_k * 4, 12)`) to prevent duplicate clusters from depleting `top_k`.
+- **Pipeline Aggregation Standardized ([`sysadmin/pipeline.py`](./pipeline.py), [`mcp_cli/commands/pipeline.py`](./mcp_cli/commands/pipeline.py))**:
+  - Standardized all 5 pipeline phases to use `collect_relevant_lessons()`, preventing duplicate rule accumulation across phase tags.
+  - Synchronized `_inject_lessons()` so prompt injection text, terminal banners, and attribution telemetry match 1:1.
 
 ---
 
@@ -137,8 +187,8 @@
 
 - **Working Tree**: All components implemented, tested, and verified on branch `feat/arc-orc-rev-pipeline`.
 - **TUI & Runner**: Fully functional with live monitoring, replay capabilities, and updated `localai-pipeline` aliases.
-- **MCP Server Registration**: `local-ollama` is configured in `~/.gemini/config/mcp_config.json`.
-- **Target Test Prompt**: [`sysadmin/prompts/hello_world_test.md`](./prompts/hello_world_test.md) ready for execution.
+- **MCP Server Registration**: `local-ollama` is configured in `~/.gemini/config/mcp_config.json` with `run_pipeline`, `process_prompt`, and `inspect_pipeline_run`.
+- **Target Test Prompt**: [`sysadmin/prompts/hello_world_test.md`](./prompts/hello_world_test.md) and [`sysadmin/prompts/verify_code_quality_toolchain.md`](./prompts/verify_code_quality_toolchain.md) ready for execution.
 
 ---
 
