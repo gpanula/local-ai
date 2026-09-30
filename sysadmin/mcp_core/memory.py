@@ -21,12 +21,13 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from mcp_core.audit import normalize_category
+from mcp_core.injection import deduplicate_lessons
 from mcp_core.workspace import WORKSPACE_ROOT
 
 # sqlite-vec is optional: if importable, vector/hybrid search is enabled; otherwise
 # search_lessons_hybrid degrades gracefully to FTS5-only search.
 try:  # pragma: no cover - depends on optional dependency
-    import sqlite_vec
+    import sqlite_vec  # type: ignore
     _SQLITE_VEC_AVAILABLE = True
 except ImportError:  # pragma: no cover
     sqlite_vec = None
@@ -455,7 +456,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # FTS5 keyword search
     # ------------------------------------------------------------------
-    def search_lessons(self, query: str, top_k: int = 3) -> list:
+    def search_lessons(self, query: str, top_k: int = 3, dedup: bool = True) -> list:
         """Full-text keyword search over lessons, ranked by FTS5 BM25.
 
         Returns up to ``top_k`` lesson dicts, each including a ``rank`` field
@@ -472,6 +473,7 @@ class MemoryStore:
         escaped = re.sub(r'(["\':^*-])', r" \1 ", query)
         match_expr = f'"{escaped}"'
 
+        fetch_limit = max(top_k * 4, 12) if dedup else top_k
         rows = self.conn.execute(
             """
             SELECT lessons.*, bm25(lessons_fts) AS rank
@@ -481,7 +483,7 @@ class MemoryStore:
             ORDER BY rank
             LIMIT ?
             """,
-            (match_expr, top_k * 3),
+            (match_expr, fetch_limit),
         ).fetchall()
 
         results = []
@@ -493,6 +495,8 @@ class MemoryStore:
 
         # Sort by utility score descending (higher = more useful), then trim.
         results.sort(key=lambda r: r["utility_score"], reverse=True)
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
         return results[:top_k]
 
     @staticmethod
@@ -514,7 +518,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Vector & hybrid search (sqlite-vec, optional)
     # ------------------------------------------------------------------
-    def search_lessons_vector(self, query_embedding: list, top_k: int = 3) -> list:
+    def search_lessons_vector(self, query_embedding: list, top_k: int = 3, dedup: bool = True) -> list:
         """Vector similarity search over lessons using cosine similarity.
 
         Requires ``sqlite-vec`` to be importable. Returns up to ``top_k`` lesson
@@ -531,6 +535,7 @@ class MemoryStore:
         if query_blob is None:
             return []
 
+        fetch_limit = max(top_k * 4, 12) if dedup else top_k
         try:
             rows = self.conn.execute(
                 """
@@ -540,7 +545,7 @@ class MemoryStore:
                 ORDER BY vec_dist ASC
                 LIMIT ?
                 """,
-                (query_blob, top_k),
+                (query_blob, fetch_limit),
             ).fetchall()
         except sqlite3.OperationalError:
             # sqlite-vec not loaded for this connection (e.g. extension load failed).
@@ -552,9 +557,14 @@ class MemoryStore:
             # vec_distance_cosine returns a distance (0 = identical); convert to similarity.
             lesson["vector_rank"] = 1.0 - float(row["vec_dist"])
             results.append(lesson)
-        return results
+        results.sort(key=lambda r: r.get("vector_rank", 0.0), reverse=True)
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
+        return results[:top_k]
 
-    def search_lessons_hybrid(self, query_text: str, query_embedding: list, top_k: int = 3) -> list:
+    def search_lessons_hybrid(
+        self, query_text: str, query_embedding: list, top_k: int = 3, dedup: bool = True
+    ) -> list:
         """Combine FTS5 BM25 keyword search with vector similarity.
 
         When ``sqlite-vec`` is unavailable or no embedding is provided, this
@@ -563,10 +573,10 @@ class MemoryStore:
         outranks one matching only a single signal.
         """
         if not _SQLITE_VEC_AVAILABLE or not query_embedding:
-            return self.search_lessons(query_text, top_k=top_k)
+            return self.search_lessons(query_text, top_k=top_k, dedup=dedup)
 
-        fts_results = self.search_lessons(query_text, top_k=top_k * 3)
-        vec_results = self.search_lessons_vector(query_embedding, top_k=top_k * 3)
+        fts_results = self.search_lessons(query_text, top_k=top_k * 3, dedup=False)
+        vec_results = self.search_lessons_vector(query_embedding, top_k=top_k * 3, dedup=False)
 
         # Normalize BM25 rank (lower is better) into a 0..1 score.
         fts_scores: dict = {}
@@ -595,15 +605,16 @@ class MemoryStore:
             combined.append((lesson_id, (fts + vec) * multiplier))
 
         combined.sort(key=lambda item: item[1], reverse=True)
-        top_ids = [lesson_id for lesson_id, _ in combined[:top_k]]
 
         results = []
-        for lesson_id in top_ids:
+        for lesson_id, _ in combined:
             lesson = self.get_lesson(lesson_id)
             if lesson:
                 lesson["hybrid_rank"] = dict(combined)[lesson_id]
                 results.append(lesson)
-        return results
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
+        return results[:top_k]
 
     # ------------------------------------------------------------------
     # Pending lesson CRUD (staging queue)

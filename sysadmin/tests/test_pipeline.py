@@ -341,6 +341,47 @@ def test_inject_failure_does_not_block(fake_send_terminal_mcp, monkeypatch, tmp_
     assert enriched == "Do something"
 
 
+def test_inject_deduplicates_lessons_with_identical_rules(fake_send_terminal_mcp, monkeypatch, tmp_path):
+    lessons = [
+        {
+            "id": "lesson-1",
+            "rule": "Always quote variables in bash scripts.",
+            "keywords": ["bash", "variables"],
+            "category": "Defensive Bash",
+        },
+        {
+            "id": "lesson-2",
+            "rule": "Always quote variables in bash scripts.",
+            "keywords": ["bash", "variables"],
+            "category": "Defensive Bash",
+        },
+    ]
+    enriched, injected = _inject_with_store(
+        monkeypatch, tmp_path, "Write a bash script with variables", lessons
+    )
+    assert len(injected) == 1
+    assert injected[0]["id"] == "lesson-1"
+    assert "1. **Rule**: Always quote variables in bash scripts." in enriched
+    assert "2. **Rule**" not in enriched
+
+
+def test_collect_relevant_lessons_deduplicates():
+    from pipeline import collect_relevant_lessons
+
+    class DummyStore:
+        def search_lessons(self, query, top_k=3):
+            return [
+                {"id": "l-1", "rule": "Duplicate rule across tags.", "category": "bash"},
+                {"id": "l-2", "rule": "Duplicate rule across tags.", "category": "bash"},
+                {"id": "l-3", "rule": "Unique rule for tag.", "category": "bash"},
+            ]
+
+    lessons = collect_relevant_lessons(DummyStore(), primary_tags=["tag1", "tag2"], top_k=5)
+    assert len(lessons) == 2
+    assert lessons[0]["id"] == "l-1"
+    assert lessons[1]["id"] == "l-3"
+
+
 def test_revision_loop_tracks_injected_lessons(fake_send_terminal_mcp, monkeypatch, tmp_path):
     # Preload a heredoc lesson, then run the full revision loop and confirm the
     # result dict carries injected_lessons.

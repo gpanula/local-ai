@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from mcp_core import transport
 from mcp_core.attribution import attribute_lessons
@@ -23,7 +23,7 @@ from mcp_core.extraction import (
     extract_lesson_from_success,
 )
 from mcp_core.hardware import get_default_model, get_hardware_tier
-from mcp_core.injection import format_lessons_for_prompt
+from mcp_core.injection import format_lessons_for_prompt, deduplicate_lessons
 from mcp_core.memory import MemoryStore
 from mcp_core.sanitize import sanitize_script_code
 from mcp_core.trajectories import record_trajectory
@@ -713,6 +713,7 @@ class PipelineRunCommand(BaseCommand):
         if not lessons:
             return prompt_content, []
 
+        lessons = deduplicate_lessons(lessons)
         injected_section = format_lessons_for_prompt(lessons)
         enriched = f"{injected_section}\n\n{prompt_content}"
         transport.send_terminal_mcp(
@@ -750,7 +751,8 @@ class PipelineRunCommand(BaseCommand):
                 entry["hits"] += 1
 
         ranked = sorted(scored.values(), key=lambda e: e["hits"], reverse=True)
-        return [e["lesson"] for e in ranked[:top_k]]
+        raw_lessons = [e["lesson"] for e in ranked]
+        return deduplicate_lessons(raw_lessons)[:top_k]
 
     def _apply_telemetry(self, result) -> None:
         """Record retrieval + attribution telemetry for injected lessons.

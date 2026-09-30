@@ -7,7 +7,55 @@ no Ollama calls, no raw JSON in the output.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+def normalize_lesson_rule(rule: str) -> str:
+    """Normalize rule text for deduplication.
+
+    Collapses whitespace, strips non-alphanumeric punctuation, and lowercases
+    to detect duplicate rules even if punctuation or whitespace vary slightly.
+    """
+    if not rule:
+        return ""
+    cleaned = re.sub(r"[^\w\s]", "", rule)
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+def deduplicate_lessons(lessons: list) -> list:
+    """Deduplicate a list of lesson dicts by ID and normalized rule text.
+
+    Preserves the original ranking/relevance order so the highest-scoring
+    version of a lesson is retained while subsequent duplicates are dropped.
+    """
+    if not lessons:
+        return []
+
+    seen_ids = set()
+    seen_rules = set()
+    deduped = []
+
+    for lesson in lessons:
+        if not isinstance(lesson, dict):
+            continue
+        lesson_id = lesson.get("id")
+        rule = lesson.get("rule") or lesson.get("proposed_rule") or ""
+        norm_rule = normalize_lesson_rule(rule)
+
+        if lesson_id and lesson_id in seen_ids:
+            continue
+        if norm_rule and norm_rule in seen_rules:
+            continue
+
+        if lesson_id:
+            seen_ids.add(lesson_id)
+        if norm_rule:
+            seen_rules.add(norm_rule)
+
+        deduped.append(lesson)
+
+    return deduped
 
 
 def _format_keywords(keywords: Any) -> str:
@@ -23,9 +71,11 @@ def format_lessons_for_prompt(lessons: list) -> str:
     """Render a list of lesson dicts as a ``### Relevant Lessons from Past Runs`` section.
 
     Each lesson becomes a numbered block with its rule text, category, and
-    keywords. Returns an empty string when ``lessons`` is empty so no section
-    header is injected into the prompt.
+    keywords. Duplicate lessons (by ID or normalized rule text) are automatically
+    filtered out before rendering. Returns an empty string when ``lessons`` is empty
+    so no section header is injected into the prompt.
     """
+    lessons = deduplicate_lessons(lessons)
     if not lessons:
         return ""
 
