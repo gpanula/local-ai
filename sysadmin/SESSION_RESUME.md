@@ -243,5 +243,5 @@
 * **Role System Prompts**: [`sysadmin/prompts/roles/`](./prompts/roles/)
 * **Lesson Invariant Linter Core**: [`sysadmin/mcp_core/lesson_linter.py`](./mcp_core/lesson_linter.py)
 * **Lesson Linter CLI**: [`sysadmin/mcp_cli/commands/lint_lessons.py`](./mcp_cli/commands/lint_lessons.py)
-* **Phase 8 Completion Report**: [`ollama_update/phase8_completion.md`](../ollama_update/phase8_completion.md)
+* **Lesson Duplication & Queue Deduplication Design**: [`docs/fix-lesson-duplication-detection.md`](../docs/fix-lesson-duplication-detection.md)
 * **Test Suite**: [`sysadmin/tests/`](./tests/)
