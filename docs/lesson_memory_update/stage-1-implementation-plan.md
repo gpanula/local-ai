@@ -12,6 +12,27 @@ Eliminate duplicate lessons at every lifecycle transition — ingestion, compact
 
 ---
 
+## Architectural Review & Alignment Decisions (2026-09-30)
+
+Following architectural review and codebase analysis, the following implementation decisions are codified for Stage 1:
+
+1. **Ingestion Active-Match Return Value**:
+   - Traced via Graphify and callsites across `pipeline.py`, `mcp_cli/commands/pipeline.py`, and test suites. Callers treat the return value strictly as an opaque identifier for terminal/log messages.
+   - `stage_pending_lesson()` returning the matched active lesson ID (`lesson-NNN`) is safe and backward compatible. No caller depends on a `"pending-"` prefix.
+2. **Ingestion Active-Match Data Enrichment Policy**:
+   - When an incoming proposed rule matches an active lesson, strictly increment `ineffective_count` on the active lesson. Do **not** merge keywords, alter `source_task`, or re-evaluate categories in the background.
+   - *Rationale*: Avoids background drift against version-controlled `lessons.md`, prevents category/wiki directory shifts, protects original proven provenance, and prevents premature embedding invalidation.
+3. **Test Fixtures Modernization**:
+   - Rather than relying on `deduplicate=False`, fixtures in `test_review_lessons.py`, `test_lessons_tui.py`, `test_compact_lessons.py`, and `test_compact_queue_tui.py` will be updated to use distinct phrasing variants. This ensures test suites evaluate authentic pipeline behaviors under deduplication.
+4. **SQLite Concurrency & Transaction Isolation**:
+   - Enable WAL mode (`PRAGMA journal_mode = WAL;`) and busy timeout (`PRAGMA busy_timeout = 10000;`) in `MemoryStore._create_schema()`.
+   - Wrap the check-then-insert logic in `stage_pending_lesson()` with explicit `BEGIN IMMEDIATE` transactions to prevent TOCTOU race conditions and deadlocks between concurrent pipeline runs.
+5. **Promotion Guard Telemetry Semantics**:
+   - Add a `reinforcement_count INTEGER NOT NULL DEFAULT 0` column to `lessons` (with auto-migration in `_create_schema()`).
+   - When a duplicate pending lesson is promoted (`is_new=False`), increment both `reinforcement_count += 1` (for pure reinforcement tracking) and `retrieval_count += 1` (to preserve backward compatibility with existing utility score formulas).
+
+---
+
 ## Step 1: Normalize Internally & Unify Threshold Constant
 
 ### What
@@ -73,6 +94,7 @@ Currently `stage_pending_lesson()` performs an unconditional INSERT. When multip
 **Active lesson match**:
 - If the incoming `proposed_rule` is similar to an active lesson's `rule`, the pipeline failed despite the lesson being available. This is a retrieval or model failure, not a new lesson.
 - Increment `ineffective_count` on the matching active lesson (via `update_telemetry()`).
+- Do **not** merge keywords, update `source_task`, or re-evaluate categories (prevents background drift against `lessons.md`, avoids wiki path shifting, preserves original provenance, and protects embeddings).
 - Do **not** insert into `pending_lessons`.
 - Return the active lesson's `id`.
 
@@ -86,15 +108,17 @@ Currently `stage_pending_lesson()` performs an unconditional INSERT. When multip
 
 **No match**: Insert new row as before.
 
-**Testability parameter**: Add `deduplicate: bool = True` parameter. When `False`, skip the duplicate checks entirely — this allows test fixtures and migration scripts to populate synthetic duplicate queues.
+**Testability parameter**: Add `deduplicate: bool = True` parameter. When `False`, skip the duplicate checks entirely — this allows synthetic test fixtures to populate specific queue states when needed.
 
-**Concurrency guard**: Wrap the entire check-then-insert logic in an explicit SQLite transaction (`BEGIN IMMEDIATE` via `self.conn` context manager) to prevent TOCTOU race conditions from concurrent pipeline runs.
+**Concurrency guard**: 
+- Configure `MemoryStore` with `PRAGMA journal_mode = WAL;` and `PRAGMA busy_timeout = 10000;` on connection creation.
+- Wrap the entire check-then-insert logic in an explicit SQLite transaction (`BEGIN IMMEDIATE` via `self.conn` isolation management) to prevent TOCTOU race conditions from concurrent pipeline runs.
 
 **Similarity scan scope**: The scan must be **category-agnostic** — compare against all active/pending lessons regardless of category, since cross-category duplicates exist (e.g., `"ShellCheck"` vs `"Defensive Bash Scripting"` with the same rule text).
 
 ### Acceptance Criteria
 - Staging the same rule text twice (with `deduplicate=True`) returns the same pending ID and results in only 1 row in `pending_lessons`.
-- Staging a rule that already exists in active `lessons` increments `ineffective_count` on the active lesson and does **not** create a pending row.
+- Staging a rule that already exists in active `lessons` increments `ineffective_count` on the active lesson, leaves active keywords/category/source_task unmodified, and does **not** create a pending row.
 - Staging with `deduplicate=False` always creates a new row (test support).
 - Keywords from the second staging attempt are merged into the first pending row.
 - Category is re-evaluated after keyword merge.
@@ -111,7 +135,7 @@ Before inserting a promoted lesson into the active `lessons` table, check if a n
 Currently `promote_pending_lesson()` blindly inserts into `lessons`. If a lesson was approved multiple times across review sessions, or if a similar lesson was already manually created, the active table accumulates duplicates.
 
 ### Where
-- `sysadmin/mcp_core/memory.py`: Modify `promote_pending_lesson()` return type and logic.
+- `sysadmin/mcp_core/memory.py`: Add `reinforcement_count INTEGER NOT NULL DEFAULT 0` column to `lessons` table schema & migration; modify `promote_pending_lesson()` return type and logic.
 
 ### Design Notes
 
@@ -124,7 +148,8 @@ Currently `promote_pending_lesson()` blindly inserts into `lessons`. If a lesson
 - If `are_rules_similar(pending_rule, active_rule)` finds a match:
   - Merge unique keywords from the pending lesson into the active lesson.
   - Re-evaluate category on the merged keywords.
-  - Increment `retrieval_count` or a dedicated reinforcement counter on the active lesson.
+  - Increment `reinforcement_count` on the active lesson for explicit reinforcement telemetry.
+  - Increment `retrieval_count` on the active lesson to maintain backward compatibility with existing utility score math.
   - Delete the pending row.
   - Return `(active_lesson_id, False)`.
 
@@ -134,6 +159,7 @@ Currently `promote_pending_lesson()` blindly inserts into `lessons`. If a lesson
 - Promoting a pending lesson that duplicates an active lesson returns `(active_id, False)`.
 - Promoting a unique pending lesson returns `(new_id, True)`.
 - Keywords from the promoted duplicate are merged into the active lesson.
+- Both `reinforcement_count` and `retrieval_count` are incremented on reinforcement.
 - The pending row is always deleted regardless of match outcome.
 - Return type is `tuple[Optional[str], bool]` in all code paths.
 
@@ -232,18 +258,21 @@ Flag type should be included in the output so operators can distinguish between 
 Update existing test fixtures that rely on metadata-only clustering or unrestricted staging, and add new test cases for all modified behaviors.
 
 ### Why
-Tests in `test_compact_lessons.py` and `test_compact_queue_tui.py` staged dissimilar rules that clustered only because they shared a category. Under rule-similarity clustering, these tests will fail. Additionally, tests staging multiple items need to use `deduplicate=False` or use authentic phrasing variants.
+Tests in `test_compact_lessons.py` and `test_compact_queue_tui.py` staged dissimilar rules that clustered only because they shared a category. Under rule-similarity clustering, these tests will fail. Additionally, tests in `test_review_lessons.py` and `test_lessons_tui.py` stage multiple pending lessons using default fixtures with identical rule texts; under ingestion deduplication, these would collapse into single rows. Instead of relying on `deduplicate=False`, fixtures must be updated to use authentic phrasing variants that reflect real pipeline outputs.
 
 ### Where
 - `sysadmin/tests/test_compact_lessons.py`: Update fixtures to use phrasing variants; adjust for `cluster_lessons_by_similarity()`.
-- `sysadmin/tests/test_compact_queue_tui.py`: Same.
-- `sysadmin/tests/test_memory.py`: Add tests for `stage_pending_lesson()` dedup, `promote_pending_lesson()` guard, and telemetry semantics.
+- `sysadmin/tests/test_compact_queue_tui.py`: Update fixtures to use phrasing variants.
+- `sysadmin/tests/test_review_lessons.py`: Update staged fixtures (`_pending()`) to use distinct phrasing variants across multiple stages (e.g. `test_mixed_actions_summary_counts`).
+- `sysadmin/tests/test_lessons_tui.py`: Update staged items to distinct phrasing variants where multiple items are loaded into the review view.
+- `sysadmin/tests/test_memory.py`: Add tests for `stage_pending_lesson()` dedup, `promote_pending_lesson()` guard, `reinforcement_count` migration, and telemetry semantics.
 - `sysadmin/tests/test_audit.py`: Add tests for `cluster_lessons_by_similarity()`. Ensure existing `cluster_lessons()` tests pass unchanged.
 - `sysadmin/tests/test_injection.py`: Add tests for internal normalization in `are_rules_similar()` and unified threshold.
 
 ### Acceptance Criteria
 - All pre-existing tests pass (no regressions).
-- New tests cover: ingestion dedup (active match, pending match, no match), promotion guard (`is_new=True`, `is_new=False`), similarity clustering, sunset flagging.
+- Staged fixtures use authentic phrasing variants rather than identical duplicate strings.
+- New tests cover: ingestion dedup (active match, pending match, no match), promotion guard (`is_new=True`, `is_new=False`), `reinforcement_count` tracking, similarity clustering, sunset flagging.
 
 ---
 
