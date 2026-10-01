@@ -208,3 +208,48 @@ def test_add_taxonomy_domain_dynamic(tmp_path):
     assert data["aliases"]["dockerization"] == "Docker & Containers"
 
 
+# --- cluster_lessons_by_similarity ---
+
+def test_cluster_lessons_by_similarity_groups_near_duplicates():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    lessons = [
+        {"id": "l1", "category": "Defensive Bash Scripting", "keywords": ["bash", "quotes"], "rule": "Always quote variables to prevent word splitting."},
+        {"id": "l2", "category": "ShellCheck", "keywords": ["shellcheck", "quoting"], "rule": "Always quote variables to avoid word splitting."},
+        {"id": "l3", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "always quote variables to prevent word splitting"},
+        {"id": "l4", "category": "Defensive Bash Scripting", "keywords": ["trap"], "rule": "Set up an error trap on ERR signal."},
+    ]
+    clusters = cluster_lessons_by_similarity(lessons, min_cluster_size=2)
+    assert len(clusters) == 1
+    assert clusters[0]["count"] == 3
+    assert set(clusters[0]["lesson_ids"]) == {"l1", "l2", "l3"}
+    # Category is the most common among cluster members
+    assert clusters[0]["category"] == "Defensive Bash Scripting"
+
+
+def test_cluster_lessons_by_similarity_does_not_cluster_dissimilar_same_category():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    lessons = [
+        {"id": "l1", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "Always quote variables to prevent word splitting."},
+        {"id": "l2", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "Deterministic resolution of binary paths in virtualenvs."},
+    ]
+    # Dissimilar rules in same category should NOT cluster under similarity clustering
+    clusters = cluster_lessons_by_similarity(lessons, min_cluster_size=2)
+    assert len(clusters) == 0
+
+
+def test_cluster_lessons_by_similarity_handles_proposed_rule():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    pending = [
+        {"id": "p1", "category": "ShellCheck", "keywords": ["sc2086"], "proposed_rule": "Double quote to prevent globbing and word splitting."},
+        {"id": "p2", "category": "ShellCheck", "keywords": ["quoting"], "proposed_rule": "Double quote to prevent globbing and word splitting!"},
+    ]
+    clusters = cluster_lessons_by_similarity(pending, min_cluster_size=2)
+    assert len(clusters) == 1
+    assert clusters[0]["count"] == 2
+    assert set(clusters[0]["lesson_ids"]) == {"p1", "p2"}
+
+
+

@@ -20,6 +20,7 @@ import os
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
+from mcp_core.injection import DEFAULT_SIMILARITY_THRESHOLD, are_rules_similar
 from mcp_core.workspace import WORKSPACE_ROOT
 
 DEFAULT_TAXONOMY_PATH = os.path.join(WORKSPACE_ROOT, "ollama_update", "taxonomy.json")
@@ -258,6 +259,90 @@ def cluster_lessons(lessons: List[dict], min_cluster_size: int = 3) -> List[dict
                 union(i, j)
 
     # Group members by root.
+    groups: Dict[int, List[int]] = {}
+    for idx in range(n):
+        groups.setdefault(find(idx), []).append(idx)
+
+    clusters = []
+    for members in groups.values():
+        if len(members) < min_cluster_size:
+            continue
+        member_lessons = [lessons[i] for i in members]
+        keyword_counter: Counter = Counter()
+        category_counter: Counter = Counter()
+        for lesson in member_lessons:
+            keyword_counter.update(_normalize_keywords(lesson))
+            cat = (lesson.get("category") or "unknown").strip()
+            if cat:
+                category_counter[cat] += 1
+        clusters.append(
+            {
+                "keywords": sorted(keyword_counter),
+                "category": category_counter.most_common(1)[0][0] if category_counter else "unknown",
+                "lesson_ids": [lesson.get("id") for lesson in member_lessons],
+                "count": len(members),
+            }
+        )
+
+    clusters.sort(key=lambda c: c["count"], reverse=True)
+    return clusters
+
+
+def cluster_lessons_by_similarity(
+    lessons: List[dict],
+    min_cluster_size: int = 2,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+) -> List[dict]:
+    """Group lessons into duplicate clusters using pairwise rule-text similarity.
+
+    Unlike ``cluster_lessons`` which groups by metadata taxonomy (shared category
+    or keywords) for wiki promotion, this function groups near-duplicate rules
+    using ``are_rules_similar()`` for deduplication compaction.
+
+    Returns clusters with ``count >= min_cluster_size``, sorted by cluster size descending.
+    Each cluster dict matches the structure::
+
+        {
+            "keywords": [...],   # union of member keywords (deduped)
+            "category": str,     # most common category among members
+            "lesson_ids": [...], # member lesson IDs
+            "count": int,        # number of members
+        }
+
+    Pure function — no database or file I/O.
+    """
+    lessons = list(lessons)
+    n = len(lessons)
+    if n == 0:
+        return []
+
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[ry] = rx
+
+    def _rule_text(l: dict) -> str:
+        return str(l.get("rule") or l.get("proposed_rule") or "")
+
+    for i in range(n):
+        rule_i = _rule_text(lessons[i])
+        if not rule_i:
+            continue
+        for j in range(i + 1, n):
+            rule_j = _rule_text(lessons[j])
+            if not rule_j:
+                continue
+            if are_rules_similar(rule_i, rule_j, threshold=threshold):
+                union(i, j)
+
     groups: Dict[int, List[int]] = {}
     for idx in range(n):
         groups.setdefault(find(idx), []).append(idx)

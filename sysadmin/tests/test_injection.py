@@ -171,3 +171,24 @@ def test_deduplicate_lessons_prunes_reviewer_near_duplicates():
     assert len(deduped) == 1
     assert deduped[0]["id"] == "lesson-20260918-11"
 
+
+def test_are_rules_similar_normalizes_internally():
+    from mcp_core.injection import are_rules_similar
+
+    # Raw string vs already normalized string
+    assert are_rules_similar("Always quote variables!", "always quote variables")
+    # Raw strings with different whitespace and punctuation
+    assert are_rules_similar("  Always quote variables.  ", "Always quote variables!")
+    # Raw strings with casing variations
+    assert are_rules_similar("CHECK EXIT CODES", "check exit codes")
+
+
+def test_default_similarity_threshold_constant():
+    from mcp_core.injection import DEFAULT_SIMILARITY_THRESHOLD, deduplicate_lessons
+    import inspect
+
+    assert DEFAULT_SIMILARITY_THRESHOLD == 0.75
+    # Ensure deduplicate_lessons defaults to DEFAULT_SIMILARITY_THRESHOLD
+    sig = inspect.signature(deduplicate_lessons)
+    assert sig.parameters["similarity_threshold"].default == DEFAULT_SIMILARITY_THRESHOLD
+
