@@ -12,7 +12,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, Static
 
-from mcp_core.audit import cluster_lessons
+from mcp_core.audit import cluster_lessons_by_similarity
 from mcp_core.memory import DEFAULT_DB_PATH, MemoryStore
 from lessons_tui.widgets.cluster_detail import ClusterDetailView
 from lessons_tui.widgets.cluster_list import ClusterItemWidget, ClusterListView
@@ -163,7 +163,7 @@ class CompactQueueApp(App):
             mapped["rule"] = p.get("proposed_rule", "")
             mapped_pending.append(mapped)
 
-        raw_clusters = cluster_lessons(mapped_pending, min_cluster_size=self.min_cluster_size)
+        raw_clusters = cluster_lessons_by_similarity(mapped_pending, min_cluster_size=self.min_cluster_size)
 
         clusters: List[Dict[str, Any]] = []
         for idx, cluster in enumerate(raw_clusters, start=1):

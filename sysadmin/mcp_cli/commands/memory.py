@@ -11,7 +11,13 @@ from __future__ import annotations
 import json
 import os
 
-from mcp_core.audit import cluster_lessons, flag_low_utility, is_canonical_category, normalize_category
+from mcp_core.audit import (
+    cluster_lessons,
+    cluster_lessons_by_similarity,
+    flag_low_utility,
+    is_canonical_category,
+    normalize_category,
+)
 from mcp_core.lesson_linter import lint_all_lessons, lint_lesson
 from mcp_core.lessons_writer import append_lesson_to_markdown, write_all_lessons_to_markdown
 from mcp_core.memory import MemoryStore
@@ -641,6 +647,21 @@ class CompactLessonsCommand(BaseCommand):
             if do_active:
                 self._compact_active(store, args)
 
+            # --- 3. Report Sunset Candidates in Dry-Run ---
+            if args.dry_run:
+                active_list = store.list_lessons()
+                sunset_candidates = flag_low_utility(active_list)
+                if sunset_candidates:
+                    print("\n" + "=" * 60)
+                    print(f"🌅 [Sunset Candidates] Found {len(sunset_candidates)} active lesson(s) eligible for retirement:")
+                    print("=" * 60)
+                    for sc in sunset_candidates:
+                        reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
+                        reason_str = ", ".join(reasons)
+                        print(f"  🔻 [{sc['id']}] Category: {sc.get('category', 'unknown')} | Reason: {reason_str}")
+                        print(f"     Rule: {sc.get('rule', '')}")
+                        print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
+
     def _compact_pending(self, store: MemoryStore, args) -> None:
         pending_list = store.list_pending_lessons()
         if not pending_list:
@@ -654,7 +675,7 @@ class CompactLessonsCommand(BaseCommand):
             mapped["rule"] = p.get("proposed_rule", "")
             mapped_pending.append(mapped)
 
-        clusters = cluster_lessons(mapped_pending, min_cluster_size=args.min_cluster_size)
+        clusters = cluster_lessons_by_similarity(mapped_pending, min_cluster_size=args.min_cluster_size)
         print(f"\n📋 Pending Queue: Found {len(clusters)} compaction candidate cluster(s) from {len(pending_list)} pending lessons.")
 
         for idx, cluster in enumerate(clusters, start=1):
@@ -711,7 +732,7 @@ class CompactLessonsCommand(BaseCommand):
             print("\n📚 Active Lessons: No active lessons to compact.")
             return
 
-        clusters = cluster_lessons(active_list, min_cluster_size=args.min_cluster_size)
+        clusters = cluster_lessons_by_similarity(active_list, min_cluster_size=args.min_cluster_size)
         print(f"\n📚 Active Lessons: Found {len(clusters)} compaction candidate cluster(s) from {len(active_list)} active lessons.")
 
         modified = False
@@ -729,6 +750,7 @@ class CompactLessonsCommand(BaseCommand):
             total_retrievals = sum(int(l.get("retrieval_count", 0)) for l in member_objs)
             total_prevented = sum(int(l.get("prevented_rework_count", 0)) for l in member_objs)
             total_ineffective = sum(int(l.get("ineffective_count", 0)) for l in member_objs)
+            total_reinforcements = sum(int(l.get("reinforcement_count", 0)) for l in member_objs)
 
             print("-" * 60)
             print(f"📦 [Active Cluster {idx}/{len(clusters)}] {len(member_objs)} items -> {member_ids}")
@@ -762,6 +784,8 @@ class CompactLessonsCommand(BaseCommand):
                 "retrieval_count": total_retrievals,
                 "prevented_rework_count": total_prevented,
                 "ineffective_count": total_ineffective,
+                "reinforcement_count": total_reinforcements,
+                "embeddings": None,
             })
             for other_id in member_ids[1:]:
                 store.delete_lesson(other_id)

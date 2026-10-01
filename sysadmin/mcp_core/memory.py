@@ -383,7 +383,7 @@ class MemoryStore:
         """
         if not updates:
             return
-        allowed = set(LESSON_COLUMNS) - {"id"}
+        allowed = (set(LESSON_COLUMNS) | {"embeddings"}) - {"id"}
         fields = {k: v for k, v in updates.items() if k in allowed}
         if not fields:
             return
@@ -391,6 +391,9 @@ class MemoryStore:
         if "keywords" in fields:
             kw = fields["keywords"]
             fields["keywords"] = json.dumps(kw) if not isinstance(kw, str) else kw
+
+        if "embeddings" in fields:
+            fields["embeddings"] = _serialize_embedding(fields["embeddings"])
 
         # Re-sync FTS index if searchable fields changed. Delete from the FTS
         # index BEFORE updating the content table: for external-content FTS5

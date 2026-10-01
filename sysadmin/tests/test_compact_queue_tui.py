@@ -40,18 +40,18 @@ def test_compact_queue_tui_clustering_and_compact(temp_db):
     with MemoryStore(temp_db) as store:
         store.stage_pending_lesson({
             "id": "pending-dup-01",
-            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting.",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
             "category": "ShellCheck",
             "keywords": ["bash", "quoting", "sc2086"],
             "reviewer_critique": "Critique 1",
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "pending-dup-02",
-            "proposed_rule": "Short quote rule.",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
             "category": "ShellCheck",
             "keywords": ["bash", "quoting", "variables"],
             "reviewer_critique": "Critique 2",
-        })
+        }, deduplicate=False)
 
     async def _run():
         app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
@@ -92,16 +92,16 @@ def test_compact_queue_tui_discard(temp_db):
     with MemoryStore(temp_db) as store:
         store.stage_pending_lesson({
             "id": "pending-discard-01",
-            "proposed_rule": "Rule A to discard",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
             "category": "Testing",
             "keywords": ["test", "discard"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "pending-discard-02",
-            "proposed_rule": "Rule B to discard",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
             "category": "Testing",
             "keywords": ["test", "discard"],
-        })
+        }, deduplicate=False)
 
     async def _run():
         app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
@@ -122,16 +122,16 @@ def test_compact_queue_tui_skip(temp_db):
     with MemoryStore(temp_db) as store:
         store.stage_pending_lesson({
             "id": "pending-skip-01",
-            "proposed_rule": "Rule A to skip",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
             "category": "Testing",
             "keywords": ["test", "skip"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "pending-skip-02",
-            "proposed_rule": "Rule B to skip",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
             "category": "Testing",
             "keywords": ["test", "skip"],
-        })
+        }, deduplicate=False)
 
     async def _run():
         app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
@@ -153,29 +153,29 @@ def test_compact_queue_tui_auto_compact(temp_db):
         # Cluster 1
         store.stage_pending_lesson({
             "id": "p-c1-01",
-            "proposed_rule": "Long rule for cluster 1",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
             "category": "Cluster1",
             "keywords": ["c1", "test"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "p-c1-02",
-            "proposed_rule": "Short c1",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
             "category": "Cluster1",
             "keywords": ["c1", "test"],
-        })
+        }, deduplicate=False)
         # Cluster 2
         store.stage_pending_lesson({
             "id": "p-c2-01",
-            "proposed_rule": "Long rule for cluster 2",
+            "proposed_rule": "Always isolate python virtual environments in sysadmin scripts before running tools.",
             "category": "Cluster2",
             "keywords": ["c2", "test"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "p-c2-02",
-            "proposed_rule": "Short c2",
+            "proposed_rule": "Always isolate python virtual environments in sysadmin scripts before executing tools.",
             "category": "Cluster2",
             "keywords": ["c2", "test"],
-        })
+        }, deduplicate=False)
 
     async def _run():
         app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
@@ -198,16 +198,16 @@ def test_compact_queue_tui_modify(temp_db):
     with MemoryStore(temp_db) as store:
         store.stage_pending_lesson({
             "id": "p-mod-01",
-            "proposed_rule": "Original rule text 1",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
             "category": "ModCategory",
             "keywords": ["kw1", "kw2"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
             "id": "p-mod-02",
-            "proposed_rule": "Original rule text 2",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
             "category": "ModCategory",
             "keywords": ["kw1", "kw3"],
-        })
+        }, deduplicate=False)
 
     app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
     assert len(app.clusters) == 1

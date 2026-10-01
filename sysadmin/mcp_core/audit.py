@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from collections import Counter
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_core.injection import DEFAULT_SIMILARITY_THRESHOLD, are_rules_similar
@@ -383,27 +384,60 @@ def flag_low_utility(
     lessons: List[dict],
     min_retrievals: int = 5,
     max_prevention_ratio: float = 0.3,
+    max_age_days: int = 30,
+    reference_date: Optional[date] = None,
 ) -> List[dict]:
-    """Flag lessons retrieved frequently but rarely preventing rework.
+    """Flag lessons that have low utility or are candidates for sunsetting/retirement.
 
-    A lesson is flagged when ``retrieval_count >= min_retrievals`` AND
-    ``prevented_rework_count / retrieval_count < max_prevention_ratio``. Each
-    flagged lesson is returned with computed ``prevention_ratio`` and
-    ``utility_score`` fields added.
+    Criteria:
+    1. Low prevention ratio: ``retrieval_count >= min_retrievals`` and
+       ``prevented_rework_count / retrieval_count < max_prevention_ratio``.
+       Flag reason: ``"low_prevention_ratio"``.
+    2. Consistently ineffective: ``ineffective_count > 0`` and
+       ``ineffective_count / (retrieval_count + ineffective_count) > 0.5``.
+       Flag reason: ``"consistently_ineffective"``.
+    3. Never retrieved (decay candidate): ``retrieval_count == 0`` and
+       ``created`` date is older than ``max_age_days``.
+       Flag reason: ``"never_retrieved"``.
 
     Pure function — no database or file I/O.
     """
+    if reference_date is None:
+        reference_date = date.today()
+
     flagged = []
     for lesson in lessons:
         retrieved = int(lesson.get("retrieval_count", 0))
         prevented = int(lesson.get("prevented_rework_count", 0))
-        if retrieved < min_retrievals:
-            continue
-        prevention_ratio = prevented / retrieved if retrieved else 0.0
-        if prevention_ratio >= max_prevention_ratio:
-            continue
-        flagged_lesson = dict(lesson)
-        flagged_lesson["prevention_ratio"] = prevention_ratio
-        flagged_lesson["utility_score"] = _utility_score(lesson)
-        flagged.append(flagged_lesson)
+        ineffective = int(lesson.get("ineffective_count", 0))
+        flag_reasons: List[str] = []
+
+        # 1. Low prevention ratio on frequently retrieved lessons
+        if retrieved >= min_retrievals:
+            prevention_ratio = prevented / retrieved if retrieved else 0.0
+            if prevention_ratio < max_prevention_ratio:
+                flag_reasons.append("low_prevention_ratio")
+
+        # 2. Consistently ineffective (fails to prevent rework)
+        total_eval = retrieved + ineffective
+        if ineffective > 0 and total_eval > 0 and (ineffective / total_eval) > 0.5:
+            flag_reasons.append("consistently_ineffective")
+
+        # 3. Decay: never retrieved and older than max_age_days
+        if retrieved == 0 and lesson.get("created"):
+            try:
+                created_date = date.fromisoformat(str(lesson["created"])[:10])
+                if (reference_date - created_date).days >= max_age_days:
+                    flag_reasons.append("never_retrieved")
+            except (ValueError, TypeError):
+                pass
+
+        if flag_reasons:
+            flagged_lesson = dict(lesson)
+            flagged_lesson["flag_reason"] = flag_reasons[0]
+            flagged_lesson["flag_reasons"] = flag_reasons
+            flagged_lesson["prevention_ratio"] = prevented / retrieved if retrieved else 0.0
+            flagged_lesson["utility_score"] = _utility_score(lesson)
+            flagged.append(flagged_lesson)
+
     return flagged

@@ -106,6 +106,30 @@ def test_flag_lesson_at_exact_threshold_boundary():
     assert abs(flagged[0]["prevention_ratio"] - 0.2) < 1e-9
 
 
+def test_flag_lesson_consistently_ineffective():
+    lessons = [_lesson("l1", ["bash"], retrieval_count=2, prevented_rework_count=0, ineffective_count=3)]
+    flagged = flag_low_utility(lessons)
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "consistently_ineffective"
+    assert "consistently_ineffective" in flagged[0]["flag_reasons"]
+
+
+def test_flag_lesson_decay_never_retrieved():
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-01")]
+    flagged = flag_low_utility(lessons, reference_date=date(2026, 9, 30))
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "never_retrieved"
+    assert "never_retrieved" in flagged[0]["flag_reasons"]
+
+
+def test_flag_lesson_decay_recent_not_flagged():
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-09-20")]
+    flagged = flag_low_utility(lessons, reference_date=date(2026, 9, 30))
+    assert flagged == []
+
+
 # --- normalize_category (Phase 6.10) ---
 
 from mcp_core.audit import normalize_category
