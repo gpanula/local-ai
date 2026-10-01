@@ -8,10 +8,12 @@ promoted to the active ``lessons`` table and appended to the Git-canonical
 
 from __future__ import annotations
 
+import json
 import os
 
-from mcp_core.audit import cluster_lessons, flag_low_utility
-from mcp_core.lessons_writer import append_lesson_to_markdown
+from mcp_core.audit import cluster_lessons, flag_low_utility, is_canonical_category, normalize_category
+from mcp_core.lesson_linter import lint_all_lessons, lint_lesson
+from mcp_core.lessons_writer import append_lesson_to_markdown, write_all_lessons_to_markdown
 from mcp_core.memory import MemoryStore
 from mcp_core.rules_writer import append_system_rule
 from mcp_core.wiki import generate_dashboard, generate_index, generate_log
@@ -32,9 +34,14 @@ DEFAULT_WIKI_DIR = os.path.join(WORKSPACE_ROOT, "ollama_update", "wiki")
 
 
 def _format_keywords(keywords) -> str:
-    """Render a keywords list for display."""
+    """Render a keywords list or JSON string as comma-separated text."""
     if isinstance(keywords, str):
-        return keywords
+        try:
+            parsed = json.loads(keywords)
+            if isinstance(parsed, list):
+                keywords = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
     if isinstance(keywords, (list, tuple)):
         return ", ".join(str(k) for k in keywords)
     return str(keywords or "")
@@ -49,7 +56,9 @@ def _print_review_card(index: int, total: int, pending: dict) -> None:
     print(f"  Task file:     {pending.get('task_file', '')}")
     print(f"  Lesson type:   {pending.get('lesson_type', '')}")
     print(f"  Outcome:       {pending.get('outcome', '')}")
-    print(f"  Category:      {pending.get('category', '')}")
+    cat = pending.get("category", "")
+    badge = "  [✅ Canonical Taxonomy]" if is_canonical_category(cat) else "  [🆕 Novel Domain - Not in Taxonomy]"
+    print(f"  Category:      {cat}{badge}")
     print(f"  Keywords:      {_format_keywords(pending.get('keywords', []))}")
     print("-" * 60)
     print("  Reviewer critique:")
@@ -57,6 +66,17 @@ def _print_review_card(index: int, total: int, pending: dict) -> None:
     print("-" * 60)
     print("  Proposed rule:")
     print(f"    {pending.get('proposed_rule', '')}")
+
+    # Check for invariant violations in proposed rule
+    violations = lint_lesson({"id": pending.get("id"), "rule": pending.get("proposed_rule", "")})
+    if violations:
+        print("-" * 60)
+        print(f"  🚨 [INVARIANT LINT WARNING] Triggers {len(violations)} safety/tool violation(s):")
+        for v in violations:
+            icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+            print(f"    {icon} [{v.suite} / {v.rule_name}]: {v.message}")
+            print(f"       Matched: \"{v.matched_text}\"")
+
     print("=" * 60)
 
 
@@ -70,9 +90,12 @@ def _prompt_action() -> str:
 
 
 def _prompt_modify(pending: dict) -> dict:
-    """Prompt for optional rule-text and keyword edits. Returns an edits dict."""
+    """Prompt for optional category, rule-text, and keyword edits. Returns an edits dict."""
     edits: dict = {}
     print("\n  Modify lesson (press Enter to keep current value):")
+    new_cat = input(f"  Category [{pending.get('category', '')}]: ").strip()
+    if new_cat:
+        edits["category"] = normalize_category(pending.get("keywords", []), new_cat)
     new_rule = input(f"  Rule [{pending.get('proposed_rule', '')}]: ").strip()
     if new_rule:
         edits["rule"] = new_rule
@@ -95,14 +118,110 @@ class ReviewLessonsCommand(BaseCommand):
             default=DEFAULT_LESSONS_MD,
             help="Path to the Git-canonical lessons.md store (default: ollama_update/lessons.md)",
         )
+        parser.add_argument(
+            "--auto",
+            action="store_true",
+            help="Automatically accept and promote all staged pending lessons without prompting",
+        )
+        parser.add_argument(
+            "--wiki-dir",
+            default=DEFAULT_WIKI_DIR,
+            help="Output directory for wiki files (default: ollama_update/wiki)",
+        )
+        parser.add_argument(
+            "--tui",
+            action="store_true",
+            default=None,
+            help="Launch interactive Textual TUI interface",
+        )
+        parser.add_argument(
+            "--no-tui",
+            "--plain",
+            dest="plain",
+            action="store_true",
+            default=False,
+            help="Disable TUI and use standard text-based interactive prompt",
+        )
 
     def run(self, args):
         lessons_md_path = args.lessons_md
+        import sys
+
+        use_tui = getattr(args, "tui", None)
+        if use_tui is None:
+            use_tui = (not getattr(args, "plain", False)) and sys.stdin.isatty()
+
+        # Handle TUI mode when requested or running interactively in TTY
+        if use_tui and not getattr(args, "auto", False):
+            try:
+                from lessons_tui.app import launch_lessons_tui
+
+                launch_lessons_tui(
+                    lessons_md=lessons_md_path,
+                    wiki_dir=getattr(args, "wiki_dir", DEFAULT_WIKI_DIR),
+                )
+                return
+            except Exception as e:
+                print(f"⚠️  TUI launch failed ({e}), falling back to text interface...")
+
         with MemoryStore() as store:
             pending = store.list_pending_lessons()
 
             if not pending:
                 print("✅ No pending lessons to review.")
+                return
+
+            if getattr(args, "auto", False):
+                promoted_count = 0
+                skipped_violating_count = 0
+                for item in pending:
+                    # Invariant safety check: inspect proposed rule before auto-promoting
+                    violations = lint_lesson({"id": item.get("id"), "rule": item.get("proposed_rule", "")})
+                    if violations:
+                        print(f"  🚨 [SAFETY GATE] Skipping violating lesson {item['id']} (manual review required):")
+                        for v in violations:
+                            icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+                            print(f"     {icon} [{v.suite} / {v.rule_name}]: {v.message}")
+                            print(f"        Matched: \"{v.matched_text}\"")
+                        skipped_violating_count += 1
+                        continue
+
+                    lesson_id = store.promote_pending_lesson(item["id"])
+                    if lesson_id:
+                        promoted = store.get_lesson(lesson_id)
+                        if promoted:
+                            append_lesson_to_markdown(promoted, lessons_md_path)
+                        promoted_count += 1
+                        print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
+                print("\n" + "=" * 60)
+                summary_line = f"Summary — Automatically Kept: {promoted_count} | Total: {len(pending)}"
+                if skipped_violating_count > 0:
+                    summary_line += f" | Violations Skipped: {skipped_violating_count}"
+                print(summary_line)
+                print("=" * 60)
+
+                # Auto-recompile wiki
+                wiki_dir = getattr(args, "wiki_dir", DEFAULT_WIKI_DIR)
+                if wiki_dir and promoted_count > 0:
+                    updated_lessons = store.list_lessons()
+                    os.makedirs(wiki_dir, exist_ok=True)
+                    index_path = os.path.join(wiki_dir, "index.md")
+                    dashboard_path = os.path.join(wiki_dir, "dashboard.md")
+                    log_path = os.path.join(wiki_dir, "log.md")
+                    generate_index(updated_lessons, index_path)
+                    generate_dashboard(updated_lessons, dashboard_path)
+                    from datetime import datetime, timezone
+
+                    generate_log(
+                        [
+                            {
+                                "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                                "message": f"Wiki re-compiled after auto-promoting {promoted_count} lesson(s).",
+                            }
+                        ],
+                        log_path,
+                    )
+                    print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} active lessons), dashboard.md, log.md")
                 return
 
             counts = {"kept": 0, "modified": 0, "discarded": 0, "skipped": 0}
@@ -150,6 +269,29 @@ class ReviewLessonsCommand(BaseCommand):
                 f"Discarded: {counts['discarded']} | Skipped: {counts['skipped']}"
             )
             print("=" * 60)
+
+            # Auto-recompile wiki if lessons changed
+            wiki_dir = getattr(args, "wiki_dir", DEFAULT_WIKI_DIR)
+            if wiki_dir and (counts["kept"] > 0 or counts["modified"] > 0):
+                updated_lessons = store.list_lessons()
+                os.makedirs(wiki_dir, exist_ok=True)
+                index_path = os.path.join(wiki_dir, "index.md")
+                dashboard_path = os.path.join(wiki_dir, "dashboard.md")
+                log_path = os.path.join(wiki_dir, "log.md")
+                generate_index(updated_lessons, index_path)
+                generate_dashboard(updated_lessons, dashboard_path)
+                from datetime import datetime, timezone
+
+                generate_log(
+                    [
+                        {
+                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                            "message": f"Wiki re-compiled after promoting {counts['kept'] + counts['modified']} lesson(s).",
+                        }
+                    ],
+                    log_path,
+                )
+                print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} active lessons), dashboard.md, log.md")
 
 
 def _format_keywords_display(keywords) -> str:
@@ -204,6 +346,17 @@ class AuditLessonsCommand(BaseCommand):
 
             clusters = cluster_lessons(lessons, min_cluster_size=args.min_cluster_size)
             low_utility = flag_low_utility(lessons, min_retrievals=args.min_retrievals)
+            violations = lint_all_lessons(lessons)
+
+            if violations:
+                print("\n" + "=" * 60)
+                print(f"🚨 [Invariant Linter] {len(violations)} active lesson(s) violate safety or tool invariants!")
+                print("=" * 60)
+                for lid, viols in violations.items():
+                    for v in viols:
+                        icon = "❌" if v.severity == "CRITICAL" else "⚠️ "
+                        print(f"  {icon} [{lid}] [{v.suite} / {v.rule_name}]: {v.message}")
+                print("  💡 Run 'localai-lint-lessons-fix' or 'lint-lessons --fix' to remediate.")
 
             counts = {"promoted": 0, "modified": 0, "kept": 0, "discarded": 0,
                       "deleted": 0, "rewritten": 0, "skipped": 0}
@@ -384,3 +537,248 @@ class CompileWikiCommand(BaseCommand):
         print(
             f"📚 Wiki compiled: index.md ({len(lessons)} lessons), dashboard.md, log.md"
         )
+
+
+@command
+class CompactLessonsCommand(BaseCommand):
+    name = "compact-lessons"
+    help = "Consolidate and deduplicate similar lessons across pending queue and active memory"
+
+    def register_args(self, parser):
+        parser.add_argument(
+            "--queue-only",
+            action="store_true",
+            help="Compact only the pending review queue",
+        )
+        parser.add_argument(
+            "--active-only",
+            action="store_true",
+            help="Compact only active approved lessons",
+        )
+        parser.add_argument(
+            "--auto",
+            action="store_true",
+            help="Automatically merge duplicate clusters without interactive prompts",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview proposed consolidations without writing changes",
+        )
+        parser.add_argument(
+            "--min-cluster-size",
+            type=int,
+            default=2,
+            help="Minimum cluster size to consolidate (default: 2)",
+        )
+        parser.add_argument(
+            "--lessons-md",
+            default=DEFAULT_LESSONS_MD,
+            help="Path to the Git-canonical lessons.md store",
+        )
+        parser.add_argument(
+            "--wiki-dir",
+            default=DEFAULT_WIKI_DIR,
+            help="Output directory for wiki files (default: ollama_update/wiki)",
+        )
+        parser.add_argument(
+            "--tui",
+            action="store_true",
+            default=None,
+            help="Launch interactive Textual TUI for compacting lessons",
+        )
+        parser.add_argument(
+            "--plain",
+            dest="plain",
+            action="store_true",
+            default=False,
+            help="Disable TUI and use standard text-based interactive prompt",
+        )
+
+    def run(self, args):
+        import sys
+
+        use_tui = getattr(args, "tui", None)
+        if use_tui is None:
+            use_tui = (not getattr(args, "plain", False)) and sys.stdin.isatty()
+
+        # Handle TUI mode when requested or running queue compaction interactively in TTY
+        is_queue_compaction = getattr(args, "queue_only", False) or getattr(args, "tui", False)
+        if use_tui and is_queue_compaction and not getattr(args, "auto", False) and not getattr(args, "dry_run", False):
+            try:
+                from lessons_tui.compact_app import launch_compact_queue_tui
+
+                launch_compact_queue_tui(min_cluster_size=args.min_cluster_size)
+                return
+            except Exception as e:
+                print(f"⚠️  TUI launch failed ({e}), falling back to text interface...")
+
+        with MemoryStore() as store:
+            do_queue = not args.active_only
+            do_active = not args.queue_only
+
+            print("=" * 60)
+            print("🧹 Memory Compaction & Lesson Consolidation Engine")
+            print("=" * 60)
+
+            # --- 1. Compact Pending Queue ---
+            if do_queue:
+                self._compact_pending(store, args)
+
+            # --- 2. Compact Active Lessons ---
+            if do_active:
+                self._compact_active(store, args)
+
+    def _compact_pending(self, store: MemoryStore, args) -> None:
+        pending_list = store.list_pending_lessons()
+        if not pending_list:
+            print("\n📋 Pending Queue: No pending lessons to compact.")
+            return
+
+        # Map pending fields for clustering
+        mapped_pending = []
+        for p in pending_list:
+            mapped = dict(p)
+            mapped["rule"] = p.get("proposed_rule", "")
+            mapped_pending.append(mapped)
+
+        clusters = cluster_lessons(mapped_pending, min_cluster_size=args.min_cluster_size)
+        print(f"\n📋 Pending Queue: Found {len(clusters)} compaction candidate cluster(s) from {len(pending_list)} pending lessons.")
+
+        for idx, cluster in enumerate(clusters, start=1):
+            member_ids = cluster["lesson_ids"]
+            member_objs = [p for p in pending_list if p["id"] in member_ids]
+            if len(member_objs) < 2:
+                continue
+
+            # Pick best rule (longest / most descriptive)
+            best_rule = max((p.get("proposed_rule", "") for p in member_objs), key=len)
+            merged_critiques = "\n".join(
+                f"[{p['id']}] {p.get('reviewer_critique', '')}"
+                for p in member_objs if p.get("reviewer_critique")
+            )
+            merged_keywords = list(dict.fromkeys(cluster.get("keywords", [])))
+            category = cluster.get("category", member_objs[0].get("category", "unknown"))
+
+            print("-" * 60)
+            print(f"📦 [Pending Cluster {idx}/{len(clusters)}] {len(member_objs)} items -> {member_ids}")
+            print(f"  Category: {category}")
+            print(f"  Keywords: {', '.join(merged_keywords)}")
+            print(f"  Merged Rule: {best_rule}")
+            print("-" * 60)
+
+            if args.dry_run:
+                print("  🔍 [Dry Run] Would consolidate cluster into single pending item.")
+                continue
+
+            if not args.auto:
+                choice = input("  [c] Compact / Merge  [s] Skip  [d] Discard cluster  →  ").strip().lower()
+                if choice == "d":
+                    for pid in member_ids:
+                        store.delete_pending_lesson(pid)
+                    print(f"  🗑️ Discarded {len(member_ids)} pending lessons.")
+                    continue
+                elif choice != "c":
+                    print("  ⏭️ Skipped cluster.")
+                    continue
+
+            # Keep primary, update with merged fields, delete others
+            primary_id = member_ids[0]
+            store.conn.execute(
+                "UPDATE pending_lessons SET proposed_rule = ?, category = ?, keywords = ?, reviewer_critique = ? WHERE id = ?",
+                (best_rule, category, json.dumps(merged_keywords), merged_critiques, primary_id),
+            )
+            for other_id in member_ids[1:]:
+                store.delete_pending_lesson(other_id)
+            store.conn.commit()
+            print(f"  ✅ Compacted {len(member_ids)} pending lessons into '{primary_id}'.")
+
+    def _compact_active(self, store: MemoryStore, args) -> None:
+        active_list = store.list_lessons()
+        if not active_list:
+            print("\n📚 Active Lessons: No active lessons to compact.")
+            return
+
+        clusters = cluster_lessons(active_list, min_cluster_size=args.min_cluster_size)
+        print(f"\n📚 Active Lessons: Found {len(clusters)} compaction candidate cluster(s) from {len(active_list)} active lessons.")
+
+        modified = False
+        for idx, cluster in enumerate(clusters, start=1):
+            member_ids = cluster["lesson_ids"]
+            member_objs = [l for l in active_list if l["id"] in member_ids]
+            if len(member_objs) < 2:
+                continue
+
+            best_rule = max((l.get("rule", "") for l in member_objs), key=len)
+            merged_keywords = list(dict.fromkeys(cluster.get("keywords", [])))
+            category = cluster.get("category", member_objs[0].get("category", "unknown"))
+
+            # Sum telemetry counters
+            total_retrievals = sum(int(l.get("retrieval_count", 0)) for l in member_objs)
+            total_prevented = sum(int(l.get("prevented_rework_count", 0)) for l in member_objs)
+            total_ineffective = sum(int(l.get("ineffective_count", 0)) for l in member_objs)
+
+            print("-" * 60)
+            print(f"📦 [Active Cluster {idx}/{len(clusters)}] {len(member_objs)} items -> {member_ids}")
+            print(f"  Category: {category}")
+            print(f"  Keywords: {', '.join(merged_keywords)}")
+            print(f"  Merged Rule: {best_rule}")
+            print(f"  Combined Telemetry: {total_retrievals} retrievals, {total_prevented} prevented rework")
+            print("-" * 60)
+
+            if args.dry_run:
+                print("  🔍 [Dry Run] Would consolidate cluster into single active lesson.")
+                continue
+
+            if not args.auto:
+                choice = input("  [c] Compact / Merge  [s] Skip  [d] Discard cluster  →  ").strip().lower()
+                if choice == "d":
+                    for lid in member_ids:
+                        store.delete_lesson(lid)
+                    modified = True
+                    print(f"  🗑️ Discarded {len(member_ids)} active lessons.")
+                    continue
+                elif choice != "c":
+                    print("  ⏭️ Skipped cluster.")
+                    continue
+
+            primary_id = member_ids[0]
+            store.update_lesson(primary_id, {
+                "rule": best_rule,
+                "category": category,
+                "keywords": merged_keywords,
+                "retrieval_count": total_retrievals,
+                "prevented_rework_count": total_prevented,
+                "ineffective_count": total_ineffective,
+            })
+            for other_id in member_ids[1:]:
+                store.delete_lesson(other_id)
+            modified = True
+            print(f"  ✅ Compacted {len(member_ids)} active lessons into '{primary_id}'.")
+
+        if modified and not args.dry_run:
+            updated_lessons = store.list_lessons()
+            write_all_lessons_to_markdown(updated_lessons, args.lessons_md)
+            print(f"\n📝 Re-synced {args.lessons_md} with {len(updated_lessons)} active lessons.")
+
+            # Auto-recompile wiki dashboard, index, and log
+            wiki_dir = getattr(args, "wiki_dir", DEFAULT_WIKI_DIR)
+            if wiki_dir:
+                os.makedirs(wiki_dir, exist_ok=True)
+                index_path = os.path.join(wiki_dir, "index.md")
+                dashboard_path = os.path.join(wiki_dir, "dashboard.md")
+                log_path = os.path.join(wiki_dir, "log.md")
+                generate_index(updated_lessons, index_path)
+                generate_dashboard(updated_lessons, dashboard_path)
+                from datetime import datetime, timezone
+                generate_log(
+                    [
+                        {
+                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                            "message": f"Wiki re-compiled after memory compaction ({len(updated_lessons)} active lessons).",
+                        }
+                    ],
+                    log_path,
+                )
+                print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
+

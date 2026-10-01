@@ -20,12 +20,14 @@ import struct
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
+from mcp_core.audit import normalize_category
+from mcp_core.injection import deduplicate_lessons
 from mcp_core.workspace import WORKSPACE_ROOT
 
 # sqlite-vec is optional: if importable, vector/hybrid search is enabled; otherwise
 # search_lessons_hybrid degrades gracefully to FTS5-only search.
 try:  # pragma: no cover - depends on optional dependency
-    import sqlite_vec
+    import sqlite_vec  # type: ignore
     _SQLITE_VEC_AVAILABLE = True
 except ImportError:  # pragma: no cover
     sqlite_vec = None
@@ -95,6 +97,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(
     content='lessons',
     content_rowid='rowid'
 );
+
+CREATE TABLE IF NOT EXISTS model_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'coder',
+    domain_tag TEXT NOT NULL DEFAULT 'general',
+    success INTEGER NOT NULL,
+    retries INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_perf_lookup ON model_performance(domain_tag, model);
+CREATE INDEX IF NOT EXISTS idx_model_perf_model ON model_performance(model);
 """
 
 
@@ -439,7 +456,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # FTS5 keyword search
     # ------------------------------------------------------------------
-    def search_lessons(self, query: str, top_k: int = 3) -> list:
+    def search_lessons(self, query: str, top_k: int = 3, dedup: bool = True) -> list:
         """Full-text keyword search over lessons, ranked by FTS5 BM25.
 
         Returns up to ``top_k`` lesson dicts, each including a ``rank`` field
@@ -456,6 +473,7 @@ class MemoryStore:
         escaped = re.sub(r'(["\':^*-])', r" \1 ", query)
         match_expr = f'"{escaped}"'
 
+        fetch_limit = max(top_k * 4, 12) if dedup else top_k
         rows = self.conn.execute(
             """
             SELECT lessons.*, bm25(lessons_fts) AS rank
@@ -465,7 +483,7 @@ class MemoryStore:
             ORDER BY rank
             LIMIT ?
             """,
-            (match_expr, top_k * 3),
+            (match_expr, fetch_limit),
         ).fetchall()
 
         results = []
@@ -477,6 +495,8 @@ class MemoryStore:
 
         # Sort by utility score descending (higher = more useful), then trim.
         results.sort(key=lambda r: r["utility_score"], reverse=True)
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
         return results[:top_k]
 
     @staticmethod
@@ -498,7 +518,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Vector & hybrid search (sqlite-vec, optional)
     # ------------------------------------------------------------------
-    def search_lessons_vector(self, query_embedding: list, top_k: int = 3) -> list:
+    def search_lessons_vector(self, query_embedding: list, top_k: int = 3, dedup: bool = True) -> list:
         """Vector similarity search over lessons using cosine similarity.
 
         Requires ``sqlite-vec`` to be importable. Returns up to ``top_k`` lesson
@@ -515,6 +535,7 @@ class MemoryStore:
         if query_blob is None:
             return []
 
+        fetch_limit = max(top_k * 4, 12) if dedup else top_k
         try:
             rows = self.conn.execute(
                 """
@@ -524,7 +545,7 @@ class MemoryStore:
                 ORDER BY vec_dist ASC
                 LIMIT ?
                 """,
-                (query_blob, top_k),
+                (query_blob, fetch_limit),
             ).fetchall()
         except sqlite3.OperationalError:
             # sqlite-vec not loaded for this connection (e.g. extension load failed).
@@ -536,9 +557,14 @@ class MemoryStore:
             # vec_distance_cosine returns a distance (0 = identical); convert to similarity.
             lesson["vector_rank"] = 1.0 - float(row["vec_dist"])
             results.append(lesson)
-        return results
+        results.sort(key=lambda r: r.get("vector_rank", 0.0), reverse=True)
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
+        return results[:top_k]
 
-    def search_lessons_hybrid(self, query_text: str, query_embedding: list, top_k: int = 3) -> list:
+    def search_lessons_hybrid(
+        self, query_text: str, query_embedding: list, top_k: int = 3, dedup: bool = True
+    ) -> list:
         """Combine FTS5 BM25 keyword search with vector similarity.
 
         When ``sqlite-vec`` is unavailable or no embedding is provided, this
@@ -547,10 +573,10 @@ class MemoryStore:
         outranks one matching only a single signal.
         """
         if not _SQLITE_VEC_AVAILABLE or not query_embedding:
-            return self.search_lessons(query_text, top_k=top_k)
+            return self.search_lessons(query_text, top_k=top_k, dedup=dedup)
 
-        fts_results = self.search_lessons(query_text, top_k=top_k * 3)
-        vec_results = self.search_lessons_vector(query_embedding, top_k=top_k * 3)
+        fts_results = self.search_lessons(query_text, top_k=top_k * 3, dedup=False)
+        vec_results = self.search_lessons_vector(query_embedding, top_k=top_k * 3, dedup=False)
 
         # Normalize BM25 rank (lower is better) into a 0..1 score.
         fts_scores: dict = {}
@@ -579,15 +605,16 @@ class MemoryStore:
             combined.append((lesson_id, (fts + vec) * multiplier))
 
         combined.sort(key=lambda item: item[1], reverse=True)
-        top_ids = [lesson_id for lesson_id, _ in combined[:top_k]]
 
         results = []
-        for lesson_id in top_ids:
+        for lesson_id, _ in combined:
             lesson = self.get_lesson(lesson_id)
             if lesson:
                 lesson["hybrid_rank"] = dict(combined)[lesson_id]
                 results.append(lesson)
-        return results
+        if dedup:
+            return deduplicate_lessons(results)[:top_k]
+        return results[:top_k]
 
     # ------------------------------------------------------------------
     # Pending lesson CRUD (staging queue)
@@ -611,9 +638,16 @@ class MemoryStore:
         ``lesson`` may include an explicit ``id`` or omit it to auto-generate a
         ``pending-YYYYMMDD-NN`` ID. ``keywords`` may be a list or JSON string.
         """
-        pending_id = lesson.get("id") or self._next_pending_id()
+        pending_id = lesson.get("id")
+        if not pending_id or pending_id.endswith("-00") or self.get_pending_lesson(pending_id) is not None:
+            pending_id = self._next_pending_id()
         keywords = lesson.get("keywords", [])
         keywords_json = json.dumps(keywords) if not isinstance(keywords, str) else keywords
+
+        raw_category = lesson.get("category", "unknown")
+        normalized_category = normalize_category(
+            lesson.get("keywords", []), raw_category
+        )
 
         self.conn.execute(
             """
@@ -627,7 +661,7 @@ class MemoryStore:
                 lesson.get("staged_at", _now_iso()),
                 lesson.get("task_file", ""),
                 lesson["proposed_rule"],
-                lesson.get("category", "unknown"),
+                normalized_category,
                 keywords_json,
                 lesson.get("reviewer_critique", ""),
                 lesson.get("lesson_type", "solved_pattern"),
@@ -681,3 +715,154 @@ class MemoryStore:
         lesson_id = self.insert_lesson(lesson)
         self.delete_pending_lesson(pending_id)
         return lesson_id
+
+    # ------------------------------------------------------------------
+    # Model Performance & Telemetry Tracking
+    # ------------------------------------------------------------------
+    def record_model_attempt(
+        self,
+        run_id: str,
+        task_id: str,
+        model: str,
+        role: str = "coder",
+        domain_tags: Optional[Any] = None,
+        success: bool = True,
+        retries: int = 0,
+    ) -> None:
+        """Record the outcome of a task execution attempt by a specific model.
+
+        Normalizes domain tags into individual rows so success rates can be
+        queried both globally and per-domain.
+        """
+        tags: list[str] = []
+        if isinstance(domain_tags, str):
+            tags = [t.strip() for t in domain_tags.split(",") if t.strip()]
+        elif isinstance(domain_tags, (list, tuple, set)):
+            tags = [str(t).strip() for t in domain_tags if str(t).strip()]
+        if not tags:
+            tags = ["general"]
+
+        now_str = _now_iso()
+        succ_int = 1 if success else 0
+
+        for tag in tags:
+            self.conn.execute(
+                """
+                INSERT INTO model_performance
+                    (run_id, task_id, model, role, domain_tag, success, retries, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, task_id, model, role, tag.lower(), succ_int, retries, now_str),
+            )
+        self.conn.commit()
+
+    def get_model_performance(
+        self,
+        model: Optional[str] = None,
+        domain_tag: Optional[str] = None,
+        role: str = "coder",
+    ) -> list[dict]:
+        """Query aggregated performance metrics grouped by model and domain_tag.
+
+        Returns a list of dicts with:
+        model, role, domain_tag, attempts, successes, win_rate, avg_retries.
+        """
+        query = """
+            SELECT
+                model,
+                role,
+                domain_tag,
+                COUNT(*) as attempts,
+                SUM(success) as successes,
+                ROUND(AVG(success), 4) as win_rate,
+                ROUND(AVG(success) * 100.0, 1) as win_rate_pct,
+                ROUND(AVG(retries), 2) as avg_retries
+            FROM model_performance
+            WHERE role = ?
+        """
+        params: list[Any] = [role]
+        if model:
+            query += " AND model = ?"
+            params.append(model)
+        if domain_tag:
+            query += " AND domain_tag = ?"
+            params.append(domain_tag.strip().lower())
+
+        query += " GROUP BY model, domain_tag ORDER BY win_rate_pct DESC, attempts DESC"
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def rank_models_for_task(
+        self,
+        domain_tags: Optional[Any] = None,
+        candidate_models: Optional[list[str]] = None,
+        role: str = "coder",
+    ) -> list[str]:
+        """Rank candidate models for a task based on empirical success rates.
+
+        Uses Laplace-smoothed scoring (successes + 1) / (attempts + 2) to evaluate
+        domain-specific success first, falling back to global performance.
+        Preserves candidate ordering when performance is tied or unobserved.
+        """
+        if not candidate_models:
+            return []
+        if len(candidate_models) == 1:
+            return list(candidate_models)
+
+        tags: list[str] = []
+        if isinstance(domain_tags, str):
+            tags = [t.strip().lower() for t in domain_tags.split(",") if t.strip()]
+        elif isinstance(domain_tags, (list, tuple, set)):
+            tags = [str(t).strip().lower() for t in domain_tags if str(t).strip()]
+
+        # Query all attempts for candidate models
+        placeholders = ",".join("?" for _ in candidate_models)
+        params: list[Any] = [role] + list(candidate_models)
+
+        rows = self.conn.execute(
+            f"""
+            SELECT model, domain_tag, success
+            FROM model_performance
+            WHERE role = ? AND model IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+
+        # Aggregate domain-specific and general attempts
+        stats: dict[str, dict[str, int]] = {
+            m: {"domain_succ": 0, "domain_att": 0, "global_succ": 0, "global_att": 0}
+            for m in candidate_models
+        }
+
+        for r in rows:
+            m = r["model"]
+            if m not in stats:
+                continue
+            is_succ = r["success"]
+            tag = r["domain_tag"]
+            stats[m]["global_att"] += 1
+            if is_succ:
+                stats[m]["global_succ"] += 1
+
+            if tags and tag in tags:
+                stats[m]["domain_att"] += 1
+                if is_succ:
+                    stats[m]["domain_succ"] += 1
+
+        def score_model(m: str) -> tuple[float, float, int]:
+            s = stats[m]
+            # If domain data exists, weight domain score 70% and global score 30%
+            if s["domain_att"] > 0:
+                domain_score = (s["domain_succ"] + 1.0) / (s["domain_att"] + 2.0)
+                global_score = (s["global_succ"] + 1.0) / (s["global_att"] + 2.0)
+                combined = 0.7 * domain_score + 0.3 * global_score
+            elif s["global_att"] > 0:
+                combined = (s["global_succ"] + 1.0) / (s["global_att"] + 2.0)
+            else:
+                combined = 0.5  # Neutral unobserved prior
+            # Order tuple: (combined_score, total_successes, -original_index)
+            orig_idx = candidate_models.index(m)
+            return (combined, s["global_succ"], -orig_idx)
+
+        sorted_candidates = sorted(candidate_models, key=score_model, reverse=True)
+        return sorted_candidates

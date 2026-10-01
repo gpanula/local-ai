@@ -8,7 +8,8 @@ File Formats (Pattern 1). Pure file I/O — no database access, no Ollama calls.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+import re
+from typing import Any, List, Optional
 
 
 def _format_keywords(keywords: Any) -> str:
@@ -77,3 +78,74 @@ def append_lesson_to_markdown(lesson: dict, lessons_md_path: str) -> None:
     separator = "\n" if existing and not existing.endswith("\n\n") else ""
     with open(lessons_md_path, "a", encoding="utf-8") as f:
         f.write(f"{separator}{block}\n")
+
+
+def write_all_lessons_to_markdown(lessons: list[dict], lessons_md_path: str) -> None:
+    """Rewrite ``lessons.md`` with the complete list of active lessons."""
+    header = (
+        "# Lessons Learned — Episodic Memory Store\n\n"
+        "> **Purpose**: Git-canonical store of approved episodic lessons, promoted from the\n"
+        "> pending review queue via the `review-lessons` CLI. Each lesson is a YAML-frontmatter\n"
+        "> block followed by the rule text.\n"
+        ">\n"
+        "> **Format** (see `ai_memory_summary.md` §Canonical File Formats):\n"
+        ">\n"
+        "> ```markdown\n"
+        "> ---\n"
+        "> id: lesson-YYYYMMDD-NN\n"
+        "> category: <category>\n"
+        "> keywords: [kw1, kw2, kw3]\n"
+        "> created: YYYY-MM-DD\n"
+        "> source_task: <path/to/prompt.md>\n"
+        "> ---\n"
+        "> **Rule**: <rule text>\n"
+        "> ```\n\n"
+        "<!-- Lessons are appended below this line by the review-lessons promotion flow. -->\n\n"
+    )
+    blocks = [_format_lesson_block(l) for l in lessons]
+    content = header + "\n\n".join(blocks) + ("\n" if blocks else "")
+
+    parent = os.path.dirname(lessons_md_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(lessons_md_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def parse_lessons_from_markdown(lessons_md_path: str) -> List[dict]:
+    """Parse all lesson blocks from a lessons.md markdown file into dictionaries."""
+    if not os.path.isfile(lessons_md_path):
+        return []
+
+    with open(lessons_md_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    lessons = []
+    pattern = re.compile(
+        r"---\s*\n"
+        r"id:\s*(?P<id>[^\n]+)\n"
+        r"category:\s*(?P<category>[^\n]+)\n"
+        r"keywords:\s*(?P<keywords>[^\n]+)\n"
+        r"(?:created:\s*(?P<created>[^\n]*)\n)?"
+        r"(?:source_task:\s*(?P<source_task>[^\n]*)\n)?"
+        r"---\s*\n"
+        r"\*\*Rule\*\*:\s*(?P<rule>[\s\S]*?)(?=(?:\n---\s*\nid:|\Z))",
+        re.MULTILINE,
+    )
+
+    for m in pattern.finditer(content):
+        raw_kw = m.group("keywords").strip()
+        if raw_kw.startswith("[") and raw_kw.endswith("]"):
+            raw_kw = raw_kw[1:-1]
+        kw_list = [k.strip().strip('"').strip("'") for k in raw_kw.split(",") if k.strip()]
+
+        lessons.append({
+            "id": m.group("id").strip(),
+            "category": m.group("category").strip(),
+            "keywords": kw_list,
+            "created": (m.group("created") or "").strip(),
+            "source_task": (m.group("source_task") or "").strip(),
+            "rule": m.group("rule").strip(),
+        })
+
+    return lessons

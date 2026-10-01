@@ -154,6 +154,22 @@ def test_search_results_include_rank_field(store):
     assert "rank" in results[0]
 
 
+def test_search_deduplicates_identical_rules(store):
+    # Insert 3 lessons with different IDs but the same rule
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash."))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash."))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash!"))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Different bash rule."))
+
+    results = store.search_lessons("bash", top_k=5)
+    # Even though 4 lessons match "bash", the first 3 share the same normalized rule.
+    # Therefore, exactly 2 distinct lessons should be returned.
+    assert len(results) == 2
+    rules = [r["rule"] for r in results]
+    assert "Use set -euo pipefail in bash." in rules
+    assert "Different bash rule." in rules
+
+
 # ---------------------------------------------------------------------------
 # Pending lessons table
 # ---------------------------------------------------------------------------
@@ -366,9 +382,15 @@ def test_suppression_ranks_effective_above_ineffective(store):
         _lesson(id="effective", rule="Use unindented heredoc delimiters",
                 keywords=["heredoc"], retrieval_count=2, prevented_rework_count=1)
     )
-    results = store.search_lessons("heredoc", top_k=3)
-    ids = [r["id"] for r in results]
-    assert ids.index("effective") < ids.index("ineffective")
+    # Raw ranking without deduplication confirms utility score ranks effective first
+    results_raw = store.search_lessons("heredoc", top_k=3, dedup=False)
+    ids_raw = [r["id"] for r in results_raw]
+    assert ids_raw.index("effective") < ids_raw.index("ineffective")
+
+    # With dedup=True (default), duplicate rule is pruned and only highest-utility is kept
+    results_deduped = store.search_lessons("heredoc", top_k=3)
+    assert len(results_deduped) == 1
+    assert results_deduped[0]["id"] == "effective"
 
 
 def test_suppression_new_lesson_neutral(store):
@@ -379,3 +401,53 @@ def test_suppression_new_lesson_neutral(store):
     new = next(r for r in results if r["id"] == "new")
     # Neutral multiplier (0+1)/(0+2) = 0.5 (BM25 rank is a tiny non-zero value).
     assert new["utility_score"] == pytest.approx(0.5, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Model performance tracking & domain ranking
+# ---------------------------------------------------------------------------
+def test_record_model_attempt_and_metrics(store):
+    store.record_model_attempt(
+        run_id="run-1",
+        task_id="t1",
+        model="winter-coder:24gb-codestral",
+        role="coder",
+        domain_tags=["devops", "bash"],
+        success=True,
+        retries=0,
+    )
+    store.record_model_attempt(
+        run_id="run-2",
+        task_id="t2",
+        model="winter-coder:24gb-codestral",
+        role="coder",
+        domain_tags=["devops"],
+        success=False,
+        retries=2,
+    )
+
+    perf = store.get_model_performance(model="winter-coder:24gb-codestral", domain_tag="devops")
+    assert len(perf) == 1
+    assert perf[0]["attempts"] == 2
+    assert perf[0]["successes"] == 1
+    assert perf[0]["win_rate"] == 0.5
+    assert perf[0]["avg_retries"] == 1.0
+
+
+def test_rank_models_for_task(store):
+    # Model A: 5 attempts on "bash", 4 successes
+    for i in range(4):
+        store.record_model_attempt("r1", f"t{i}", "model-a", "coder", ["bash"], success=True, retries=0)
+    store.record_model_attempt("r1", "t4", "model-a", "coder", ["bash"], success=False, retries=1)
+
+    # Model B: 5 attempts on "bash", 1 success
+    store.record_model_attempt("r2", "t5", "model-b", "coder", ["bash"], success=True, retries=0)
+    for i in range(4):
+        store.record_model_attempt("r2", f"t{6+i}", "model-b", "coder", ["bash"], success=False, retries=2)
+
+    # Model C: 0 attempts (cold start)
+    candidates = ["model-b", "model-c", "model-a"]
+    ranked = store.rank_models_for_task(domain_tags=["bash"], candidate_models=candidates, role="coder")
+
+    assert ranked == ["model-a", "model-c", "model-b"]
+
