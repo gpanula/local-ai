@@ -16,6 +16,10 @@ from mcp_core.workspace import is_valid_mcp_socket
 SERVER_PATH = os.path.realpath(
     os.path.join(os.path.dirname(__file__), "..", "mcp_ollama", "server.py")
 )
+_VENV_PYTHON = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "..", "venv", "bin", "python3")
+)
+PYTHON_BIN = _VENV_PYTHON if os.path.isfile(_VENV_PYTHON) and os.access(_VENV_PYTHON, os.X_OK) else sys.executable
 
 
 def call_mcp(tool_name: str, arguments: dict) -> str:
@@ -31,7 +35,7 @@ def call_mcp(tool_name: str, arguments: dict) -> str:
     }
 
     proc = subprocess.run(
-        [sys.executable, SERVER_PATH],
+        [PYTHON_BIN, SERVER_PATH],
         input=json.dumps(req) + "\n",
         capture_output=True,
         text=True

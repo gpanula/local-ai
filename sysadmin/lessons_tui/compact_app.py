@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Dict, List, Optional
+
+_this_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+_venv_dir = os.path.join(_this_dir, "venv")
+_venv_python = os.path.join(_venv_dir, "bin", "python3")
+if os.path.isfile(_venv_python) and sys.prefix != _venv_dir:
+    os.execv(_venv_python, [_venv_python] + sys.argv)
 
 from textual import on
 from textual.app import App, ComposeResult

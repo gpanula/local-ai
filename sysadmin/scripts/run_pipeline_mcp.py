@@ -5,7 +5,13 @@ import argparse
 import os
 import sys
 
+# Deterministic Virtual Environment Bootstrap (Rule 2 AGENTS.md)
 sysadmin_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+_venv_dir = os.path.join(sysadmin_dir, "venv")
+_venv_python = os.path.join(_venv_dir, "bin", "python3")
+if os.path.exists(_venv_python) and sys.prefix != _venv_dir:
+    os.execv(_venv_python, [_venv_python] + sys.argv)
+
 if sysadmin_dir not in sys.path:
     sys.path.insert(0, sysadmin_dir)
 
