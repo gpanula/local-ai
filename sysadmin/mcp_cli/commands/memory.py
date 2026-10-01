@@ -363,7 +363,11 @@ class AuditLessonsCommand(BaseCommand):
                 return
 
             clusters = cluster_lessons(lessons, min_cluster_size=args.min_cluster_size)
-            low_utility = flag_low_utility(lessons, min_retrievals=args.min_retrievals)
+            low_utility = flag_low_utility(
+                lessons,
+                min_retrievals=args.min_retrievals,
+                latest_run_date=store.get_latest_pipeline_run_date(),
+            )
             violations = lint_all_lessons(lessons)
 
             if violations:
@@ -650,7 +654,10 @@ class CompactLessonsCommand(BaseCommand):
             # --- 3. Report Sunset Candidates in Dry-Run ---
             if args.dry_run:
                 active_list = store.list_lessons()
-                sunset_candidates = flag_low_utility(active_list)
+                sunset_candidates = flag_low_utility(
+                    active_list,
+                    latest_run_date=store.get_latest_pipeline_run_date(),
+                )
                 if sunset_candidates:
                     print("\n" + "=" * 60)
                     print(f"🌅 [Sunset Candidates] Found {len(sunset_candidates)} active lesson(s) eligible for retirement:")

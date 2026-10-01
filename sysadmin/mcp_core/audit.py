@@ -386,6 +386,7 @@ def flag_low_utility(
     max_prevention_ratio: float = 0.3,
     max_age_days: int = 30,
     reference_date: Optional[date] = None,
+    latest_run_date: Optional[date] = None,
 ) -> List[dict]:
     """Flag lessons that have low utility or are candidates for sunsetting/retirement.
 
@@ -396,8 +397,11 @@ def flag_low_utility(
     2. Consistently ineffective: ``ineffective_count > 0`` and
        ``ineffective_count / (retrieval_count + ineffective_count) > 0.5``.
        Flag reason: ``"consistently_ineffective"``.
-    3. Never retrieved (decay candidate): ``retrieval_count == 0`` and
-       ``created`` date is older than ``max_age_days``.
+    3. Never retrieved (decay candidate): ``retrieval_count == 0`` and the lesson's
+       active pipeline history exceeds ``max_age_days``. If ``latest_run_date`` is
+       provided, the effective threshold is padded by the inactivity period
+       (``max_age_days + max(0, (reference_date - latest_run_date).days)``),
+       preventing premature decay during hiatuses between pipeline runs.
        Flag reason: ``"never_retrieved"``.
 
     Pure function — no database or file I/O.
@@ -423,11 +427,13 @@ def flag_low_utility(
         if ineffective > 0 and total_eval > 0 and (ineffective / total_eval) > 0.5:
             flag_reasons.append("consistently_ineffective")
 
-        # 3. Decay: never retrieved and older than max_age_days
+        # 3. Decay: never retrieved and older than effective max age (padded by inactivity)
         if retrieved == 0 and lesson.get("created"):
             try:
                 created_date = date.fromisoformat(str(lesson["created"])[:10])
-                if (reference_date - created_date).days >= max_age_days:
+                inactivity_days = max(0, (reference_date - latest_run_date).days) if latest_run_date else 0
+                effective_max_age = max_age_days + inactivity_days
+                if (reference_date - created_date).days >= effective_max_age:
                     flag_reasons.append("never_retrieved")
             except (ValueError, TypeError):
                 pass

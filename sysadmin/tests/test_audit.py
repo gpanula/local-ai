@@ -130,6 +130,33 @@ def test_flag_lesson_decay_recent_not_flagged():
     assert flagged == []
 
 
+def test_flag_lesson_decay_inactivity_padding_prevents_premature_decay():
+    """A 41-day-old lesson is spared decay if the pipeline was inactive for 20 days (only 21 active days)."""
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-20")]
+    # Calendar age: 41 days. Hiatus: 20 days (since Sep 10). Effective threshold: 30 + 20 = 50 days.
+    flagged = flag_low_utility(
+        lessons,
+        reference_date=date(2026, 9, 30),
+        latest_run_date=date(2026, 9, 10),
+    )
+    assert flagged == []
+
+
+def test_flag_lesson_decay_inactivity_padding_expires_when_active_history_exceeds_threshold():
+    """A 60-day-old lesson decays even with 20 days of hiatus because active history was 40 days (>= 30)."""
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-01")]
+    # Calendar age: 60 days. Hiatus: 20 days. Effective threshold: 50 days. 60 >= 50 -> flagged.
+    flagged = flag_low_utility(
+        lessons,
+        reference_date=date(2026, 9, 30),
+        latest_run_date=date(2026, 9, 10),
+    )
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "never_retrieved"
+
+
 # --- normalize_category (Phase 6.10) ---
 
 from mcp_core.audit import normalize_category

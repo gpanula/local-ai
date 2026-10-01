@@ -1022,3 +1022,24 @@ class MemoryStore:
 
         sorted_candidates = sorted(candidate_models, key=score_model, reverse=True)
         return sorted_candidates
+
+    def get_latest_pipeline_run_date(self) -> Optional[date]:
+        """Return the date of the most recent pipeline run recorded in model_performance.
+
+        Falls back to the most recent staged pending lesson date if no model performance
+        records exist, or None if the database has no recorded pipeline activity.
+        """
+        row = self.conn.execute("SELECT MAX(recorded_at) AS last_run FROM model_performance").fetchone()
+        if row and row["last_run"]:
+            try:
+                return date.fromisoformat(str(row["last_run"])[:10])
+            except (ValueError, TypeError):
+                pass
+
+        row = self.conn.execute("SELECT MAX(staged_at) AS last_staged FROM pending_lessons").fetchone()
+        if row and row["last_staged"]:
+            try:
+                return date.fromisoformat(str(row["last_staged"])[:10])
+            except (ValueError, TypeError):
+                pass
+        return None

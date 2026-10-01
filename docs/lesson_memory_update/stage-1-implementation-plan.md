@@ -30,6 +30,11 @@ Following architectural review and codebase analysis, the following implementati
 5. **Promotion Guard Telemetry Semantics**:
    - Add a `reinforcement_count INTEGER NOT NULL DEFAULT 0` column to `lessons` (with auto-migration in `_create_schema()`).
    - When a duplicate pending lesson is promoted (`is_new=False`), increment both `reinforcement_count += 1` (for pure reinforcement tracking) and `retrieval_count += 1` (to preserve backward compatibility with existing utility score formulas).
+6. **Operational Inactivity Padding for Lesson Decay**:
+   - To prevent lessons from prematurely decaying during periods of project inactivity or hiatus (e.g. weeks between pipeline runs), the decay threshold dynamically factors in pipeline activity.
+   - The effective decay age is padded by the elapsed time since the most recent recorded pipeline run (`latest_run_date` from `model_performance` or `pending_lessons`):
+     $$\text{effective\_max\_age} = \text{max\_age\_days} + \max(0, \text{reference\_date} - \text{latest\_run\_date})$$
+   - Algebraically equivalent to: $\text{latest\_run\_date} - \text{created\_date} \ge \text{max\_age\_days}$. Lessons are only flagged as `never_retrieved` if they experienced at least 30 days of active pipeline history without retrieval, rather than decaying due to wall-clock downtime.
 
 ---
 
@@ -239,13 +244,14 @@ Without decay detection, the active lesson table accumulates zombie lessons abou
 ### Design Notes
 
 Additional flagging criteria beyond the existing ratio-based check:
-- **Never-retrieved**: `retrieval_count == 0` and `created` is older than a configurable threshold (e.g., 30 days). A lesson that's never been retrieved in a month is likely not relevant to current work.
+- **Never-retrieved (padded by operational activity)**: `retrieval_count == 0` and the lesson's active pipeline history exceeds `max_age_days` (default 30 days). When `latest_run_date` is known, the decay threshold is padded by elapsed inactivity ($\text{max\_age} + \max(0, \text{reference\_date} - \text{latest\_run\_date})$), ensuring lessons are not prematurely retired during periods of inactivity between pipeline runs.
 - **Consistently ineffective**: `ineffective_count > 0` and `ineffective_count / (retrieval_count + ineffective_count) > 0.5`. The lesson is being retrieved but consistently failing to prevent the problem it describes.
 
 Flag type should be included in the output so operators can distinguish between "never useful" and "actively harmful" lessons.
 
 ### Acceptance Criteria
-- A lesson with `retrieval_count=0` and `created` 45 days ago is flagged as a sunset candidate.
+- A lesson with `retrieval_count=0` and `created` 45 days ago is flagged as a sunset candidate if the pipeline has been continuously active.
+- A lesson with `retrieval_count=0` and `created` 45 days ago is **not** flagged if the pipeline was inactive for the past 25 days (active history = 20 days < 30).
 - A lesson with `retrieval_count=10`, `prevented_rework_count=1`, `ineffective_count=8` is flagged.
 - A lesson with `retrieval_count=10`, `prevented_rework_count=7`, `ineffective_count=1` is **not** flagged.
 - `localai-compact --dry-run` displays sunset candidates with their flag reason.

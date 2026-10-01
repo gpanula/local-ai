@@ -219,7 +219,12 @@ def test_lesson_lifecycle_end_to_end(tmp_path):
         })
 
         all_active = store.list_lessons()
-        flagged = flag_low_utility(all_active, reference_date=date(2026, 9, 30))
+        # Inactivity padding test: if last pipeline run was Aug 10 (51 days ago), only 9 active days elapsed
+        spared = flag_low_utility(all_active, reference_date=date(2026, 9, 30), latest_run_date=date(2026, 8, 10))
+        assert not any(f["id"] == promoted_b_id and "never_retrieved" in f["flag_reasons"] for f in spared)
+
+        # But with recent pipeline activity (e.g. today), Lesson B decays
+        flagged = flag_low_utility(all_active, reference_date=date(2026, 9, 30), latest_run_date=date(2026, 9, 30))
         assert len(flagged) == 2
 
         flagged_by_id = {f["id"]: f for f in flagged}

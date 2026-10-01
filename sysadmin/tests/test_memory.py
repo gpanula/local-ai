@@ -581,3 +581,35 @@ def test_reinforcement_count_migration(tmp_path):
         assert "reinforcement_count" in cols
 
 
+def test_get_latest_pipeline_run_date(tmp_path):
+    from datetime import date
+    db_path = str(tmp_path / "memory.db")
+    with MemoryStore(db_path) as s:
+        # 1. Fresh DB -> None
+        assert s.get_latest_pipeline_run_date() is None
+
+        # 2. Staged pending fallback
+        s.stage_pending_lesson({
+            "proposed_rule": "Test rule fallback",
+            "category": "Testing",
+            "keywords": ["test"],
+        })
+        # Staged pending sets staged_at to today's ISO timestamp
+        latest = s.get_latest_pipeline_run_date()
+        assert latest is not None
+        assert isinstance(latest, date)
+
+        # 3. Model performance record overrides
+        s.record_model_attempt(
+            run_id="run-123",
+            task_id="t-1",
+            model="winter-coder:8gb",
+            role="coder",
+            domain_tags=["bash"],
+            success=True,
+        )
+        latest_perf = s.get_latest_pipeline_run_date()
+        assert latest_perf is not None
+        assert isinstance(latest_perf, date)
+
+
