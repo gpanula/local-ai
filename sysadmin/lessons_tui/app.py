@@ -244,6 +244,9 @@ class LessonsReviewApp(App):
             return
 
         lid = lesson.get("id")
+        if not isinstance(lid, str):
+            self.set_notification("⚠️ Invalid lesson ID.")
+            return
         with MemoryStore(self.db_path) as store:
             res = store.promote_pending_lesson(lid)
             promoted_id, is_new = res if isinstance(res, tuple) else (res, True)
@@ -276,6 +279,9 @@ class LessonsReviewApp(App):
         def handle_modal_result(edits: Optional[Dict[str, Any]]) -> None:
             if edits:
                 lid = lesson.get("id")
+                if not isinstance(lid, str):
+                    self.set_notification("⚠️ Invalid lesson ID.")
+                    return
                 with MemoryStore(self.db_path) as store:
                     res = store.promote_pending_lesson(lid, edits=edits)
                     promoted_id, is_new = res if isinstance(res, tuple) else (res, True)
@@ -303,6 +309,9 @@ class LessonsReviewApp(App):
             return
 
         lid = lesson.get("id")
+        if not isinstance(lid, str):
+            self.set_notification("⚠️ Invalid lesson ID.")
+            return
         with MemoryStore(self.db_path) as store:
             if self.mode == "pending":
                 store.delete_pending_lesson(lid)

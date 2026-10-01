@@ -1,0 +1,3 @@
+# Pyrefly Configuration (Antigravity IDE Language Server)
+python-interpreter-path = "sysadmin/venv/bin/python3"
+search-path = ["sysadmin"]
