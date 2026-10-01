@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from mcp_core.audit import normalize_category
-from mcp_core.injection import deduplicate_lessons
+from mcp_core.injection import are_rules_similar, deduplicate_lessons
 from mcp_core.workspace import WORKSPACE_ROOT
 
 # sqlite-vec is optional: if importable, vector/hybrid search is enabled; otherwise
@@ -48,6 +48,7 @@ LESSON_COLUMNS = (
     "retrieval_count",
     "prevented_rework_count",
     "ineffective_count",
+    "reinforcement_count",
 )
 
 # Columns for the pending review queue.
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     retrieval_count INTEGER NOT NULL DEFAULT 0,
     prevented_rework_count INTEGER NOT NULL DEFAULT 0,
     ineffective_count INTEGER NOT NULL DEFAULT 0,
+    reinforcement_count INTEGER NOT NULL DEFAULT 0,
     embeddings BLOB
 );
 
@@ -197,9 +199,18 @@ class MemoryStore:
             parent = os.path.dirname(self.db_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, timeout=10.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        if self.db_path != ":memory:":
+            try:
+                self.conn.execute("PRAGMA journal_mode = WAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.conn.execute("PRAGMA busy_timeout = 10000")
+            except sqlite3.OperationalError:
+                pass
         self._create_schema()
 
     # ------------------------------------------------------------------
@@ -210,7 +221,7 @@ class MemoryStore:
 
         Loads the optional ``sqlite-vec`` extension when available so vector
         search works, and migrates pre-existing databases by adding the
-        ``embeddings`` column if it is missing.
+        ``embeddings`` and ``reinforcement_count`` columns if missing.
         """
         if _SQLITE_VEC_AVAILABLE:
             try:
@@ -220,6 +231,7 @@ class MemoryStore:
                 pass
         self.conn.executescript(_SCHEMA)
         self._migrate_embeddings_column()
+        self._migrate_reinforcement_column()
         self.conn.commit()
 
     def _migrate_embeddings_column(self) -> None:
@@ -230,6 +242,17 @@ class MemoryStore:
         }
         if "embeddings" not in cols:
             self.conn.execute("ALTER TABLE lessons ADD COLUMN embeddings BLOB")
+
+    def _migrate_reinforcement_column(self) -> None:
+        """Add the ``reinforcement_count`` column to ``lessons`` if it is missing."""
+        cols = {
+            r[1]
+            for r in self.conn.execute("PRAGMA table_info(lessons)").fetchall()
+        }
+        if "reinforcement_count" not in cols:
+            self.conn.execute(
+                "ALTER TABLE lessons ADD COLUMN reinforcement_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         """Commit any pending transaction and close the connection."""
@@ -309,8 +332,8 @@ class MemoryStore:
             """
             INSERT INTO lessons
                 (id, category, keywords, rule, created, source_task, lesson_type,
-                 retrieval_count, prevented_rework_count, ineffective_count, embeddings)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 retrieval_count, prevented_rework_count, ineffective_count, reinforcement_count, embeddings)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lesson_id,
@@ -323,6 +346,7 @@ class MemoryStore:
                 int(lesson.get("retrieval_count", 0)),
                 int(lesson.get("prevented_rework_count", 0)),
                 int(lesson.get("ineffective_count", 0)),
+                int(lesson.get("reinforcement_count", 0)),
                 embedding_blob,
             ),
         )
@@ -410,7 +434,12 @@ class MemoryStore:
     # Telemetry counters (Phase 5)
     # ------------------------------------------------------------------
     # Counter columns that may be updated via update_telemetry.
-    TELEMETRY_FIELDS = ("retrieval_count", "prevented_rework_count", "ineffective_count")
+    TELEMETRY_FIELDS = (
+        "retrieval_count",
+        "prevented_rework_count",
+        "ineffective_count",
+        "reinforcement_count",
+    )
 
     def increment_retrieval_count(self, lesson_ids: list) -> None:
         """Batch-increment ``retrieval_count`` for each lesson ID.
@@ -632,12 +661,90 @@ class MemoryStore:
                 max_seq = max(max_seq, int(m.group(1)))
         return f"{prefix}-{max_seq + 1:02d}"
 
-    def stage_pending_lesson(self, lesson: dict) -> str:
+    def stage_pending_lesson(self, lesson: dict, deduplicate: bool = True) -> str:
         """Insert a lesson into the pending review queue and return its ID.
 
         ``lesson`` may include an explicit ``id`` or omit it to auto-generate a
         ``pending-YYYYMMDD-NN`` ID. ``keywords`` may be a list or JSON string.
+
+        When ``deduplicate=True`` (default):
+        1. Checks active lessons: If a near-duplicate rule exists in ``lessons``,
+           increments ``ineffective_count`` on that active lesson, leaves its
+           metadata unmodified, and returns the active lesson's ID without
+           inserting into ``pending_lessons``.
+        2. Checks pending lessons: If a near-duplicate rule exists in ``pending_lessons``,
+           merges unique keywords into the existing row, appends critique if distinct,
+           re-evaluates the category via ``normalize_category()``, updates ``staged_at``,
+           and returns the existing pending lesson's ID.
+        3. If no match is found, inserts a new pending lesson.
+
+        When ``deduplicate=False``, always creates a new pending lesson (used for
+        test fixtures).
         """
+        proposed_rule = lesson.get("proposed_rule") or lesson.get("rule") or ""
+
+        if deduplicate and proposed_rule:
+            # Concurrency: serialize check-then-insert via BEGIN IMMEDIATE
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                pass
+
+            # 1. Check active lessons
+            active_rows = self.conn.execute("SELECT id, rule FROM lessons").fetchall()
+            for a_row in active_rows:
+                if are_rules_similar(proposed_rule, a_row["rule"]):
+                    act_id = a_row["id"]
+                    self.update_telemetry(act_id, "ineffective_count", 1)
+                    self.conn.commit()
+                    return act_id
+
+            # 2. Check existing pending lessons
+            pending_rows = self.conn.execute(
+                "SELECT id, proposed_rule, keywords, reviewer_critique, category FROM pending_lessons"
+            ).fetchall()
+            for p_row in pending_rows:
+                if are_rules_similar(proposed_rule, p_row["proposed_rule"]):
+                    p_id = p_row["id"]
+                    # Merge unique keywords
+                    existing_kw = p_row["keywords"]
+                    if isinstance(existing_kw, str):
+                        try:
+                            existing_kw = json.loads(existing_kw)
+                        except (json.JSONDecodeError, TypeError):
+                            existing_kw = []
+                    incoming_kw = lesson.get("keywords", [])
+                    if isinstance(incoming_kw, str):
+                        try:
+                            incoming_kw = json.loads(incoming_kw)
+                        except (json.JSONDecodeError, TypeError):
+                            incoming_kw = []
+                    merged_kw = list(dict.fromkeys(list(existing_kw) + list(incoming_kw)))
+
+                    # Append reviewer critique if incoming has new info
+                    incoming_critique = lesson.get("reviewer_critique", "").strip()
+                    existing_critique = (p_row["reviewer_critique"] or "").strip()
+                    if incoming_critique and not existing_critique:
+                        merged_critique = incoming_critique
+                    elif incoming_critique and incoming_critique not in existing_critique:
+                        merged_critique = f"{existing_critique}\n{incoming_critique}".strip()
+                    else:
+                        merged_critique = existing_critique
+
+                    raw_category = lesson.get("category") or p_row["category"] or "unknown"
+                    normalized_cat = normalize_category(merged_kw, raw_category)
+
+                    self.conn.execute(
+                        """
+                        UPDATE pending_lessons
+                        SET keywords = ?, reviewer_critique = ?, category = ?, staged_at = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(merged_kw), merged_critique, normalized_cat, _now_iso(), p_id),
+                    )
+                    self.conn.commit()
+                    return p_id
+
         pending_id = lesson.get("id")
         if not pending_id or pending_id.endswith("-00") or self.get_pending_lesson(pending_id) is not None:
             pending_id = self._next_pending_id()
@@ -660,7 +767,7 @@ class MemoryStore:
                 pending_id,
                 lesson.get("staged_at", _now_iso()),
                 lesson.get("task_file", ""),
-                lesson["proposed_rule"],
+                proposed_rule,
                 normalized_category,
                 keywords_json,
                 lesson.get("reviewer_critique", ""),
@@ -690,31 +797,77 @@ class MemoryStore:
         self.conn.execute("DELETE FROM pending_lessons WHERE id = ?", (pending_id,))
         self.conn.commit()
 
-    def promote_pending_lesson(self, pending_id: str, edits: Optional[dict] = None) -> Optional[str]:
+    def promote_pending_lesson(
+        self, pending_id: str, edits: Optional[dict] = None
+    ) -> tuple[Optional[str], bool]:
         """Move a pending lesson into the active ``lessons`` table.
 
         Maps pending fields to lesson fields (``proposed_rule`` → ``rule``,
-        ``task_file`` → ``source_task``), applies optional ``edits`` overrides,
-        inserts into ``lessons`` (with FTS sync), then deletes the pending row.
+        ``task_file`` → ``source_task``), applies optional ``edits`` overrides.
 
-        Returns the new active lesson ID, or ``None`` if the pending row is missing.
+        Checks if a near-duplicate active lesson already exists:
+        - If duplicate found: merges keywords, re-evaluates category, increments
+          both ``reinforcement_count`` and ``retrieval_count`` on the active lesson,
+          deletes the pending row, and returns ``(active_lesson_id, False)``.
+        - If unique: inserts into ``lessons`` (with FTS sync), deletes the pending row,
+          and returns ``(new_lesson_id, True)``.
+        - If pending row not found: returns ``(None, False)``.
         """
         pending = self.get_pending_lesson(pending_id)
         if pending is None:
-            return None
+            return None, False
 
         edits = edits or {}
+        proposed_rule = edits.get("rule", pending.get("proposed_rule", ""))
+        keywords = edits.get("keywords", pending.get("keywords", []))
+        if isinstance(keywords, str):
+            try:
+                keywords = json.loads(keywords)
+            except (json.JSONDecodeError, TypeError):
+                keywords = []
+
+        # Check for near-duplicate active lesson
+        active_rows = self.conn.execute("SELECT id, rule, keywords, category FROM lessons").fetchall()
+        for row in active_rows:
+            active_id, active_rule = row["id"], row["rule"]
+            if are_rules_similar(proposed_rule, active_rule):
+                act_kw = row["keywords"]
+                if isinstance(act_kw, str):
+                    try:
+                        act_kw = json.loads(act_kw)
+                    except (json.JSONDecodeError, TypeError):
+                        act_kw = []
+                merged_kw = list(dict.fromkeys(list(act_kw) + list(keywords)))
+                raw_cat = edits.get("category", pending.get("category", row["category"]))
+                norm_cat = normalize_category(merged_kw, raw_cat)
+
+                self.conn.execute(
+                    """
+                    UPDATE lessons
+                    SET keywords = ?, category = ?,
+                        reinforcement_count = reinforcement_count + 1,
+                        retrieval_count = retrieval_count + 1
+                    WHERE id = ?
+                    """,
+                    (json.dumps(merged_kw), norm_cat, active_id),
+                )
+                self.delete_pending_lesson(pending_id)
+                self.conn.commit()
+                return active_id, False
+
+        # No duplicate -> create new active lesson
         lesson = {
             "category": edits.get("category", pending.get("category", "unknown")),
-            "keywords": edits.get("keywords", pending.get("keywords", [])),
-            "rule": edits.get("rule", pending.get("proposed_rule", "")),
+            "keywords": keywords,
+            "rule": proposed_rule,
             "created": edits.get("created", _today()),
             "source_task": edits.get("source_task", pending.get("task_file", "")),
             "lesson_type": edits.get("lesson_type", pending.get("lesson_type", "solved_pattern")),
+            "reinforcement_count": 0,
         }
         lesson_id = self.insert_lesson(lesson)
         self.delete_pending_lesson(pending_id)
-        return lesson_id
+        return lesson_id, True
 
     # ------------------------------------------------------------------
     # Model Performance & Telemetry Tracking

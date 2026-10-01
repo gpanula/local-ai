@@ -145,10 +145,10 @@ def test_skip_leaves_pending_untouched(cmd, capsys, monkeypatch):
 def test_mixed_actions_summary_counts(cmd, capsys, monkeypatch):
     command, args, db_path, lessons_md = cmd
     with MemoryStore(db_path) as store:
-        store.stage_pending_lesson(_pending(id="pending-20260829-01"))
-        store.stage_pending_lesson(_pending(id="pending-20260829-02"))
-        store.stage_pending_lesson(_pending(id="pending-20260829-03"))
-        store.stage_pending_lesson(_pending(id="pending-20260829-04"))
+        store.stage_pending_lesson(_pending(id="pending-20260829-01", proposed_rule="Never nest script content inside subshell strings."))
+        store.stage_pending_lesson(_pending(id="pending-20260829-02", proposed_rule="Always use explicit quotes around bash variables."))
+        store.stage_pending_lesson(_pending(id="pending-20260829-03", proposed_rule="Ensure error traps are configured with set -euo pipefail."))
+        store.stage_pending_lesson(_pending(id="pending-20260829-04", proposed_rule="Avoid running rm -rf without validating target path existence."))
     # Actions: keep, modify (cat="", rule="modified rule", kw=""), discard, skip.
     inputs = iter(["k", "m", "", "modified rule", "", "d", "s"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))

@@ -186,13 +186,17 @@ class ReviewLessonsCommand(BaseCommand):
                         skipped_violating_count += 1
                         continue
 
-                    lesson_id = store.promote_pending_lesson(item["id"])
+                    res = store.promote_pending_lesson(item["id"])
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         promoted_count += 1
-                        print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
+                        if is_new:
+                            print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
+                        else:
+                            print(f"  🔄 Reinforced active lesson {lesson_id} from {item.get('id')}")
                 print("\n" + "=" * 60)
                 summary_line = f"Summary — Automatically Kept: {promoted_count} | Total: {len(pending)}"
                 if skipped_violating_count > 0:
@@ -232,25 +236,33 @@ class ReviewLessonsCommand(BaseCommand):
                 action = _prompt_action()
 
                 if action == "k":
-                    lesson_id = store.promote_pending_lesson(item["id"])
+                    res = store.promote_pending_lesson(item["id"])
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         counts["kept"] += 1
-                        print(f"  ✅ Kept lesson {lesson_id} and appended to lessons.md")
+                        if is_new:
+                            print(f"  ✅ Kept lesson {lesson_id} and appended to lessons.md")
+                        else:
+                            print(f"  🔄 Reinforced active lesson {lesson_id} (already in lessons.md)")
                     else:
                         print("  ⚠️  Could not promote lesson (already removed?)")
 
                 elif action == "m":
                     edits = _prompt_modify(item)
-                    lesson_id = store.promote_pending_lesson(item["id"], edits=edits)
+                    res = store.promote_pending_lesson(item["id"], edits=edits)
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         counts["modified"] += 1
-                        print(f"  ✏️  Modified and kept lesson {lesson_id}")
+                        if is_new:
+                            print(f"  ✏️  Modified and kept lesson {lesson_id}")
+                        else:
+                            print(f"  🔄 Modified and reinforced active lesson {lesson_id}")
                     else:
                         print("  ⚠️  Could not promote lesson (already removed?)")
 

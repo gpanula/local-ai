@@ -45,15 +45,15 @@ def test_compact_pending_lessons(cmd, capsys):
     command, args, db_path, *_ = cmd
     with MemoryStore(db_path) as store:
         store.stage_pending_lesson({
-            "proposed_rule": "Short rule A",
+            "proposed_rule": "Always quote bash variables to avoid word splitting.",
             "category": "Scripting",
             "keywords": ["bash", "env"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
-            "proposed_rule": "Longer and much more descriptive rule B",
+            "proposed_rule": "Always quote bash variables to avoid word splitting and globbing.",
             "category": "Scripting",
             "keywords": ["bash", "env", "paths"],
-        })
+        }, deduplicate=False)
 
     command.run(args)
     out = capsys.readouterr().out
@@ -62,7 +62,7 @@ def test_compact_pending_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         pending = store.list_pending_lessons()
         assert len(pending) == 1
-        assert "Longer and much more descriptive rule B" in pending[0]["proposed_rule"]
+        assert "Always quote bash variables to avoid word splitting and globbing." in pending[0]["proposed_rule"]
         assert set(pending[0]["keywords"]) == {"bash", "env", "paths"}
 
 
@@ -71,7 +71,7 @@ def test_compact_active_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         store.insert_lesson({
             "id": "lesson-01",
-            "rule": "Active rule 1",
+            "rule": "Always quote bash variables to avoid word splitting.",
             "category": "Testing",
             "keywords": ["pytest", "mock"],
             "retrieval_count": 5,
@@ -79,7 +79,7 @@ def test_compact_active_lessons(cmd, capsys):
         })
         store.insert_lesson({
             "id": "lesson-02",
-            "rule": "Active rule 2 with more details",
+            "rule": "Always quote bash variables to avoid word splitting and globbing.",
             "category": "Testing",
             "keywords": ["pytest", "mock", "fixtures"],
             "retrieval_count": 3,
@@ -94,14 +94,14 @@ def test_compact_active_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         lessons = store.list_lessons()
         assert len(lessons) == 1
-        assert lessons[0]["rule"] == "Active rule 2 with more details"
+        assert lessons[0]["rule"] == "Always quote bash variables to avoid word splitting and globbing."
         assert lessons[0]["retrieval_count"] == 8
         assert lessons[0]["prevented_rework_count"] == 3
 
     assert os.path.exists(lessons_md)
     with open(lessons_md, "r", encoding="utf-8") as f:
         content = f.read()
-    assert "Active rule 2 with more details" in content
+    assert "Always quote bash variables to avoid word splitting and globbing." in content
 
     # Assert wiki files were automatically re-compiled
     assert os.path.exists(os.path.join(wiki_dir, "index.md"))

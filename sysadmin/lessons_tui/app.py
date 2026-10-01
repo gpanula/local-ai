@@ -238,13 +238,17 @@ class LessonsReviewApp(App):
 
         lid = lesson.get("id")
         with MemoryStore(self.db_path) as store:
-            promoted_id = store.promote_pending_lesson(lid)
+            res = store.promote_pending_lesson(lid)
+            promoted_id, is_new = res if isinstance(res, tuple) else (res, True)
             if promoted_id:
                 promoted = store.get_lesson(promoted_id)
-                if promoted:
+                if promoted and is_new:
                     append_lesson_to_markdown(promoted, self.lessons_md)
                 self.recompile_wiki_after_change(1)
-                self.set_notification(f"✅ Promoted lesson {promoted_id} and appended to lessons.md.")
+                if is_new:
+                    self.set_notification(f"✅ Promoted lesson {promoted_id} and appended to lessons.md.")
+                else:
+                    self.set_notification(f"🔄 Reinforced active lesson {promoted_id}.")
             else:
                 self.set_notification(f"⚠️ Failed to promote lesson {lid}.")
 
@@ -266,13 +270,17 @@ class LessonsReviewApp(App):
             if edits:
                 lid = lesson.get("id")
                 with MemoryStore(self.db_path) as store:
-                    promoted_id = store.promote_pending_lesson(lid, edits=edits)
+                    res = store.promote_pending_lesson(lid, edits=edits)
+                    promoted_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if promoted_id:
                         promoted = store.get_lesson(promoted_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, self.lessons_md)
                         self.recompile_wiki_after_change(1)
-                        self.set_notification(f"✏️ Modified & promoted lesson {promoted_id}.")
+                        if is_new:
+                            self.set_notification(f"✏️ Modified & promoted lesson {promoted_id}.")
+                        else:
+                            self.set_notification(f"🔄 Modified & reinforced active lesson {promoted_id}.")
                 self.reload_data()
             else:
                 self.set_notification("Edit cancelled.")
@@ -313,10 +321,11 @@ class LessonsReviewApp(App):
                     skipped_count += 1
                     continue
 
-                promoted_id = store.promote_pending_lesson(item["id"])
+                res = store.promote_pending_lesson(item["id"])
+                promoted_id, is_new = res if isinstance(res, tuple) else (res, True)
                 if promoted_id:
                     promoted = store.get_lesson(promoted_id)
-                    if promoted:
+                    if promoted and is_new:
                         append_lesson_to_markdown(promoted, self.lessons_md)
                     promoted_count += 1
 

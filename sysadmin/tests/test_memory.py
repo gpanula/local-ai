@@ -451,3 +451,133 @@ def test_rank_models_for_task(store):
 
     assert ranked == ["model-a", "model-c", "model-b"]
 
+
+# ---------------------------------------------------------------------------
+# Ingestion & Promotion Deduplication Guards (Stage 1)
+# ---------------------------------------------------------------------------
+def test_stage_pending_lesson_dedup_pending_match(store):
+    id1 = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to prevent word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["bash", "quoting"],
+        "reviewer_critique": "Critique A",
+    })
+    id2 = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086", "expansion"],
+        "reviewer_critique": "Critique B",
+    })
+    # Must deduplicate into the same pending lesson
+    assert id1 == id2
+    pending = store.list_pending_lessons()
+    assert len(pending) == 1
+    assert set(pending[0]["keywords"]) == {"bash", "quoting", "sc2086", "expansion"}
+    assert "Critique A" in pending[0]["reviewer_critique"]
+    assert "Critique B" in pending[0]["reviewer_critique"]
+
+
+def test_stage_pending_lesson_dedup_active_match(store):
+    act_id = store.insert_lesson({
+        "rule": "Always quote variables to prevent word splitting.",
+        "category": "Defensive Bash Scripting",
+        "keywords": ["bash", "quoting"],
+    })
+    assert store.get_lesson(act_id)["ineffective_count"] == 0
+
+    staged_id = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086"],
+    })
+    # Returns active lesson ID
+    assert staged_id == act_id
+    # Increments ineffective count
+    assert store.get_lesson(act_id)["ineffective_count"] == 1
+    # Does not insert into pending queue
+    assert len(store.list_pending_lessons()) == 0
+    # Active lesson keywords and category remain untouched
+    assert store.get_lesson(act_id)["keywords"] == ["bash", "quoting"]
+    assert store.get_lesson(act_id)["category"] == "Defensive Bash Scripting"
+
+
+def test_stage_pending_lesson_deduplicate_false(store):
+    id1 = store.stage_pending_lesson({
+        "proposed_rule": "Deterministic path resolution in virtualenvs.",
+        "category": "Binary Isolation",
+    }, deduplicate=False)
+    id2 = store.stage_pending_lesson({
+        "proposed_rule": "Deterministic path resolution in virtualenvs.",
+        "category": "Binary Isolation",
+    }, deduplicate=False)
+    assert id1 != id2
+    assert len(store.list_pending_lessons()) == 2
+
+
+def test_promote_pending_lesson_creates_new(store):
+    p_id = store.stage_pending_lesson({
+        "proposed_rule": "Unique rule for fresh test scenario.",
+        "category": "Testing",
+        "keywords": ["unique"],
+    })
+    lesson_id, is_new = store.promote_pending_lesson(p_id)
+    assert is_new is True
+    assert lesson_id is not None
+    assert len(store.list_pending_lessons()) == 0
+    promoted = store.get_lesson(lesson_id)
+    assert promoted["rule"] == "Unique rule for fresh test scenario."
+    assert promoted["reinforcement_count"] == 0
+
+
+def test_promote_pending_lesson_reinforces_active(store):
+    act_id = store.insert_lesson({
+        "rule": "Always quote variables to prevent word splitting.",
+        "category": "Defensive Bash Scripting",
+        "keywords": ["bash", "quoting"],
+        "retrieval_count": 2,
+    })
+    p_id = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086"],
+    }, deduplicate=False)
+
+    promoted_id, is_new = store.promote_pending_lesson(p_id)
+    assert is_new is False
+    assert promoted_id == act_id
+    assert len(store.list_pending_lessons()) == 0
+
+    active = store.get_lesson(act_id)
+    assert active["reinforcement_count"] == 1
+    assert active["retrieval_count"] == 3
+    assert set(active["keywords"]) == {"bash", "quoting", "sc2086"}
+
+
+def test_reinforcement_count_migration(tmp_path):
+    db_path = str(tmp_path / "old_schema.db")
+    # Create an old schema table without reinforcement_count column
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE lessons (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL DEFAULT 'unknown',
+            keywords TEXT NOT NULL DEFAULT '[]',
+            rule TEXT NOT NULL,
+            created TEXT NOT NULL,
+            source_task TEXT NOT NULL DEFAULT '',
+            lesson_type TEXT NOT NULL DEFAULT 'solved_pattern',
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            prevented_rework_count INTEGER NOT NULL DEFAULT 0,
+            ineffective_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    # Opening via MemoryStore must automatically add reinforcement_count column
+    with MemoryStore(db_path) as s:
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(lessons)").fetchall()}
+        assert "reinforcement_count" in cols
+
+
