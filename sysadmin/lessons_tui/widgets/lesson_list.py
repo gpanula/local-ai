@@ -34,6 +34,9 @@ class LessonItemWidget(ListItem):
         self.is_pending = is_pending
 
     def compose(self) -> ComposeResult:
+        yield Static(self._build_text(), id="lesson-label")
+
+    def _build_text(self) -> Text:
         lid = self.lesson.get("id") or self.lesson.get("lesson_id") or "unknown"
         cat = self.lesson.get("category", "General")
         rule = self.lesson.get("rule") or self.lesson.get("proposed_rule") or ""
@@ -63,7 +66,17 @@ class LessonItemWidget(ListItem):
             preview = rule[:45] + "..." if len(rule) > 45 else rule
             text.append(f"\n   ↳ {preview}", style="dim")
 
-        yield Static(text)
+        return text
+
+    def update_content(self, lesson: Optional[Dict[str, Any]] = None) -> None:
+        """Refresh this item's visual representation without recreating the widget."""
+        if lesson is not None:
+            self.lesson = lesson
+        try:
+            static = self.query_one("#lesson-label", Static)
+            static.update(self._build_text())
+        except Exception:
+            pass
 
 
 class LessonListView(ListView):
@@ -91,7 +104,12 @@ class LessonListView(ListView):
         self.lessons: List[Dict[str, Any]] = []
         self.is_pending: bool = True
 
-    def set_lessons(self, lessons: List[Dict[str, Any]], is_pending: bool = True) -> None:
+    def set_lessons(
+        self,
+        lessons: List[Dict[str, Any]],
+        is_pending: bool = True,
+        keep_index: Optional[int] = None,
+    ) -> None:
         """Populate the list with given lessons."""
         self.lessons = lessons
         self.is_pending = is_pending
@@ -101,8 +119,43 @@ class LessonListView(ListView):
             self.append(LessonItemWidget(lesson, is_pending=is_pending))
 
         if self.lessons:
-            self.index = 0
-            self.post_message(self.LessonSelected(self.lessons[0], self.is_pending))
+            target_idx = (
+                keep_index
+                if (keep_index is not None and 0 <= keep_index < len(self.lessons))
+                else 0
+            )
+            self.index = target_idx
+            self.post_message(self.LessonSelected(self.lessons[target_idx], self.is_pending))
+        else:
+            self.index = None
+
+    def remove_lesson_at(self, index: int) -> Optional[Dict[str, Any]]:
+        """Remove lesson at index in place without clearing the list or resetting scroll."""
+        if not (0 <= index < len(self.lessons)):
+            return None
+
+        removed = self.lessons.pop(index)
+        self.pop(index)
+
+        if not self.lessons:
+            self.index = None
+            return removed
+
+        new_idx = min(index, len(self.lessons) - 1)
+        self.index = new_idx
+        self.post_message(self.LessonSelected(self.lessons[new_idx], self.is_pending))
+        return removed
+
+    def update_lesson_at(self, index: int, updated: Dict[str, Any]) -> None:
+        """Update an existing lesson at index in place without clearing the list."""
+        if not (0 <= index < len(self.lessons)):
+            return
+        self.lessons[index] = updated
+        if index < len(self.children):
+            child = self.children[index]
+            if isinstance(child, LessonItemWidget):
+                child.update_content(updated)
+        self.post_message(self.LessonSelected(updated, self.is_pending))
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.item and isinstance(event.item, LessonItemWidget):
@@ -117,3 +170,4 @@ class LessonListView(ListView):
         if self.index is not None and 0 <= self.index < len(self.lessons):
             return self.lessons[self.index]
         return None
+

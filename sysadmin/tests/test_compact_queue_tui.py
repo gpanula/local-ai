@@ -231,3 +231,227 @@ def test_compact_queue_tui_modify(temp_db):
         assert primary["category"] == "UpdatedCategory"
         assert "edited" in primary["keywords"]
 
+
+def test_compact_tui_active_mode_clustering_and_compact(tmp_path):
+    """Verify active lesson duplicate clusters load and compact action updates db, lessons.md, and wiki."""
+    db_path = str(tmp_path / "memory.db")
+    lessons_md = str(tmp_path / "lessons.md")
+    wiki_dir = str(tmp_path / "wiki")
+    os.makedirs(wiki_dir, exist_ok=True)
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "act-dup-01",
+            "rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
+            "category": "ShellCheck",
+            "keywords": ["bash", "quoting"],
+            "retrieval_count": 5,
+            "prevented_rework_count": 2,
+        })
+        store.insert_lesson({
+            "id": "act-dup-02",
+            "rule": "Always quote variables in bash scripts to avoid word splitting errors.",
+            "category": "ShellCheck",
+            "keywords": ["bash", "quoting", "sc2086"],
+            "retrieval_count": 3,
+            "prevented_rework_count": 1,
+        })
+        from mcp_core.lessons_writer import write_all_lessons_to_markdown
+        write_all_lessons_to_markdown(store.list_lessons(), lessons_md)
+
+    async def _run():
+        app = CompactQueueApp(
+            db_path=db_path,
+            min_cluster_size=2,
+            mode="active",
+            lessons_md=lessons_md,
+            wiki_dir=wiki_dir,
+        )
+        async with app.run_test() as pilot:
+            assert app.mode == "active"
+            assert len(app.clusters) == 1
+            cluster = app.clusters[0]
+            assert cluster["primary_id"] == "act-dup-01"
+            assert cluster["total_retrievals"] == 8
+            assert cluster["total_prevented"] == 3
+
+            # Execute compact
+            app.action_compact()
+            assert cluster["status"] == "compacted"
+
+    asyncio.run(_run())
+
+    with MemoryStore(db_path) as store:
+        remaining = store.list_lessons()
+        assert len(remaining) == 1
+        primary = remaining[0]
+        assert primary["id"] == "act-dup-01"
+        assert primary["retrieval_count"] == 8
+        assert primary["prevented_rework_count"] == 3
+
+    # Check lessons.md updated
+    content = open(lessons_md, encoding="utf-8").read()
+    assert "act-dup-01" in content
+    assert "act-dup-02" not in content
+
+    # Check wiki index compiled
+    index_path = os.path.join(wiki_dir, "index.md")
+    assert os.path.exists(index_path)
+    index_content = open(index_path, encoding="utf-8").read()
+    assert "act-dup-01" in index_content
+    assert "act-dup-02" not in index_content
+
+
+def test_compact_tui_active_mode_discard(tmp_path):
+    """Verify discarding an active cluster deletes all member lessons and updates lessons.md."""
+    db_path = str(tmp_path / "memory.db")
+    lessons_md = str(tmp_path / "lessons.md")
+    wiki_dir = str(tmp_path / "wiki")
+    os.makedirs(wiki_dir, exist_ok=True)
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "act-disc-01",
+            "rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
+            "category": "ShellCheck",
+            "keywords": ["bash", "quoting"],
+        })
+        store.insert_lesson({
+            "id": "act-disc-02",
+            "rule": "Always quote variables in bash scripts to avoid word splitting errors.",
+            "category": "ShellCheck",
+            "keywords": ["bash", "quoting"],
+        })
+        from mcp_core.lessons_writer import write_all_lessons_to_markdown
+        write_all_lessons_to_markdown(store.list_lessons(), lessons_md)
+
+    async def _run():
+        app = CompactQueueApp(
+            db_path=db_path,
+            min_cluster_size=2,
+            mode="active",
+            lessons_md=lessons_md,
+            wiki_dir=wiki_dir,
+        )
+        async with app.run_test() as pilot:
+            assert app.mode == "active"
+            assert len(app.clusters) == 1
+            app.action_discard()
+
+    asyncio.run(_run())
+
+    with MemoryStore(db_path) as store:
+        assert len(store.list_lessons()) == 0
+
+    content = open(lessons_md, encoding="utf-8").read()
+    assert "act-disc-01" not in content
+    assert "act-disc-02" not in content
+
+
+def test_compact_tui_tab_switching(tmp_path):
+    """Verify switching between pending and active cluster tabs."""
+    db_path = str(tmp_path / "memory.db")
+    lessons_md = str(tmp_path / "lessons.md")
+    wiki_dir = str(tmp_path / "wiki")
+
+    with MemoryStore(db_path) as store:
+        # Seed 2 pending duplicates
+        store.stage_pending_lesson({
+            "id": "p-tab-01",
+            "proposed_rule": "Deterministic binary isolation required across all environments.",
+            "category": "Isolation",
+            "keywords": ["binary"],
+        }, deduplicate=False)
+        store.stage_pending_lesson({
+            "id": "p-tab-02",
+            "proposed_rule": "Deterministic binary isolation required across environments.",
+            "category": "Isolation",
+            "keywords": ["binary"],
+        }, deduplicate=False)
+
+        # Seed 2 active duplicates
+        store.insert_lesson({
+            "id": "a-tab-01",
+            "rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
+            "category": "ShellCheck",
+            "keywords": ["quoting"],
+        })
+        store.insert_lesson({
+            "id": "a-tab-02",
+            "rule": "Always quote variables in bash scripts to avoid word splitting errors.",
+            "category": "ShellCheck",
+            "keywords": ["quoting"],
+        })
+
+    async def _run():
+        app = CompactQueueApp(db_path=db_path, min_cluster_size=2, mode="pending", lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            assert app.mode == "pending"
+            assert len(app.clusters) == 1
+            assert app.clusters[0]["primary_id"] == "p-tab-01"
+
+            # Switch to active via 't' key
+            await pilot.press("t")
+            assert app.mode == "active"
+            assert len(app.clusters) == 1
+            assert app.clusters[0]["primary_id"] == "a-tab-01"
+
+            # Switch back via 'tab' key
+            await pilot.press("tab")
+            assert app.mode == "pending"
+            assert app.clusters[0]["primary_id"] == "p-tab-01"
+
+    asyncio.run(_run())
+
+
+def test_compact_queue_tui_cursor_advance_no_skip(temp_db):
+    """Verify row highlighter advances to immediate next row without disappearing or skipping."""
+    with MemoryStore(temp_db) as store:
+        # Cluster 0
+        store.stage_pending_lesson({
+            "id": "p-adv-01",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting and globbing errors.",
+            "category": "BashQuoting",
+            "keywords": ["bash", "quoting"],
+        }, deduplicate=False)
+        store.stage_pending_lesson({
+            "id": "p-adv-02",
+            "proposed_rule": "Always quote variables in bash scripts to avoid word splitting errors.",
+            "category": "BashQuoting",
+            "keywords": ["bash", "quoting"],
+        }, deduplicate=False)
+        # Cluster 1
+        store.stage_pending_lesson({
+            "id": "p-adv-03",
+            "proposed_rule": "Deterministic binary isolation required across all environments and tools.",
+            "category": "Isolation",
+            "keywords": ["isolation", "binary"],
+        }, deduplicate=False)
+        store.stage_pending_lesson({
+            "id": "p-adv-04",
+            "proposed_rule": "Deterministic binary isolation required across environments and tools.",
+            "category": "Isolation",
+            "keywords": ["isolation", "binary"],
+        }, deduplicate=False)
+
+    async def _run():
+        app = CompactQueueApp(db_path=temp_db, min_cluster_size=2)
+        async with app.run_test() as pilot:
+            assert len(app.clusters) == 2
+            list_view = app.query_one("#cluster-list", ClusterListView)
+            assert list_view.index == 0
+            assert app.selected_cluster == app.clusters[0]
+
+            # Execute compact on cluster 0
+            app.action_compact()
+            await pilot.pause()
+
+            # Ensure index cleanly advanced to 1, not None and not skipping
+            assert list_view.index == 1
+            assert app.selected_cluster == app.clusters[1]
+            assert app.clusters[0]["status"] == "compacted"
+            assert app.clusters[1]["status"] == "pending"
+
+    asyncio.run(_run())
+
+

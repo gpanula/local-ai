@@ -13,21 +13,27 @@ _venv_python = os.path.join(_venv_dir, "bin", "python3")
 if os.path.isfile(_venv_python) and sys.prefix != _venv_dir:
     os.execv(_venv_python, [_venv_python] + sys.argv)
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, Static
 
 from mcp_core.audit import cluster_lessons_by_similarity
+from mcp_core.lessons_writer import write_all_lessons_to_markdown
 from mcp_core.memory import DEFAULT_DB_PATH, MemoryStore
+from mcp_core.wiki import generate_dashboard, generate_index, generate_log
+from mcp_core.workspace import WORKSPACE_ROOT
 from lessons_tui.widgets.cluster_detail import ClusterDetailView
 from lessons_tui.widgets.cluster_list import ClusterItemWidget, ClusterListView
 from lessons_tui.widgets.edit_modal import EditLessonModal
 
+DEFAULT_LESSONS_MD = os.path.join(WORKSPACE_ROOT, "ollama_update", "lessons.md")
+DEFAULT_WIKI_DIR = os.path.join(WORKSPACE_ROOT, "ollama_update", "wiki")
+
 
 class CompactQueueApp(App):
-    """Interactive TUI for reviewing, compacting, and deduplicating pending lessons."""
+    """Interactive TUI for reviewing, compacting, and deduplicating pending or active lessons."""
 
     CSS = """
     Screen {
@@ -44,11 +50,16 @@ class CompactQueueApp(App):
     #app-title {
         text-style: bold;
         color: $accent;
-        width: 44;
+        width: 32;
+    }
+
+    #tabs-indicator {
+        text-style: bold;
+        width: 1fr;
     }
 
     #stats-badge {
-        width: 1fr;
+        width: auto;
         color: $text-muted;
         text-align: right;
         text-style: bold;
@@ -89,6 +100,8 @@ class CompactQueueApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("tab", "switch_tab", "Switch Tab", priority=True),
+        Binding("t", "switch_tab", "Toggle View", priority=True),
         Binding("c", "compact", "Compact/Merge"),
         Binding("m", "modify", "Modify & Merge"),
         Binding("s", "skip", "Skip"),
@@ -101,11 +114,19 @@ class CompactQueueApp(App):
         self,
         db_path: str = DEFAULT_DB_PATH,
         min_cluster_size: int = 2,
+        mode: str = "pending",
+        lessons_md: str = DEFAULT_LESSONS_MD,
+        wiki_dir: str = DEFAULT_WIKI_DIR,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.db_path = db_path
         self.min_cluster_size = min_cluster_size
+        self.mode: str = mode  # "pending" or "active"
+        self.lessons_md = lessons_md
+        self.wiki_dir = wiki_dir
+        self.pending_clusters: List[Dict[str, Any]] = []
+        self.active_clusters: List[Dict[str, Any]] = []
         self.clusters: List[Dict[str, Any]] = []
         self.selected_cluster: Optional[Dict[str, Any]] = None
         self._reload_clusters_from_db()
@@ -113,7 +134,8 @@ class CompactQueueApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="top-bar"):
-            yield Label("🧹 Local AI - Pending Lessons Compactor", id="app-title")
+            yield Label("🧹 Local AI Lesson Compactor", id="app-title")
+            yield Static("[bold yellow]▶ [Tab/t] Pending Clusters[/bold yellow]  |  [dim][Tab/t] Active Clusters[/dim]", id="tabs-indicator")
             yield Label("Loading candidate clusters...", id="stats-badge")
 
         with Horizontal(id="main-container"):
@@ -123,7 +145,7 @@ class CompactQueueApp(App):
             with Vertical(id="right-panel"):
                 yield ClusterDetailView(id="cluster-detail")
 
-        yield Static("Welcome to Lessons Compaction. Select a cluster and press [c] to merge.", id="notification-bar")
+        yield Static("Welcome to Lessons Compactor. Select a cluster and press [c] to merge, [Tab/t] to toggle views.", id="notification-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -152,56 +174,91 @@ class CompactQueueApp(App):
             pass
 
     def _reload_clusters_from_db(self) -> None:
-        """Fetch pending lessons from database and build clusters."""
+        """Fetch pending and active lessons from database and build clusters."""
         try:
             with MemoryStore(self.db_path) as store:
                 pending_list = store.list_pending_lessons()
+                active_list = store.list_lessons()
         except Exception:
             pending_list = []
+            active_list = []
 
-        if not pending_list:
-            self.clusters = []
-            self.selected_cluster = None
-            return
+        # 1. Build pending clusters
+        self.pending_clusters = []
+        if pending_list:
+            mapped_pending = []
+            for p in pending_list:
+                mapped = dict(p)
+                mapped["rule"] = p.get("proposed_rule", "")
+                mapped_pending.append(mapped)
 
-        mapped_pending = []
-        for p in pending_list:
-            mapped = dict(p)
-            mapped["rule"] = p.get("proposed_rule", "")
-            mapped_pending.append(mapped)
+            raw_pending = cluster_lessons_by_similarity(mapped_pending, min_cluster_size=self.min_cluster_size)
+            for idx, cluster in enumerate(raw_pending, start=1):
+                member_ids = cluster.get("lesson_ids", [])
+                member_objs = [p for p in pending_list if p.get("id") in member_ids]
+                if len(member_objs) < 2:
+                    continue
 
-        raw_clusters = cluster_lessons_by_similarity(mapped_pending, min_cluster_size=self.min_cluster_size)
+                best_rule = max((p.get("proposed_rule", "") for p in member_objs), key=len)
+                merged_critiques = "\n".join(
+                    f"[{p['id']}] {p.get('reviewer_critique', '')}"
+                    for p in member_objs if p.get("reviewer_critique")
+                )
+                merged_keywords = list(dict.fromkeys(cluster.get("keywords", [])))
+                category = cluster.get("category", member_objs[0].get("category", "General"))
+                primary_id = member_objs[0]["id"]
 
-        clusters: List[Dict[str, Any]] = []
-        for idx, cluster in enumerate(raw_clusters, start=1):
-            member_ids = cluster.get("lesson_ids", [])
-            member_objs = [p for p in pending_list if p.get("id") in member_ids]
-            if len(member_objs) < 2:
-                continue
+                self.pending_clusters.append({
+                    "cluster_idx": idx,
+                    "category": category,
+                    "keywords": merged_keywords,
+                    "member_ids": member_ids,
+                    "member_objs": member_objs,
+                    "best_rule": best_rule,
+                    "merged_rule": best_rule,
+                    "merged_critiques": merged_critiques,
+                    "primary_id": primary_id,
+                    "status": "pending",
+                })
 
-            best_rule = max((p.get("proposed_rule", "") for p in member_objs), key=len)
-            merged_critiques = "\n".join(
-                f"[{p['id']}] {p.get('reviewer_critique', '')}"
-                for p in member_objs if p.get("reviewer_critique")
-            )
-            merged_keywords = list(dict.fromkeys(cluster.get("keywords", [])))
-            category = cluster.get("category", member_objs[0].get("category", "General"))
-            primary_id = member_objs[0]["id"]
+        # 2. Build active clusters
+        self.active_clusters = []
+        if active_list:
+            raw_active = cluster_lessons_by_similarity(active_list, min_cluster_size=self.min_cluster_size)
+            for idx, cluster in enumerate(raw_active, start=1):
+                member_ids = cluster.get("lesson_ids", [])
+                member_objs = [l for l in active_list if l.get("id") in member_ids]
+                if len(member_objs) < 2:
+                    continue
 
-            clusters.append({
-                "cluster_idx": idx,
-                "category": category,
-                "keywords": merged_keywords,
-                "member_ids": member_ids,
-                "member_objs": member_objs,
-                "best_rule": best_rule,
-                "merged_rule": best_rule,
-                "merged_critiques": merged_critiques,
-                "primary_id": primary_id,
-                "status": "pending",
-            })
+                best_rule = max((l.get("rule", "") for l in member_objs), key=len)
+                merged_keywords = list(dict.fromkeys(cluster.get("keywords", [])))
+                category = cluster.get("category", member_objs[0].get("category", "General"))
+                primary_id = member_objs[0]["id"]
 
-        self.clusters = clusters
+                total_retrievals = sum(int(l.get("retrieval_count", 0)) for l in member_objs)
+                total_prevented = sum(int(l.get("prevented_rework_count", 0)) for l in member_objs)
+                total_ineffective = sum(int(l.get("ineffective_count", 0)) for l in member_objs)
+                total_reinforcements = sum(int(l.get("reinforcement_count", 0)) for l in member_objs)
+
+                self.active_clusters.append({
+                    "cluster_idx": idx,
+                    "category": category,
+                    "keywords": merged_keywords,
+                    "member_ids": member_ids,
+                    "member_objs": member_objs,
+                    "best_rule": best_rule,
+                    "merged_rule": best_rule,
+                    "merged_critiques": f"Active lessons consolidation across {len(member_ids)} items.",
+                    "primary_id": primary_id,
+                    "total_retrievals": total_retrievals,
+                    "total_prevented": total_prevented,
+                    "total_ineffective": total_ineffective,
+                    "total_reinforcements": total_reinforcements,
+                    "status": "pending",
+                })
+
+        self.clusters = self.pending_clusters if self.mode == "pending" else self.active_clusters
         if self.clusters:
             self.selected_cluster = self.clusters[0]
         else:
@@ -212,25 +269,54 @@ class CompactQueueApp(App):
         try:
             list_view = self.query_one("#cluster-list", ClusterListView)
             detail_view = self.query_one("#cluster-detail", ClusterDetailView)
+            tabs_indicator = self.query_one("#tabs-indicator", Static)
+            panel_header = self.query_one("#panel-header", Label)
         except Exception:
             return
 
+        self.clusters = self.pending_clusters if self.mode == "pending" else self.active_clusters
+
+        if self.mode == "pending":
+            tabs_indicator.update(
+                f"[bold yellow]▶ [Tab/t] Pending Clusters ({len(self.pending_clusters)})[/bold yellow]  |  [dim][Tab/t] Active Clusters ({len(self.active_clusters)})[/dim]"
+            )
+            mode_label = "Pending Queue"
+        else:
+            tabs_indicator.update(
+                f"[dim][Tab/t] Pending Clusters ({len(self.pending_clusters)})[/dim]  |  [bold cyan]▶ [Tab/t] Active Clusters ({len(self.active_clusters)})[/bold cyan]"
+            )
+            mode_label = "Active Knowledge"
+
+        panel_header.update(f"📦 {mode_label} Clusters ({len(self.clusters)})")
         list_view.set_clusters(self.clusters)
         if self.clusters:
             if not self.selected_cluster or self.selected_cluster not in self.clusters:
                 self.selected_cluster = self.clusters[0]
             list_view.index = self.clusters.index(self.selected_cluster)
             detail_view.display_cluster(self.selected_cluster)
-            self._notify_user(f"📋 Loaded {len(self.clusters)} candidate compaction cluster(s).")
+            self._notify_user(f"📋 {mode_label}: Loaded {len(self.clusters)} candidate compaction cluster(s).")
         else:
             self.selected_cluster = None
             detail_view.display_cluster(None)
-            self._notify_user("📋 Pending Queue: No duplicate clusters found.")
+            self._notify_user(f"📋 {mode_label}: No duplicate clusters found.")
 
         self._update_stats()
 
+    def action_switch_tab(self) -> None:
+        """Toggle between Pending and Active candidate clusters."""
+        self.mode = "active" if self.mode == "pending" else "pending"
+        self._update_ui()
+        if self.mode == "pending":
+            self._notify_user("Switched to PENDING queue compaction clusters.")
+        else:
+            self._notify_user("Switched to ACTIVE memory compaction clusters.")
+
+    @on(events.Click, "#tabs-indicator")
+    def on_tabs_indicator_click(self) -> None:
+        self.action_switch_tab()
+
     def action_refresh(self) -> None:
-        """Reload pending lessons from database and refresh UI."""
+        """Reload lessons from database and refresh UI."""
         self._reload_clusters_from_db()
         self._update_ui()
 
@@ -247,7 +333,6 @@ class CompactQueueApp(App):
         list_view = self.query_one("#cluster-list", ClusterListView)
         current_idx = list_view.index if list_view.index is not None else 0
 
-        # Try to find next pending cluster starting from current+1
         next_idx = None
         for i in range(current_idx + 1, len(self.clusters)):
             if self.clusters[i].get("status") == "pending":
@@ -255,21 +340,45 @@ class CompactQueueApp(App):
                 break
 
         if next_idx is None:
-            # Wrap around from beginning
             for i in range(0, current_idx):
                 if self.clusters[i].get("status") == "pending":
                     next_idx = i
                     break
 
-        if next_idx is not None and next_idx < len(list_view.children):
+        if next_idx is not None and next_idx < len(self.clusters):
             list_view.index = next_idx
             self.selected_cluster = self.clusters[next_idx]
-            detail_view = self.query_one("#cluster-detail", ClusterDetailView)
-            detail_view.display_cluster(self.selected_cluster)
-        else:
-            # All done or stayed on current
-            detail_view = self.query_one("#cluster-detail", ClusterDetailView)
-            detail_view.display_cluster(self.selected_cluster)
+        elif list_view.index is not None and list_view.index < len(self.clusters):
+            self.selected_cluster = self.clusters[list_view.index]
+
+        detail_view = self.query_one("#cluster-detail", ClusterDetailView)
+        detail_view.display_cluster(self.selected_cluster)
+        list_view.focus()
+
+    def recompile_wiki_after_change(self, count: int = 1, message: Optional[str] = None) -> None:
+        """Helper to re-compile wiki markdown files after active changes."""
+        if not self.wiki_dir:
+            return
+        try:
+            with MemoryStore(self.db_path) as store:
+                updated_lessons = store.list_lessons()
+            os.makedirs(self.wiki_dir, exist_ok=True)
+            generate_index(updated_lessons, os.path.join(self.wiki_dir, "index.md"))
+            generate_dashboard(updated_lessons, os.path.join(self.wiki_dir, "dashboard.md"))
+            from datetime import datetime, timezone
+
+            log_msg = message or f"Wiki re-compiled after compacting {count} lesson(s) via TUI."
+            generate_log(
+                [
+                    {
+                        "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                        "message": log_msg,
+                    }
+                ],
+                os.path.join(self.wiki_dir, "log.md"),
+            )
+        except Exception:
+            pass
 
     def _execute_compact(self, cluster: Dict[str, Any]) -> bool:
         primary_id = cluster["primary_id"]
@@ -277,23 +386,48 @@ class CompactQueueApp(App):
         best_rule = cluster["merged_rule"]
         category = cluster["category"]
         keywords = cluster["keywords"]
-        critiques = cluster["merged_critiques"]
+        critiques = cluster.get("merged_critiques", "")
 
         try:
             with MemoryStore(self.db_path) as store:
-                store.conn.execute(
-                    "UPDATE pending_lessons SET proposed_rule = ?, category = ?, keywords = ?, reviewer_critique = ? WHERE id = ?",
-                    (best_rule, category, json.dumps(keywords), critiques, primary_id),
-                )
-                store.conn.commit()
+                if self.mode == "pending":
+                    store.conn.execute(
+                        "UPDATE pending_lessons SET proposed_rule = ?, category = ?, keywords = ?, reviewer_critique = ? WHERE id = ?",
+                        (best_rule, category, json.dumps(keywords), critiques, primary_id),
+                    )
+                    store.conn.commit()
 
-                # Remove duplicates
-                pruned_count = 0
-                for m in member_objs:
-                    mid = m.get("id")
-                    if mid and mid != primary_id:
-                        store.delete_pending_lesson(mid)
-                        pruned_count += 1
+                    # Remove duplicates
+                    pruned_count = 0
+                    for m in member_objs:
+                        mid = m.get("id")
+                        if mid and mid != primary_id:
+                            store.delete_pending_lesson(mid)
+                            pruned_count += 1
+                else:
+                    # Active lessons compaction
+                    store.update_lesson(primary_id, {
+                        "rule": best_rule,
+                        "category": category,
+                        "keywords": keywords,
+                        "retrieval_count": cluster.get("total_retrievals", 0),
+                        "prevented_rework_count": cluster.get("total_prevented", 0),
+                        "ineffective_count": cluster.get("total_ineffective", 0),
+                        "reinforcement_count": cluster.get("total_reinforcements", 0),
+                        "embeddings": None,
+                    })
+
+                    for m in member_objs:
+                        mid = m.get("id")
+                        if mid and mid != primary_id:
+                            store.delete_lesson(mid)
+
+                    updated_lessons = store.list_lessons()
+                    write_all_lessons_to_markdown(updated_lessons, self.lessons_md)
+                    self.recompile_wiki_after_change(
+                        len(member_objs),
+                        message=f"Wiki re-compiled after compacting active cluster into '{primary_id}' via TUI.",
+                    )
 
             cluster["status"] = "compacted"
             return True
@@ -319,7 +453,7 @@ class CompactQueueApp(App):
         if self._execute_compact(cluster):
             self._notify_user(f"✅ Compacted Cluster #{idx} ({count} items) into primary lesson '{primary_id}'.")
             list_view = self.query_one("#cluster-list", ClusterListView)
-            list_view.set_clusters(self.clusters)
+            list_view.refresh_items()
             self._update_stats()
             self._advance_to_next_pending()
 
@@ -340,6 +474,7 @@ class CompactQueueApp(App):
         lesson_dict = {
             "id": primary_id,
             "category": cluster.get("category", ""),
+            "rule": cluster.get("merged_rule", ""),
             "proposed_rule": cluster.get("merged_rule", ""),
             "keywords": cluster.get("keywords", []),
         }
@@ -363,14 +498,14 @@ class CompactQueueApp(App):
             if self._execute_compact(cluster):
                 self._notify_user(f"✅ Modified & compacted Cluster #{idx} into '{primary_id}'.")
                 list_view = self.query_one("#cluster-list", ClusterListView)
-                list_view.set_clusters(self.clusters)
+                list_view.refresh_items()
                 self._update_stats()
                 self._advance_to_next_pending()
 
         self.push_screen(modal, _on_modal_dismiss)
 
     def action_discard(self) -> None:
-        """Discard all pending lessons in the selected cluster."""
+        """Discard all lessons in the selected cluster."""
         if not self.selected_cluster:
             self._notify_user("⚠️ No cluster selected to discard.")
             return
@@ -385,15 +520,27 @@ class CompactQueueApp(App):
 
         try:
             with MemoryStore(self.db_path) as store:
-                for m in member_objs:
-                    mid = m.get("id")
-                    if mid:
-                        store.delete_pending_lesson(mid)
+                if self.mode == "pending":
+                    for m in member_objs:
+                        mid = m.get("id")
+                        if mid:
+                            store.delete_pending_lesson(mid)
+                else:
+                    for m in member_objs:
+                        mid = m.get("id")
+                        if mid:
+                            store.delete_lesson(mid)
+                    updated_lessons = store.list_lessons()
+                    write_all_lessons_to_markdown(updated_lessons, self.lessons_md)
+                    self.recompile_wiki_after_change(
+                        len(member_objs),
+                        message=f"Wiki re-compiled after discarding active cluster #{idx} via TUI.",
+                    )
 
             cluster["status"] = "discarded"
-            self._notify_user(f"🗑️ Discarded {len(member_objs)} pending lesson(s) from Cluster #{idx}.")
+            self._notify_user(f"🗑️ Discarded {len(member_objs)} lesson(s) from Cluster #{idx}.")
             list_view = self.query_one("#cluster-list", ClusterListView)
-            list_view.set_clusters(self.clusters)
+            list_view.refresh_items()
             self._update_stats()
             self._advance_to_next_pending()
         except Exception as e:
@@ -411,7 +558,7 @@ class CompactQueueApp(App):
             cluster["status"] = "skipped"
             self._notify_user(f"⏭️ Skipped Cluster #{idx}.")
             list_view = self.query_one("#cluster-list", ClusterListView)
-            list_view.set_clusters(self.clusters)
+            list_view.refresh_items()
             self._update_stats()
 
         self._advance_to_next_pending()
@@ -430,21 +577,55 @@ class CompactQueueApp(App):
 
         self._notify_user(f"🎉 Auto-compacted {compacted_count} candidate cluster(s) successfully!")
         list_view = self.query_one("#cluster-list", ClusterListView)
-        list_view.set_clusters(self.clusters)
+        list_view.refresh_items()
         self._update_stats()
 
         detail_view = self.query_one("#cluster-detail", ClusterDetailView)
         detail_view.display_cluster(self.selected_cluster)
+        list_view.focus()
+
+
+def launch_compact_tui(
+    db_path: str = DEFAULT_DB_PATH,
+    min_cluster_size: int = 2,
+    mode: str = "pending",
+    lessons_md: str = DEFAULT_LESSONS_MD,
+    wiki_dir: str = DEFAULT_WIKI_DIR,
+) -> None:
+    """Launch the CompactLessonsApp in either 'pending' or 'active' mode."""
+    app = CompactQueueApp(
+        db_path=db_path,
+        min_cluster_size=min_cluster_size,
+        mode=mode,
+        lessons_md=lessons_md,
+        wiki_dir=wiki_dir,
+    )
+    app.run()
 
 
 def launch_compact_queue_tui(
     db_path: str = DEFAULT_DB_PATH,
     min_cluster_size: int = 2,
+    lessons_md: str = DEFAULT_LESSONS_MD,
+    wiki_dir: str = DEFAULT_WIKI_DIR,
 ) -> None:
-    """Launch the CompactQueueApp."""
-    app = CompactQueueApp(db_path=db_path, min_cluster_size=min_cluster_size)
-    app.run()
+    """Launch CompactLessonsApp in pending mode."""
+    launch_compact_tui(db_path=db_path, min_cluster_size=min_cluster_size, mode="pending", lessons_md=lessons_md, wiki_dir=wiki_dir)
+
+
+def launch_compact_active_tui(
+    db_path: str = DEFAULT_DB_PATH,
+    min_cluster_size: int = 2,
+    lessons_md: str = DEFAULT_LESSONS_MD,
+    wiki_dir: str = DEFAULT_WIKI_DIR,
+) -> None:
+    """Launch CompactLessonsApp in active mode."""
+    launch_compact_tui(db_path=db_path, min_cluster_size=min_cluster_size, mode="active", lessons_md=lessons_md, wiki_dir=wiki_dir)
+
+
+CompactLessonsApp = CompactQueueApp
 
 
 if __name__ == "__main__":
-    launch_compact_queue_tui()
+    launch_compact_tui()
+

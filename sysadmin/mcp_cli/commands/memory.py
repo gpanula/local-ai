@@ -624,13 +624,18 @@ class CompactLessonsCommand(BaseCommand):
         if use_tui is None:
             use_tui = (not getattr(args, "plain", False)) and sys.stdin.isatty()
 
-        # Handle TUI mode when requested or running queue compaction interactively in TTY
-        is_queue_compaction = getattr(args, "queue_only", False) or getattr(args, "tui", False)
-        if use_tui and is_queue_compaction and not getattr(args, "auto", False) and not getattr(args, "dry_run", False):
+        # Handle TUI mode when requested or running compaction interactively in TTY
+        if use_tui and not getattr(args, "auto", False) and not getattr(args, "dry_run", False):
             try:
-                from lessons_tui.compact_app import launch_compact_queue_tui
+                from lessons_tui.compact_app import launch_compact_tui
 
-                launch_compact_queue_tui(min_cluster_size=args.min_cluster_size)
+                initial_mode = "active" if getattr(args, "active_only", False) else "pending"
+                launch_compact_tui(
+                    min_cluster_size=args.min_cluster_size,
+                    mode=initial_mode,
+                    lessons_md=args.lessons_md,
+                    wiki_dir=getattr(args, "wiki_dir", DEFAULT_WIKI_DIR),
+                )
                 return
             except Exception as e:
                 print(f"⚠️  TUI launch failed ({e}), falling back to text interface...")
