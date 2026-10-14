@@ -389,6 +389,24 @@ def handle_unload_model(model: Optional[str] = None) -> str:
     return "No models were loaded in VRAM."
 
 
+def handle_embed(
+    texts: Union[str, List[str]],
+    model: Optional[str] = None,
+) -> str:
+    """Generate dense vector embeddings using a local Ollama model."""
+    from mcp_core.embeddings import DEFAULT_EMBEDDING_MODEL, embed_texts
+    input_list = [texts] if isinstance(texts, str) else list(texts)
+    selected_model = model or DEFAULT_EMBEDDING_MODEL
+    embs = embed_texts(input_list, model=selected_model)
+    first_dim = len(embs[0]) if (embs and embs[0]) else 0
+    return json.dumps({
+        "model": selected_model,
+        "count": len(embs),
+        "dimensions": first_dim,
+        "embeddings": embs,
+    })
+
+
 def _execute_in_terminal_mcp(command: str, cwd: Optional[str] = None, timeout: int = 180, socket_path: Optional[str] = None) -> Tuple[str, int, str]:
     """Executes a command inside the active terminal-mcp session via Unix socket and captures the terminal buffer."""
     import socket
@@ -1405,6 +1423,28 @@ TOOLS = [
         }
     },
     {
+        "name": "ollama_embed",
+        "description": "Generate dense vector embeddings for text using a local Ollama embedding model (defaults to nomic-embed-text:latest, 768 dimensions).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "texts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of text strings to embed."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Single text string to embed (alternative to texts)."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional Ollama embedding model name (defaults to nomic-embed-text:latest)."
+                }
+            }
+        }
+    },
+    {
         "name": "ollama_chat",
         "description": "Send a prompt or chat messages to a local Ollama model (e.g. qwen3:8b, mistral-nemo:12b, qwen2.5-coder:7b) and receive the generated response.",
         "inputSchema": {
@@ -1856,6 +1896,12 @@ def process_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 )
             elif tool_name == "ollama_list_models":
                 text = handle_list_models()
+            elif tool_name == "ollama_embed":
+                input_texts = args.get("texts") or ([args["text"]] if args.get("text") else [])
+                text = handle_embed(
+                    texts=input_texts,
+                    model=args.get("model"),
+                )
             elif tool_name == "ollama_chat":
                 default_chat_model = get_default_model("coder")
                 text = handle_chat(
