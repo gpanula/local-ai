@@ -123,7 +123,13 @@ class ClusterDetailView(VerticalScroll):
             prevented = cluster.get("total_prevented", 0)
             ineffective = cluster.get("total_ineffective", 0)
             meta_text.append(f"📊 Telemetry: {retrievals} retrievals, {prevented} prevented, {ineffective} ineffective\n", style="dim")
-            meta_text.append(f"🏷️ Keywords: {', '.join(keywords) if keywords else 'none'}", style="dim cyan")
+            meta_text.append(f"🏷️ Keywords: {', '.join(keywords) if keywords else 'none'}\n", style="dim cyan")
+            primary_lesson = members[0] if members else {}
+            emb = primary_lesson.get("embeddings")
+            emb_badge = f" [EMBEDDED: {len(emb)}d]" if emb else " [NO-VEC: NULL]"
+            emb_style = "bold green" if emb else "bold yellow"
+            meta_text.append("🧠 Vector Status: ", style="bold white")
+            meta_text.append(f"{emb_badge}", style=emb_style)
             meta_widget.update(meta_text)
 
             rule_panel = Panel(
@@ -171,6 +177,13 @@ class ClusterDetailView(VerticalScroll):
         meta_text.append(", ".join(keywords) if keywords else "none", style="dim cyan")
         meta_text.append(f"\n⭐ Primary Target: ", style="bold white")
         meta_text.append(f"{primary_id} (will be updated with merged rule)", style="green")
+
+        primary_lesson = next((m for m in members if (m.get("id") or m.get("lesson_id")) == primary_id), members[0] if members else {})
+        emb = primary_lesson.get("embeddings")
+        emb_badge = f" [EMBEDDED: {len(emb)}d]" if emb else " [NO-VEC: NULL]"
+        emb_style = "bold green" if emb else "bold yellow"
+        meta_text.append("\n🧠 Vector Embedding: ", style="bold white")
+        meta_text.append(f"{emb_badge}", style=emb_style)
         meta_widget.update(meta_text)
 
         # 3. Merged Rule
@@ -205,11 +218,17 @@ class ClusterDetailView(VerticalScroll):
                     mkws = [mkws]
             critique = m.get("reviewer_critique") or ""
 
+            memb = m.get("embeddings")
+            memb_badge = f" [EMBEDDED: {len(memb)}d]" if memb else " [NO-VEC: NULL]"
+            memb_style = "green bold" if memb else "yellow"
+
             is_primary = (mid == primary_id)
             if is_primary:
-                members_text.append(f"\n┌─ ⭐ [Primary Target] {mid} (Kept & Updated)\n", style="bold green")
+                members_text.append(f"\n┌─ ⭐ [Primary Target] {mid} (Kept & Updated)", style="bold green")
+                members_text.append(f"{memb_badge}\n", style=memb_style)
             else:
-                members_text.append(f"\n┌─ 🗑️ [Duplicate Target] {mid} (Will be Pruned)\n", style="bold red")
+                members_text.append(f"\n┌─ 🗑️ [Duplicate Target] {mid} (Will be Pruned)", style="bold red")
+                members_text.append(f"{memb_badge}\n", style=memb_style)
 
             members_text.append(f"│  Rule: {mrule}\n", style="white")
             members_text.append(f"│  Keywords: {', '.join(mkws) if mkws else 'none'}\n", style="dim")

@@ -107,6 +107,7 @@ class CompactQueueApp(App):
         Binding("m", "modify", "Modify & Merge"),
         Binding("s", "skip", "Skip"),
         Binding("d", "discard", "Discard Cluster"),
+        Binding("e", "embed_candidate", "Embed (Vec)"),
         Binding("a", "auto_compact", "Auto-Compact All"),
         Binding("r", "refresh", "Refresh"),
     ]
@@ -710,6 +711,42 @@ class CompactQueueApp(App):
             self._advance_to_next_pending()
         except Exception as e:
             self._notify_user(f"❌ Error retiring sunset lesson '{lid}': {e}")
+
+    def action_embed_candidate(self) -> None:
+        """Embed the current candidate lesson or cluster primary target on-demand."""
+        if not self.selected_cluster:
+            self._notify_user("⚠️ No cluster selected.")
+            return
+
+        if self.mode == "pending":
+            self._notify_user("ℹ️ Pending lessons are embedded automatically upon approval into active memory.")
+            return
+
+        primary_id = self.selected_cluster.get("primary_id")
+        if not primary_id:
+            self._notify_user("⚠️ No primary lesson ID found.")
+            return
+
+        try:
+            with MemoryStore(self.db_path) as store:
+                ok = store.refresh_embedding(primary_id)
+                if not ok:
+                    self._notify_user(f"❌ Failed to generate embedding for {primary_id} (Ollama unavailable?).")
+                    return
+                updated = store.get_lesson(primary_id)
+                emb = updated.get("embeddings") if updated else None
+
+            # Update in-memory member objs
+            for m in self.selected_cluster.get("member_objs", []):
+                if (m.get("id") or m.get("lesson_id")) == primary_id:
+                    m["embeddings"] = emb
+
+            dim_str = f"{len(emb)}d" if emb else "unknown"
+            self._notify_user(f"✨ Successfully generated [{dim_str}] embedding for '{primary_id}'.")
+            detail_view = self.query_one("#cluster-detail", ClusterDetailView)
+            detail_view.display_cluster(self.selected_cluster)
+        except Exception as exc:
+            self._notify_user(f"❌ Error generating embedding: {exc}")
 
 
 def launch_compact_tui(
