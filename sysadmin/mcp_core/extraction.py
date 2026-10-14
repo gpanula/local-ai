@@ -184,3 +184,64 @@ def extract_lesson_from_stuck_loop(
         "lesson_type": "intractable_pattern",
         "outcome": "aborted",
     }
+
+
+def extract_lesson_from_success(
+    strategy: str,
+    risks: str,
+    task_file: str,
+    prompt_content: str,
+    model: str,
+    lesson_type: str = "pre_emptive_defense",
+) -> Optional[dict]:
+    """Extract a positive architectural lesson when a model anticipates risks and succeeds on iteration 1.
+
+    Returns a structured lesson dict with category 'pre_emptive_defense' or None if no substantial
+    risks or architectural strategies were identified.
+    """
+    if not risks or len(risks.strip()) < 30:
+        return None
+
+    extraction_prompt = (
+        f"### Model Strategy:\n{strategy[:1500]}\n\n"
+        f"### Anticipated Risks & Edge Cases:\n{risks[:1500]}\n\n"
+        f"### Task Context:\n{prompt_content[:1500]}\n\n"
+        "Extract a proven defensive architectural pattern from the proactive strategy and risks above. Output ONLY JSON."
+    )
+
+    raw = ""
+    try:
+        raw = transport.call_mcp("ollama_chat", {
+            "prompt": extraction_prompt,
+            "model": model,
+            "system_prompt": _EXTRACTION_SYSTEM_PROMPT,
+            "temperature": 0.1,
+            "num_ctx": 2048,
+        })
+    except Exception:
+        raw = ""
+
+    parsed = _parse_lesson_json(raw)
+    if parsed:
+        return {
+            "id": f"lesson-{date.today().strftime('%Y%m%d')}-00",
+            "category": str(parsed.get("category", "pre_emptive_defense")),
+            "keywords": parsed.get("keywords", []) or _extract_keywords(risks),
+            "proposed_rule": str(parsed.get("proposed_rule", risks.strip())),
+            "reviewer_critique": "",
+            "task_file": task_file,
+            "lesson_type": lesson_type,
+            "outcome": "approved",
+        }
+
+    return {
+        "id": f"lesson-{date.today().strftime('%Y%m%d')}-00",
+        "category": "pre_emptive_defense",
+        "keywords": _extract_keywords(risks),
+        "proposed_rule": f"Pre-emptive Defense: {risks.strip().splitlines()[0]}",
+        "reviewer_critique": "",
+        "task_file": task_file,
+        "lesson_type": lesson_type,
+        "outcome": "approved",
+    }
+

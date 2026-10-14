@@ -553,6 +553,21 @@
 
 ---
 
+## Phase 8 — Lesson Invariant Linter & Multi-Store Safety Verifier
+
+> **Status**: ✅ **COMPLETE** — implemented 2026-09-16. See [`phase8_completion.md`](./phase8_completion.md) for the full completion report.
+
+**Goal**: Catch, flag, and remediate lessons that violate universal system rules, invert tool contracts (e.g. advising agents to avoid standard tools), disregard safeguards, subvert testing, or invoke destructive commands. Ensure dual-store parity between `ollama_update/lessons.md` (Git-canonical) and `.localai/memory.db` (runtime SQLite).
+
+### Deliverables:
+- `sysadmin/mcp_core/lesson_linter.py`: Five invariant suites (`TOOL_CONTRACT`, `ANTI_SAFEGUARD`, `TEST_SUBVERSION`, `DESTRUCTIVE_COMMAND`, `ENVIRONMENT`).
+- `sysadmin/mcp_core/lessons_writer.py`: Added `parse_lessons_from_markdown()` for Git-canonical discovery.
+- `sysadmin/mcp_cli/commands/lint_lessons.py`: `lint-lessons` CLI command with `--fix` interactive remediation (`[d] Delete`, `[m] Modify`, `[s] Skip`).
+- `sysadmin/mcp_cli/commands/memory.py`: Invariant warnings integrated into `review-lessons` and `audit-lessons`.
+- `sysadmin/shell_aliases.sh`: `localai-lint-lessons` and `localai-lint-lessons-fix` aliases.
+
+---
+
 ## Dependency Graph
 
 ```
@@ -562,7 +577,8 @@ Phase 1 (Schema)
   ├── Phase 4 (Injection / Read Path)
   │     └── Phase 5 (Telemetry)
   │           └── Phase 6 (Audit & Promotion)
-  └──────────────── Phase 7 (Trajectories & Wiki)
+  ├── Phase 7 (Trajectories & Wiki)
+  └── Phase 8 (Lesson Invariant Linter & Safety Verifier)
 ```
 
 Phases 2 and 4 can run in parallel after Phase 1.

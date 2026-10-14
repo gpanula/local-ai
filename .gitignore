@@ -8,6 +8,9 @@ __pycache__/
 venv/
 test_venv/
 sysadmin/venv/
+sysadmin/train_venv/
+sysadmin/data/*
+!sysadmin/data/registries/
 ENV/
 env/
 *.egg-info/
@@ -43,6 +46,7 @@ recordings/
 
 # Local AI runtime data (never committed)
 .localai/
+ollama_update/wiki/log.md
 
 # Sandbox temporary artifacts
 .claude/
@@ -59,3 +63,11 @@ recordings/
 /.zprofile
 /.zshrc
 
+# roo / zoo code bits
+.roo/
+.roomodes
+
+# Graphify knowledge graph outputs
+graphify-out/
+.graphify_*.json
+.graphify_uncached.txt

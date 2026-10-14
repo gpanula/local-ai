@@ -58,6 +58,20 @@ def fake_terminal_session(monkeypatch):
     return _FakeTerminalSession
 
 
+@pytest.fixture(autouse=True)
+def isolate_memory_db(monkeypatch, tmp_path):
+    """Ensure all tests use an isolated temporary SQLite database and never touch .localai/memory.db."""
+    test_db = str(tmp_path / "test_isolated_memory.db")
+    import mcp_core.memory
+    monkeypatch.setattr(mcp_core.memory, "DEFAULT_DB_PATH", test_db)
+    try:
+        import pipeline
+        monkeypatch.setattr(pipeline, "DEFAULT_DB_PATH", test_db)
+    except ImportError:
+        pass
+    yield test_db
+
+
 @pytest.fixture
 def fake_send_terminal_mcp(monkeypatch):
     """Monkeypatch ``mcp_core.transport.send_terminal_mcp`` to record banner messages."""

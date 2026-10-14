@@ -154,6 +154,22 @@ def test_search_results_include_rank_field(store):
     assert "rank" in results[0]
 
 
+def test_search_deduplicates_identical_rules(store):
+    # Insert 3 lessons with different IDs but the same rule
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash."))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash."))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Use set -euo pipefail in bash!"))
+    store.insert_lesson(_lesson(keywords=["bash"], rule="Different bash rule."))
+
+    results = store.search_lessons("bash", top_k=5)
+    # Even though 4 lessons match "bash", the first 3 share the same normalized rule.
+    # Therefore, exactly 2 distinct lessons should be returned.
+    assert len(results) == 2
+    rules = [r["rule"] for r in results]
+    assert "Use set -euo pipefail in bash." in rules
+    assert "Different bash rule." in rules
+
+
 # ---------------------------------------------------------------------------
 # Pending lessons table
 # ---------------------------------------------------------------------------
@@ -366,9 +382,15 @@ def test_suppression_ranks_effective_above_ineffective(store):
         _lesson(id="effective", rule="Use unindented heredoc delimiters",
                 keywords=["heredoc"], retrieval_count=2, prevented_rework_count=1)
     )
-    results = store.search_lessons("heredoc", top_k=3)
-    ids = [r["id"] for r in results]
-    assert ids.index("effective") < ids.index("ineffective")
+    # Raw ranking without deduplication confirms utility score ranks effective first
+    results_raw = store.search_lessons("heredoc", top_k=3, dedup=False)
+    ids_raw = [r["id"] for r in results_raw]
+    assert ids_raw.index("effective") < ids_raw.index("ineffective")
+
+    # With dedup=True (default), duplicate rule is pruned and only highest-utility is kept
+    results_deduped = store.search_lessons("heredoc", top_k=3)
+    assert len(results_deduped) == 1
+    assert results_deduped[0]["id"] == "effective"
 
 
 def test_suppression_new_lesson_neutral(store):
@@ -379,3 +401,215 @@ def test_suppression_new_lesson_neutral(store):
     new = next(r for r in results if r["id"] == "new")
     # Neutral multiplier (0+1)/(0+2) = 0.5 (BM25 rank is a tiny non-zero value).
     assert new["utility_score"] == pytest.approx(0.5, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Model performance tracking & domain ranking
+# ---------------------------------------------------------------------------
+def test_record_model_attempt_and_metrics(store):
+    store.record_model_attempt(
+        run_id="run-1",
+        task_id="t1",
+        model="winter-coder:24gb-codestral",
+        role="coder",
+        domain_tags=["devops", "bash"],
+        success=True,
+        retries=0,
+    )
+    store.record_model_attempt(
+        run_id="run-2",
+        task_id="t2",
+        model="winter-coder:24gb-codestral",
+        role="coder",
+        domain_tags=["devops"],
+        success=False,
+        retries=2,
+    )
+
+    perf = store.get_model_performance(model="winter-coder:24gb-codestral", domain_tag="devops")
+    assert len(perf) == 1
+    assert perf[0]["attempts"] == 2
+    assert perf[0]["successes"] == 1
+    assert perf[0]["win_rate"] == 0.5
+    assert perf[0]["avg_retries"] == 1.0
+
+
+def test_rank_models_for_task(store):
+    # Model A: 5 attempts on "bash", 4 successes
+    for i in range(4):
+        store.record_model_attempt("r1", f"t{i}", "model-a", "coder", ["bash"], success=True, retries=0)
+    store.record_model_attempt("r1", "t4", "model-a", "coder", ["bash"], success=False, retries=1)
+
+    # Model B: 5 attempts on "bash", 1 success
+    store.record_model_attempt("r2", "t5", "model-b", "coder", ["bash"], success=True, retries=0)
+    for i in range(4):
+        store.record_model_attempt("r2", f"t{6+i}", "model-b", "coder", ["bash"], success=False, retries=2)
+
+    # Model C: 0 attempts (cold start)
+    candidates = ["model-b", "model-c", "model-a"]
+    ranked = store.rank_models_for_task(domain_tags=["bash"], candidate_models=candidates, role="coder")
+
+    assert ranked == ["model-a", "model-c", "model-b"]
+
+
+# ---------------------------------------------------------------------------
+# Ingestion & Promotion Deduplication Guards (Stage 1)
+# ---------------------------------------------------------------------------
+def test_stage_pending_lesson_dedup_pending_match(store):
+    id1 = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to prevent word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["bash", "quoting"],
+        "reviewer_critique": "Critique A",
+    })
+    id2 = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086", "expansion"],
+        "reviewer_critique": "Critique B",
+    })
+    # Must deduplicate into the same pending lesson
+    assert id1 == id2
+    pending = store.list_pending_lessons()
+    assert len(pending) == 1
+    assert set(pending[0]["keywords"]) == {"bash", "quoting", "sc2086", "expansion"}
+    assert "Critique A" in pending[0]["reviewer_critique"]
+    assert "Critique B" in pending[0]["reviewer_critique"]
+
+
+def test_stage_pending_lesson_dedup_active_match(store):
+    act_id = store.insert_lesson({
+        "rule": "Always quote variables to prevent word splitting.",
+        "category": "Defensive Bash Scripting",
+        "keywords": ["bash", "quoting"],
+    })
+    assert store.get_lesson(act_id)["ineffective_count"] == 0
+
+    staged_id = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086"],
+    })
+    # Returns active lesson ID
+    assert staged_id == act_id
+    # Increments ineffective count
+    assert store.get_lesson(act_id)["ineffective_count"] == 1
+    # Does not insert into pending queue
+    assert len(store.list_pending_lessons()) == 0
+    # Active lesson keywords and category remain untouched
+    assert store.get_lesson(act_id)["keywords"] == ["bash", "quoting"]
+    assert store.get_lesson(act_id)["category"] == "Defensive Bash Scripting"
+
+
+def test_stage_pending_lesson_deduplicate_false(store):
+    id1 = store.stage_pending_lesson({
+        "proposed_rule": "Deterministic path resolution in virtualenvs.",
+        "category": "Binary Isolation",
+    }, deduplicate=False)
+    id2 = store.stage_pending_lesson({
+        "proposed_rule": "Deterministic path resolution in virtualenvs.",
+        "category": "Binary Isolation",
+    }, deduplicate=False)
+    assert id1 != id2
+    assert len(store.list_pending_lessons()) == 2
+
+
+def test_promote_pending_lesson_creates_new(store):
+    p_id = store.stage_pending_lesson({
+        "proposed_rule": "Unique rule for fresh test scenario.",
+        "category": "Testing",
+        "keywords": ["unique"],
+    })
+    lesson_id, is_new = store.promote_pending_lesson(p_id)
+    assert is_new is True
+    assert lesson_id is not None
+    assert len(store.list_pending_lessons()) == 0
+    promoted = store.get_lesson(lesson_id)
+    assert promoted["rule"] == "Unique rule for fresh test scenario."
+    assert promoted["reinforcement_count"] == 0
+
+
+def test_promote_pending_lesson_reinforces_active(store):
+    act_id = store.insert_lesson({
+        "rule": "Always quote variables to prevent word splitting.",
+        "category": "Defensive Bash Scripting",
+        "keywords": ["bash", "quoting"],
+        "retrieval_count": 2,
+    })
+    p_id = store.stage_pending_lesson({
+        "proposed_rule": "Always quote variables to avoid word splitting.",
+        "category": "ShellCheck",
+        "keywords": ["sc2086"],
+    }, deduplicate=False)
+
+    promoted_id, is_new = store.promote_pending_lesson(p_id)
+    assert is_new is False
+    assert promoted_id == act_id
+    assert len(store.list_pending_lessons()) == 0
+
+    active = store.get_lesson(act_id)
+    assert active["reinforcement_count"] == 1
+    assert active["retrieval_count"] == 3
+    assert set(active["keywords"]) == {"bash", "quoting", "sc2086"}
+
+
+def test_reinforcement_count_migration(tmp_path):
+    db_path = str(tmp_path / "old_schema.db")
+    # Create an old schema table without reinforcement_count column
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE lessons (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL DEFAULT 'unknown',
+            keywords TEXT NOT NULL DEFAULT '[]',
+            rule TEXT NOT NULL,
+            created TEXT NOT NULL,
+            source_task TEXT NOT NULL DEFAULT '',
+            lesson_type TEXT NOT NULL DEFAULT 'solved_pattern',
+            retrieval_count INTEGER NOT NULL DEFAULT 0,
+            prevented_rework_count INTEGER NOT NULL DEFAULT 0,
+            ineffective_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    # Opening via MemoryStore must automatically add reinforcement_count column
+    with MemoryStore(db_path) as s:
+        cols = {r[1] for r in s.conn.execute("PRAGMA table_info(lessons)").fetchall()}
+        assert "reinforcement_count" in cols
+
+
+def test_get_latest_pipeline_run_date(tmp_path):
+    from datetime import date
+    db_path = str(tmp_path / "memory.db")
+    with MemoryStore(db_path) as s:
+        # 1. Fresh DB -> None
+        assert s.get_latest_pipeline_run_date() is None
+
+        # 2. Staged pending fallback
+        s.stage_pending_lesson({
+            "proposed_rule": "Test rule fallback",
+            "category": "Testing",
+            "keywords": ["test"],
+        })
+        # Staged pending sets staged_at to today's ISO timestamp
+        latest = s.get_latest_pipeline_run_date()
+        assert latest is not None
+        assert isinstance(latest, date)
+
+        # 3. Model performance record overrides
+        s.record_model_attempt(
+            run_id="run-123",
+            task_id="t-1",
+            model="winter-coder:8gb",
+            role="coder",
+            domain_tags=["bash"],
+            success=True,
+        )
+        latest_perf = s.get_latest_pipeline_run_date()
+        assert latest_perf is not None
+        assert isinstance(latest_perf, date)
+
+

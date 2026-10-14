@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Pipeline Watch TUI - Standalone observer for local AI pipeline executions
+# ==============================================================================
+set -euo pipefail
+trap 'echo "❌ [ERROR] Line ${LINENO}: ${BASH_COMMAND}" >&2; exit 1' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+VENV_DIR="${REPO_ROOT}/sysadmin/venv"
+PYTHON_BIN="${VENV_DIR}/bin/python3"
+
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "❌ [ERROR] Python binary not found at ${PYTHON_BIN}. Please initialize virtual environment." >&2
+  exit 1
+fi
+
+export PYTHONPATH="${REPO_ROOT}/sysadmin:${PYTHONPATH:-}"
+exec "${PYTHON_BIN}" -m pipeline_tui "$@"
