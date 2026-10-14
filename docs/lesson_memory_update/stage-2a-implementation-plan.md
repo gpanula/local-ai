@@ -26,69 +26,73 @@ The schema and search functions already exist but are unfed:
 ## Step 1: Benchmark & Select Local Ollama Embedding Model
 
 ### What
-Evaluate candidate Ollama embedding models on a representative sample of lesson texts to select the model that provides the best quality/performance tradeoff for short-text semantic similarity.
+Empirically verify the performance and quality of the resident local Ollama embedding model (`nomic-embed-text:latest`) on representative lesson texts, confirming suitability for short-text semantic similarity before committing to the schema.
 
 ### Why
-Lesson rules are short texts (typically 10-40 words). Embedding models optimized for long documents may not perform well. Model dimensionality affects storage footprint and search performance. The choice is foundational — changing models later requires re-embedding the entire corpus.
+Lesson rules are short texts (typically 10-40 words). The model must provide strong discrimination between true semantic equivalents and unrelated rules without consuming prohibitive VRAM.
 
 ### Design Notes
 
-**Candidate models to evaluate** (available via `ollama pull`):
-- `nomic-embed-text` — 768 dimensions, general-purpose, good short-text performance
-- `mxbai-embed-large` — 1024 dimensions, higher quality but larger storage
-- `all-minilm` — 384 dimensions, smallest footprint, decent quality
-- `snowflake-arctic-embed` — multiple sizes available
+**Resident Model Status**:
+- `nomic-embed-text:latest` (137M parameters, 768 dimensions, F16 quantization, ~260MB VRAM footprint) is **already installed locally** in the Ollama instance.
+- Because it is lightweight (0.26 GB) and specifically pre-trained with 8192 context window and high clustering accuracy for short texts, it serves as the primary candidate.
+- Fallback candidates (e.g. `mxbai-embed-large` [1024d] or `all-minilm` [384d]) will only be evaluated if `nomic-embed-text` fails discrimination thresholds.
 
-**Evaluation protocol**:
-1. Pull each candidate model via the local-ollama MCP (`ollama_pull_model`).
-2. Generate embeddings for a sample of 10-15 lesson rules covering diverse categories.
-3. Compute pairwise cosine similarity matrices.
-4. Evaluate against known ground truth:
-   - **True duplicates** (lexically similar lessons from the Stage 1 audit) should have cosine similarity > 0.85.
-   - **Semantic duplicates** (same meaning, different words — manually curated test pairs) should have cosine similarity > 0.70.
-   - **Unrelated lessons** (different categories, different topics) should have cosine similarity < 0.40.
-5. Measure generation latency per lesson (single inference call).
-6. Record storage footprint per lesson (dimensions × 4 bytes per float32).
-
-**Selection criteria**: Prioritize quality of semantic similarity discrimination, then latency, then storage. The model must run locally on the available hardware without GPU memory issues.
+**Verification protocol**:
+1. Execute embedding generation via native MCP / Ollama embedding endpoints for 10-15 curated lesson rules.
+2. Compute pairwise cosine similarity matrices across:
+   - **True duplicates** (e.g. `lesson-20260918-05` and `lesson-20260929-01`): Target cosine similarity $\ge 0.80$.
+   - **Same-domain, different-intent rules**: Target cosine similarity between $0.45$ and $0.70$.
+   - **Completely unrelated rules** (e.g. Docker Orchestration vs Bash Tracing): Target cosine similarity $< 0.40$.
+3. Measure single-call and batch latency per lesson (target < 50ms per item on local hardware).
+4. Confirm 768 dimensions float32 footprint (~3 KB per lesson BLOB).
 
 ### Acceptance Criteria
-- At least 3 models are benchmarked.
-- A benchmark results document is produced showing similarity matrices, latency, and storage comparisons.
-- One model is selected with documented rationale.
-- The selected model is pulled and available via `ollama list`.
+- `nomic-embed-text:latest` discrimination verified against ground-truth pairs.
+- Verification findings recorded (cosine similarity matrix and latency measurements).
+- Selected model and dimensionality (`768`) confirmed for `MemoryStore` integration.
 
 ---
 
-## Step 2: Build the Embedding Generation Function
+## Step 2: Build the Embedding Generation Function & Native MCP Tool
 
 ### What
-Create a function that takes lesson text and returns a dense vector embedding using the selected Ollama model.
+1. Build `sysadmin/mcp_core/embeddings.py` providing `embed_text()` and batch `embed_texts()` functions.
+2. Expose the native MCP tool `ollama_embed` in `sysadmin/mcp_ollama/server.py` to ensure IDE agents interact with embeddings through native MCP calling (satisfying `AGENTS.md` Rule 7).
 
 ### Where
-- `sysadmin/mcp_core/embeddings.py` (new file).
+- `sysadmin/mcp_core/embeddings.py` (new core module).
+- `sysadmin/mcp_ollama/server.py` (tool registration & schema).
+- `sysadmin/mcp_ollama/ollama_embed.json` (MCP tool schema).
 
 ### Design Notes
 
-**Function signature**: `embed_text(text: str, model: str = EMBEDDING_MODEL) -> Optional[list[float]]`
+**Function signature**:
+```python
+def embed_text(text: str, model: str = EMBEDDING_MODEL) -> Optional[list[float]]: ...
+def embed_texts(texts: list[str], model: str = EMBEDDING_MODEL) -> list[Optional[list[float]]]: ...
+```
 
 **Configuration**:
-- `EMBEDDING_MODEL` constant (set to the model selected in Step 1).
-- `EMBEDDING_DIMENSIONS` constant (must match the model's output dimensionality).
-- The Ollama host URL should come from the environment (`$OLLAMA_HOST`) or a default.
+- `EMBEDDING_MODEL = "nomic-embed-text:latest"`
+- `EMBEDDING_DIMENSIONS = 768`
+- Resolved deterministically via `$OLLAMA_HOST` (defaulting to `http://127.0.0.1:11434`).
 
-**Implementation approach**:
-- Use the Ollama API's `/api/embed` endpoint (or the equivalent MCP tool) to generate embeddings.
-- Normalize the input text before embedding (strip whitespace, collapse runs). This is different from `normalize_lesson_rule()` which strips punctuation — the embedding model benefits from natural text with punctuation.
-- Handle failure gracefully: return `None` if the Ollama server is unreachable or the model is not loaded. Never raise on embedding failure — embeddings are an enhancement, not a requirement.
+**Implementation & API Protocol**:
+- Use Ollama's modern `/api/embed` batch endpoint (replacing deprecated `/api/embeddings`).
+- Strip extraneous whitespace while preserving natural punctuation (contrast with lexical `normalize_lesson_rule()` which strips symbols).
+- Non-blocking error handling: Return `None` if Ollama is unreachable, model is unpulled, or payload is empty. Never raise unhandled exceptions into the caller.
 
-**Batching**: Include a `embed_texts(texts: list[str]) -> list[Optional[list[float]]]` variant for efficient batch embedding during backfill. If the Ollama API supports batch embedding, use it. Otherwise, iterate with a simple loop.
+**Native MCP Tool (`ollama_embed`)**:
+- Registers in `server.py` with arguments `{"texts": list[str], "model": Optional[str]}`.
+- Allows external agents and subagents to request embeddings without executing curl or raw subshell scripts.
 
 ### Acceptance Criteria
-- `embed_text("Always quote variables in shell scripts")` returns a list of floats with the correct dimensionality.
+- `embed_text("Always quote variables in shell scripts")` returns a list of 768 floats.
+- `embed_texts()` processes batch inputs in a single round-trip.
 - `embed_text("")` returns `None`.
-- When Ollama is unreachable, the function returns `None` without raising.
-- `embed_texts()` returns correct results for a batch of 5 inputs.
+- `ollama_embed` tool callable via `call_mcp_tool('local-ollama', 'ollama_embed', ...)`.
+- Graceful `None` fallback when the Ollama daemon is offline.
 
 ---
 
@@ -152,14 +156,16 @@ Generate embeddings for all existing active lessons that currently have `embeddi
 
 ---
 
-## Step 5: Embedding Health Monitoring
+## Step 5: Embedding Health Monitoring & TUI Observability
 
 ### What
-Add observability for embedding coverage and staleness so operators can detect when embeddings are missing or potentially stale.
+Add observability for embedding coverage and staleness, surfacing embedding state across both CLI tools and the Consolidation TUI (`CompactionTUIApp`).
 
 ### Where
-- `sysadmin/mcp_core/memory.py`: Add a health/status method.
-- `sysadmin/mcp_cli/commands/memory.py`: Surface in CLI output (e.g., `localai audit-lessons` or a new subcommand).
+- `sysadmin/mcp_core/memory.py`: Add `get_embedding_health()` status method.
+- `sysadmin/mcp_cli/commands/memory.py`: Surface in `localai audit-lessons` and `localai-compact` CLI output.
+- `sysadmin/lessons_tui/widgets/cluster_detail.py`: Surface vector embedding badge and dimension info.
+- `sysadmin/lessons_tui/compact_app.py`: Add `[EMBEDDED]` / `[NO-VEC]` badges and `e` keybinding to trigger on-demand embedding.
 
 ### Design Notes
 
@@ -168,17 +174,23 @@ Add observability for embedding coverage and staleness so operators can detect w
 - `embedded_lessons`: Count of lessons with non-NULL embeddings.
 - `coverage_pct`: `embedded / total * 100`.
 - `null_embeddings`: List of lesson IDs with NULL embeddings.
-- `model_name`: The configured embedding model (so operators know what model generated the stored vectors).
-- `embedding_dimensions`: The expected dimensionality.
+- `model_name`: The configured embedding model (e.g. `nomic-embed-text:latest`).
+- `embedding_dimensions`: The expected dimensionality (768).
 
-**Staleness detection**: If the configured `EMBEDDING_MODEL` changes (e.g., operator switches from `nomic-embed-text` to `mxbai-embed-large`), all existing embeddings are effectively stale because they were generated by a different model. Store the model name used for embedding generation as metadata (either in a new `embedding_model` column or a config table) so staleness can be detected.
+**Staleness detection**:
+- Store the generating model name in the database metadata table (`schema_meta` or `embedding_model` column).
+- If the configured `EMBEDDING_MODEL` changes, `get_embedding_health()` flags a `STALE_MODEL` warning.
+- Provide a `--reindex` flag in `localai-embed-lessons` to re-embed all lessons upon model migration.
 
-**Display**: Surface in `localai audit-lessons` output alongside the existing low-utility and cluster analysis.
+**Consolidation TUI Integration**:
+- In `CompactionTUIApp` detail pane, display an indicator: `[EMBEDDED: 768d]` or `[NO-VEC: NULL]`.
+- Pressing `e` on an unembedded candidate lesson stages or triggers immediate background embedding via `refresh_embedding()`.
 
 ### Acceptance Criteria
-- Health check reports accurate coverage percentage.
-- Missing embeddings are listed by lesson ID.
-- If the embedding model changes, a warning is displayed indicating existing embeddings may be stale.
+- Health check reports accurate coverage percentage and model metadata.
+- Missing embeddings are listed by lesson ID in audit output.
+- If the embedding model changes, a warning is displayed indicating existing embeddings are stale.
+- TUI shows `[EMBEDDED]` status in the lesson detail pane.
 
 ---
 

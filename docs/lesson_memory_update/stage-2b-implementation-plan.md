@@ -20,41 +20,41 @@ Wire hybrid search (BM25 keyword matching + vector cosine similarity) into the l
 
 ---
 
-## Step 1: Build Query Embedding Pipeline
+## Step 1: Build Query Embedding Pipeline (Task Context & Tag Embeddings)
 
 ### What
-Create a function that generates an embedding for the search query at retrieval time, so it can be passed to `search_lessons_hybrid()`.
+Create a function that generates embeddings for search queries and task goal contexts at retrieval time to pass to `search_lessons_hybrid()`.
 
 ### Why
-`search_lessons_hybrid()` requires both a text query and a query embedding vector. Currently `collect_relevant_lessons()` only has text tags. We need a way to embed the query efficiently during pipeline execution.
+`search_lessons_hybrid()` requires both a text query and a query embedding vector. However, embedding only short 1-to-2 word taxonomy tags (e.g. `"ShellCheck"`) underutilizes dense vector capabilities. Dense embeddings excel when supplied with expressive natural language descriptions of the task goal (e.g. `"Ensure all bash scripts use set -euo pipefail, trap ERR, and assert binary existence before printing success"`).
 
 ### Where
-- `sysadmin/mcp_core/embeddings.py`: Reuse `embed_text()` from Stage 2A.
+- `sysadmin/mcp_core/embeddings.py`: Expose `embed_query()` with local caching.
 - `sysadmin/pipeline.py`: Modify `collect_relevant_lessons()`.
 
 ### Design Notes
 
-**Query embedding approach**:
-- For each tag/term in the search query, generate an embedding via `embed_text()`.
-- Cache query embeddings within the pipeline run to avoid re-embedding the same tag across multiple stages (Orchestrator, Author, Reviewer all call `collect_relevant_lessons()`).
+**Contextual Query Embedding Approach**:
+- Support dual-query generation:
+  1. **Task Goal Embedding**: Embed the prompt's primary Section 1 "Goal" / task description. This drives dense semantic retrieval across the entire knowledge base.
+  2. **Tag Keywords**: Pass canonical domain tags as the FTS5 text terms for BM25 keyword matching.
+- Cache query embeddings within the pipeline run (ephemeral dictionary cache) to avoid redundant Ollama calls across stages (Architect, Orchestrator, Reviewer).
 
-**Caching strategy**:
-- A simple dictionary cache keyed on the query text, scoped to the pipeline run lifetime.
-- Not persisted — query embeddings are ephemeral and cheap to regenerate.
-
-**Latency budget**: Embedding a single short query should take < 100ms on local hardware. For 3-5 tags per stage, this adds ~300-500ms total per stage. This is acceptable for a pipeline that runs multi-second LLM calls.
+**Latency budget**:
+- Embedding a single query takes ~25–40ms using resident `nomic-embed-text:latest`.
+- Cached for repeated stage lookups, adding < 100ms total overhead to a multi-stage pipeline run.
 
 ### Acceptance Criteria
-- `embed_text("shellcheck quoting bash")` returns a valid embedding vector.
-- Repeated calls with the same text return cached results (no redundant Ollama calls).
-- When Ollama is unavailable, embedding returns `None` and the system falls back gracefully.
+- `embed_query("Ensure scripts fail cleanly on errors with trap line numbers")` returns a 768d vector.
+- Repeated calls with identical context return cached vectors without hitting Ollama.
+- When Ollama is unavailable, returns `None` and falls back gracefully to FTS5-only search.
 
 ---
 
 ## Step 2: Upgrade `collect_relevant_lessons()` to Hybrid Search
 
 ### What
-Modify `collect_relevant_lessons()` to use `search_lessons_hybrid()` when embeddings are available, falling back to FTS5-only search when they are not.
+Modify `collect_relevant_lessons()` to use `search_lessons_hybrid()` with prompt goal context and domain tags when embeddings are available, falling back to FTS5-only search when they are not.
 
 ### Where
 - `sysadmin/pipeline.py`: Modify `collect_relevant_lessons()`.
@@ -62,57 +62,53 @@ Modify `collect_relevant_lessons()` to use `search_lessons_hybrid()` when embedd
 ### Design Notes
 
 **Upgrade path**:
-1. For each tag, generate a query embedding via `embed_text()`.
-2. If the embedding is available, call `memory_store.search_lessons_hybrid(tag, embedding, top_k=search_limit)`.
-3. If the embedding is `None` (Ollama unavailable or embedding module not configured), call `memory_store.search_lessons(tag, top_k=search_limit)` as before.
-4. Continue to deduplicate and trim as before.
+1. Check if embeddings are enabled and Ollama is available.
+2. If available, generate the query embedding from the prompt task context (or concatenated tags if task context is unspecified).
+3. Call `memory_store.search_lessons_hybrid(query_text=tag_text, query_embedding=goal_vec, top_k=search_limit)`.
+4. If embeddings are unavailable (`goal_vec is None` or `sqlite-vec` missing), execute standard `memory_store.search_lessons(tag_text, top_k=search_limit)`.
+5. Continue with existing deduplication and max-injection trimming.
 
-**Fallback guarantee**: The upgrade must be fully backward-compatible. If `sqlite-vec` is not installed, embeddings are NULL, or Ollama is down, the behavior is identical to the current FTS5-only path. Zero regressions.
-
-**Import safety**: Import the embedding function conditionally. If `embeddings.py` is not importable (e.g., dependency not installed), set the embedding function to a no-op that returns `None`.
+**Fallback guarantee**:
+- Zero-breaking changes: If `sqlite-vec` is not loaded, embeddings are NULL, or Ollama is offline, the function produces identical output to the legacy FTS5-only path.
 
 ### Acceptance Criteria
-- With embeddings available, `collect_relevant_lessons()` returns results that include both keyword-matched and semantically-matched lessons.
-- Without embeddings, behavior is identical to the current implementation.
-- No regressions in existing pipeline tests.
+- With embeddings available, `collect_relevant_lessons()` retrieves both exact keyword matches and semantically relevant lessons across phrasing variations.
+- Without embeddings, behavior matches legacy FTS5 output.
+- Existing pipeline tests pass with 0 regressions.
 
 ---
 
-## Step 3: Tune BM25 vs Vector Weight Balance
+## Step 3: Calibrate Hybrid Fusion & Rank Normalization
 
 ### What
-Calibrate the relative weight of BM25 keyword scores and vector cosine similarity scores in `search_lessons_hybrid()` to optimize retrieval quality.
+Calibrate the score fusion formula combining BM25 keyword matching and cosine vector similarity in `search_lessons_hybrid()`.
 
 ### Why
-The current `search_lessons_hybrid()` implementation uses a simple additive combination: `(fts_score + vec_score) * utility_multiplier`. This may not be optimal — BM25 scores and cosine similarity scores have different ranges and distributions. The right balance depends on the actual lesson corpus.
+Directly summing raw BM25 ranks and cosine similarities is problematic: BM25 ranks are unbounded negative values, and simple division by `max_rank` collapses when few items match. Cosine similarity ranges from -1 to 1 (typically 0.4 to 0.9 for semantic matches).
 
 ### Where
-- `sysadmin/mcp_core/memory.py`: Modify `search_lessons_hybrid()` to accept configurable weights.
+- `sysadmin/mcp_core/memory.py`: Refactor score fusion in `search_lessons_hybrid()`.
 
 ### Design Notes
 
-**Parameterize weights**:
-- Add `fts_weight: float = 0.5` and `vec_weight: float = 0.5` parameters to `search_lessons_hybrid()`.
-- Combined score becomes: `(fts_weight * fts_norm + vec_weight * vec_norm) * utility_multiplier`.
-- Store default weights as module-level constants for easy tuning.
+**Fusion Algorithms Evaluated**:
+1. **Reciprocal Rank Fusion (RRF)**:
+   $$\text{Score}(d) = \frac{w_{\text{fts}}}{k + \text{rank}_{\text{fts}}(d)} + \frac{w_{\text{vec}}}{k + \text{rank}_{\text{vec}}(d)}$$
+   (with $k=60$ standard smoothing constant). RRF is resilient to outlier score distributions and does not require tricky score normalization.
+2. **Min-Max Normalized Linear Combination**:
+   $$\text{Score}(d) = \left(w_{\text{fts}} \cdot \text{Norm}(\text{BM25}) + w_{\text{vec}} \cdot \text{CosineSim}\right) \times \text{UtilityMultiplier}$$
+   With calibrated default weights ($w_{\text{fts}} = 0.45, w_{\text{vec}} = 0.55$).
 
 **Evaluation protocol**:
-1. Construct a set of 10-15 test queries with known expected lesson matches (ground truth).
-2. Include queries that are:
-   - **Lexically similar** to lesson text (BM25 should dominate).
-   - **Semantically similar but lexically different** (vector should dominate).
-   - **Mixed** (both signals contribute).
-3. Run each query with different weight ratios (0.7/0.3, 0.5/0.5, 0.3/0.7).
-4. Measure recall@3 (does the correct lesson appear in the top 3?) and rank position.
-5. Select the weight ratio that maximizes recall@3 across the test set.
-
-**BM25 normalization**: The current BM25 → 0..1 normalization in `search_lessons_hybrid()` divides by `max_rank`. Verify this produces a meaningful distribution. If all BM25 scores are tightly clustered, the normalization may not discriminate well.
+- Test against ground-truth pairs:
+  - Exact tag matches (e.g. tag `shellcheck` matching SC quoting rules).
+  - Vocabulary-shifted queries (e.g. `"proactive risk prevention"` matching defensive scripting rules without the word "shellcheck").
+- Verify that utility suppression (`(prevented + 1) / (retrieved + 2)`) applies uniformly to the combined score.
 
 ### Acceptance Criteria
-- `search_lessons_hybrid()` accepts configurable weight parameters.
-- Default weights are selected based on evaluation against ground-truth query-lesson pairs.
-- Evaluation results are documented with the rationale for the selected weights.
-- Hybrid search recall@3 is equal to or better than FTS5-only recall@3 on the test set.
+- `search_lessons_hybrid()` accepts configurable fusion weights.
+- Score fusion handles edge cases cleanly (single-match BM25, negative cosine, ties).
+- Hybrid search recall@3 is superior to FTS5-only search on test queries.
 
 ---
 
