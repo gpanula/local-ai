@@ -370,6 +370,19 @@ class AuditLessonsCommand(BaseCommand):
             )
             violations = lint_all_lessons(lessons)
 
+            health = store.get_embedding_health()
+            print("\n" + "=" * 60)
+            print(f"🧠 [Embedding Coverage] {health['embedded_lessons']}/{health['total_lessons']} ({health['coverage_pct']}%) embedded with {health['model_name']} ({health['expected_dimensions']}d)")
+            if health.get("status") == "stale_model":
+                print(f"  ⚠️  [STALE MODEL] {health.get('warning')}")
+                print("  💡 Run 'localai embed-lessons --reindex' to update vector representations.")
+            elif health["missing_count"] > 0:
+                print(f"  ⚠️  {health['missing_count']} lesson(s) missing embeddings: {', '.join(health['null_embeddings'])}")
+                print("  💡 Run 'localai embed-lessons' to backfill vector embeddings.")
+            else:
+                print("  ✅ 100% embedding coverage.")
+            print("=" * 60)
+
             if violations:
                 print("\n" + "=" * 60)
                 print(f"🚨 [Invariant Linter] {len(violations)} active lesson(s) violate safety or tool invariants!")
@@ -615,6 +628,11 @@ class CompactLessonsCommand(BaseCommand):
             help="Launch interactive Textual TUI for compacting lessons",
         )
         parser.add_argument(
+            "--embed",
+            action="store_true",
+            help="Backfill missing embeddings for active lessons during compaction",
+        )
+        parser.add_argument(
             "--plain",
             dest="plain",
             action="store_true",
@@ -681,6 +699,14 @@ class CompactLessonsCommand(BaseCommand):
                         print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
             elif getattr(args, "retire_sunsets", False):
                 self._retire_sunset_candidates(store, args)
+
+            # --- 4. Post-compaction Embedding Backfill ---
+            if getattr(args, "embed", False) and not args.dry_run:
+                print("\n" + "=" * 60)
+                print("🧠 [Embedding Refresh] Running post-compaction embedding backfill:")
+                print("=" * 60)
+                s, f = store.refresh_all_embeddings()
+                print(f"✨ Backfilled embeddings: {s} succeeded, {f} failed.")
 
     def _compact_pending(self, store: MemoryStore, args) -> None:
         pending_list = store.list_pending_lessons()
@@ -892,4 +918,78 @@ class CompactLessonsCommand(BaseCommand):
                     os.path.join(wiki_dir, "log.md"),
                 )
                 print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
+ 
+ 
+@command
+class EmbedLessonsCommand(BaseCommand):
+    name = "embed-lessons"
+    help = "Backfill or reindex dense vector embeddings for active lessons via local Ollama"
+
+    def register_args(self, parser):
+        parser.add_argument(
+            "--reindex",
+            "--force",
+            action="store_true",
+            dest="force",
+            help="Regenerate embeddings for all active lessons even if already present",
+        )
+        parser.add_argument(
+            "--batch-size",
+            type=int,
+            default=10,
+            help="Batch size for embedding generation (default: 10)",
+        )
+        parser.add_argument(
+            "--status",
+            action="store_true",
+            help="Report embedding health and coverage metrics without modifying",
+        )
+
+    def run(self, args):
+        with MemoryStore() as store:
+            health = store.get_embedding_health()
+            if args.status:
+                print("\n" + "=" * 60)
+                print("🧠 [Embedding Health & Coverage]")
+                print("=" * 60)
+                print(f"  Model:               {health['model_name']} ({health['expected_dimensions']}d)")
+                print(f"  Stored Model:        {health.get('stored_model', 'none')}")
+                print(f"  Status:              {health['status']}")
+                print(f"  Active Lessons:      {health['total_lessons']}")
+                print(f"  Embedded Lessons:    {health['embedded_lessons']}")
+                print(f"  Coverage:            {health['coverage_pct']}%")
+                if health.get("warning"):
+                    print(f"  ⚠️  Warning:          {health['warning']}")
+                if health["missing_count"] > 0:
+                    print(f"  Missing Embeddings:  {health['missing_count']} lesson(s)")
+                    print(f"    IDs: {', '.join(health['null_embeddings'])}")
+                print("=" * 60)
+                return
+
+            print("\n" + "=" * 60)
+            print(f"🧠 [Embedding Backfill] Model: {health['model_name']} ({health['expected_dimensions']}d)")
+            if args.force:
+                print("  Mode: Full re-indexing (--force)")
+            else:
+                print(f"  Mode: Missing only ({health['missing_count']} lessons need embedding)")
+            print("=" * 60)
+
+            if not args.force and health["missing_count"] == 0:
+                print("✅ All active lessons already have embeddings. Use --reindex to force regeneration.")
+                return
+
+            def on_progress(done, total):
+                print(f"  ⏳ Embedded {done}/{total} lessons...")
+
+            success, failed = store.refresh_all_embeddings(
+                batch_size=args.batch_size,
+                force=args.force,
+                on_progress=on_progress,
+            )
+
+            print("-" * 60)
+            print(f"✨ Backfill completed: {success} succeeded, {failed} failed.")
+            updated_health = store.get_embedding_health()
+            print(f"📊 Final Coverage: {updated_health['embedded_lessons']}/{updated_health['total_lessons']} ({updated_health['coverage_pct']}%)")
+            print("=" * 60)
 
