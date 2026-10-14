@@ -24,8 +24,18 @@ def normalize_lesson_rule(rule: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip().lower()
 
 
-def are_rules_similar(rule1: str, rule2: str, threshold: float = 0.75) -> bool:
-    """Determine whether two normalized rule texts are near-duplicates.
+DEFAULT_SIMILARITY_THRESHOLD: float = 0.75
+
+
+def are_rules_similar(
+    rule1: str,
+    rule2: str,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+) -> bool:
+    """Determine whether two rule texts are near-duplicates.
+
+    Normalizes both inputs internally via ``normalize_lesson_rule()`` so callers
+    can safely pass either raw or pre-normalized strings.
 
     Evaluates word-level Jaccard similarity and character-level SequenceMatcher ratio.
     Requires significant token overlap (jaccard >= threshold and ratio >= 0.70)
@@ -33,17 +43,19 @@ def are_rules_similar(rule1: str, rule2: str, threshold: float = 0.75) -> bool:
     and min(len(rule1), len(rule2)) > 25) to avoid false positives on short test
     labels (e.g. 'Rule A' vs 'Rule C' or 'bash lesson 0' vs 'bash lesson 1').
     """
-    if not rule1 or not rule2:
+    norm1 = normalize_lesson_rule(rule1)
+    norm2 = normalize_lesson_rule(rule2)
+    if not norm1 or not norm2:
         return False
-    if rule1 == rule2:
+    if norm1 == norm2:
         return True
 
-    ratio = difflib.SequenceMatcher(None, rule1, rule2).ratio()
-    if ratio >= 0.92 and min(len(rule1), len(rule2)) > 25:
+    ratio = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+    if ratio >= 0.92 and min(len(norm1), len(norm2)) > 25:
         return True
 
-    tokens1 = set(rule1.split())
-    tokens2 = set(rule2.split())
+    tokens1 = set(norm1.split())
+    tokens2 = set(norm2.split())
     if tokens1 and tokens2:
         jaccard = len(tokens1 & tokens2) / len(tokens1 | tokens2)
         if jaccard >= threshold and ratio >= 0.70:
@@ -52,7 +64,10 @@ def are_rules_similar(rule1: str, rule2: str, threshold: float = 0.75) -> bool:
     return False
 
 
-def deduplicate_lessons(lessons: list, similarity_threshold: float = 0.78) -> list:
+def deduplicate_lessons(
+    lessons: list,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+) -> list:
     """Deduplicate a list of lesson dicts by ID and normalized rule text.
 
     Preserves the original ranking/relevance order so the highest-scoring

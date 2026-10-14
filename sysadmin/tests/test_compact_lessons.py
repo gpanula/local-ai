@@ -45,15 +45,15 @@ def test_compact_pending_lessons(cmd, capsys):
     command, args, db_path, *_ = cmd
     with MemoryStore(db_path) as store:
         store.stage_pending_lesson({
-            "proposed_rule": "Short rule A",
+            "proposed_rule": "Always quote bash variables to avoid word splitting.",
             "category": "Scripting",
             "keywords": ["bash", "env"],
-        })
+        }, deduplicate=False)
         store.stage_pending_lesson({
-            "proposed_rule": "Longer and much more descriptive rule B",
+            "proposed_rule": "Always quote bash variables to avoid word splitting and globbing.",
             "category": "Scripting",
             "keywords": ["bash", "env", "paths"],
-        })
+        }, deduplicate=False)
 
     command.run(args)
     out = capsys.readouterr().out
@@ -62,7 +62,7 @@ def test_compact_pending_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         pending = store.list_pending_lessons()
         assert len(pending) == 1
-        assert "Longer and much more descriptive rule B" in pending[0]["proposed_rule"]
+        assert "Always quote bash variables to avoid word splitting and globbing." in pending[0]["proposed_rule"]
         assert set(pending[0]["keywords"]) == {"bash", "env", "paths"}
 
 
@@ -71,7 +71,7 @@ def test_compact_active_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         store.insert_lesson({
             "id": "lesson-01",
-            "rule": "Active rule 1",
+            "rule": "Always quote bash variables to avoid word splitting.",
             "category": "Testing",
             "keywords": ["pytest", "mock"],
             "retrieval_count": 5,
@@ -79,7 +79,7 @@ def test_compact_active_lessons(cmd, capsys):
         })
         store.insert_lesson({
             "id": "lesson-02",
-            "rule": "Active rule 2 with more details",
+            "rule": "Always quote bash variables to avoid word splitting and globbing.",
             "category": "Testing",
             "keywords": ["pytest", "mock", "fixtures"],
             "retrieval_count": 3,
@@ -94,16 +94,140 @@ def test_compact_active_lessons(cmd, capsys):
     with MemoryStore(db_path) as store:
         lessons = store.list_lessons()
         assert len(lessons) == 1
-        assert lessons[0]["rule"] == "Active rule 2 with more details"
+        assert lessons[0]["rule"] == "Always quote bash variables to avoid word splitting and globbing."
         assert lessons[0]["retrieval_count"] == 8
         assert lessons[0]["prevented_rework_count"] == 3
 
     assert os.path.exists(lessons_md)
     with open(lessons_md, "r", encoding="utf-8") as f:
         content = f.read()
-    assert "Active rule 2 with more details" in content
+    assert "Always quote bash variables to avoid word splitting and globbing." in content
 
     # Assert wiki files were automatically re-compiled
     assert os.path.exists(os.path.join(wiki_dir, "index.md"))
     assert os.path.exists(os.path.join(wiki_dir, "dashboard.md"))
     assert os.path.exists(os.path.join(wiki_dir, "log.md"))
+
+
+def test_compact_active_invalidates_embeddings(cmd, capsys):
+    command, args, db_path, lessons_md, wiki_dir = cmd
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-01",
+            "rule": "Always quote bash variables to avoid word splitting.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "embeddings": [0.1, 0.2, 0.3, 0.4],
+        })
+        store.insert_lesson({
+            "id": "lesson-02",
+            "rule": "Always quote bash variables to avoid word splitting and globbing.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "embeddings": [0.5, 0.6, 0.7, 0.8],
+        })
+
+    command.run(args)
+    with MemoryStore(db_path) as store:
+        lessons = store.list_lessons()
+        assert len(lessons) == 1
+        # Check raw database row for embeddings column
+        row = store.conn.execute("SELECT embeddings FROM lessons WHERE id = ?", (lessons[0]["id"],)).fetchone()
+        assert row["embeddings"] is None
+
+
+def test_compact_dry_run_reports_sunset_candidates(cmd, capsys):
+    command, args, db_path, *_ = cmd
+    args.dry_run = True
+    args.retire_sunsets = True
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-bad-01",
+            "rule": "Obsolete pattern that fails regularly.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "retrieval_count": 2,
+            "prevented_rework_count": 0,
+            "ineffective_count": 8,
+        })
+
+    command.run(args)
+    out = capsys.readouterr().out
+    assert "Sunset Candidates" in out
+    assert "lesson-bad-01" in out
+    assert "consistently_ineffective" in out
+    assert "Would be retired with --retire-sunsets" in out
+
+
+def test_compact_retire_sunsets_auto(cmd, capsys):
+    command, args, db_path, lessons_md, wiki_dir = cmd
+    args.dry_run = False
+    args.auto = True
+    args.retire_sunsets = True
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-bad-01",
+            "rule": "Obsolete pattern that fails regularly.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "retrieval_count": 2,
+            "prevented_rework_count": 0,
+            "ineffective_count": 8,
+        })
+        store.insert_lesson({
+            "id": "lesson-good-01",
+            "rule": "Good pattern that is highly effective.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "retrieval_count": 10,
+            "prevented_rework_count": 8,
+            "ineffective_count": 0,
+        })
+
+    command.run(args)
+    out = capsys.readouterr().out
+    assert "Retired lesson 'lesson-bad-01'" in out
+    assert "Re-synced" in out
+
+    with MemoryStore(db_path) as store:
+        remaining = store.list_lessons()
+        assert len(remaining) == 1
+        assert remaining[0]["id"] == "lesson-good-01"
+
+
+def test_compact_retire_sunsets_interactive(monkeypatch, cmd, capsys):
+    command, args, db_path, *_ = cmd
+    args.dry_run = False
+    args.auto = False
+    args.retire_sunsets = True
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-bad-01",
+            "rule": "Obsolete pattern that fails regularly.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "retrieval_count": 2,
+            "prevented_rework_count": 0,
+            "ineffective_count": 8,
+        })
+
+    # User inputs 's' to skip
+    monkeypatch.setattr("builtins.input", lambda prompt="": "s")
+    command.run(args)
+    out = capsys.readouterr().out
+    assert "Skipped 'lesson-bad-01'" in out
+
+    with MemoryStore(db_path) as store:
+        assert len(store.list_lessons()) == 1
+
+    # User inputs 'r' to retire
+    monkeypatch.setattr("builtins.input", lambda prompt="": "r")
+    command.run(args)
+    out = capsys.readouterr().out
+    assert "Retired lesson 'lesson-bad-01'" in out
+
+    with MemoryStore(db_path) as store:
+        assert len(store.list_lessons()) == 0
+

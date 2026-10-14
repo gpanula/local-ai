@@ -242,3 +242,176 @@ def test_lesson_list_click_selection(temp_env):
             assert detail_view.lesson["id"] == "pending-item-01"
 
     asyncio.run(_run())
+
+
+def test_lessons_tui_active_mode_delete(temp_env):
+    """Test deleting an active lesson in active mode removes it from db, lessons.md, and wiki."""
+    db_path, lessons_md, wiki_dir = temp_env
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-active-01",
+            "rule": "Always test error conditions directly.",
+            "category": "Defensive Bash Scripting",
+            "keywords": ["testing", "bash"],
+            "source_task": "test.md",
+        })
+        store.insert_lesson({
+            "id": "lesson-active-02",
+            "rule": "Second active rule.",
+            "category": "Defensive Bash Scripting",
+            "keywords": ["testing"],
+            "source_task": "test2.md",
+        })
+        lessons = store.list_lessons()
+        from mcp_core.lessons_writer import write_all_lessons_to_markdown
+        write_all_lessons_to_markdown(lessons, lessons_md)
+
+    async def _run():
+        app = LessonsReviewApp(db_path=db_path, lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            # Switch to active mode via 't' key
+            await pilot.press("t")
+            assert app.mode == "active"
+            assert len(app.active_lessons) == 2
+
+            # Discard first active lesson
+            app.action_discard()
+            assert len(app.active_lessons) == 1
+            assert app.active_lessons[0]["id"] == "lesson-active-02"
+
+            with MemoryStore(db_path) as store:
+                active_db = store.list_lessons()
+                assert len(active_db) == 1
+                assert active_db[0]["id"] == "lesson-active-02"
+
+            # Check lessons.md is synced
+            content = open(lessons_md, encoding="utf-8").read()
+            assert "lesson-active-01" not in content
+            assert "lesson-active-02" in content
+
+            # Check wiki index is compiled
+            index_path = os.path.join(wiki_dir, "index.md")
+            assert os.path.exists(index_path)
+            index_content = open(index_path, encoding="utf-8").read()
+            assert "lesson-active-01" not in index_content
+            assert "lesson-active-02" in index_content
+
+    asyncio.run(_run())
+
+
+def test_lessons_tui_active_mode_modify(temp_env):
+    """Test modifying an active lesson in active mode updates db, lessons.md, and wiki."""
+    db_path, lessons_md, wiki_dir = temp_env
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-active-mod-01",
+            "rule": "Original rule text.",
+            "category": "Defensive Bash Scripting",
+            "keywords": ["original"],
+            "source_task": "test.md",
+        })
+        lessons = store.list_lessons()
+        from mcp_core.lessons_writer import write_all_lessons_to_markdown
+        write_all_lessons_to_markdown(lessons, lessons_md)
+
+    async def _run():
+        app = LessonsReviewApp(db_path=db_path, lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            # Switch to active mode via tab key press
+            await pilot.press("tab")
+            assert app.mode == "active"
+
+            # Trigger modify action
+            app.action_modify()
+            await pilot.pause()
+
+            # Find modal and submit edits
+            modal = app.screen
+            assert isinstance(modal, EditLessonModal)
+            rule_input = modal.query_one("#rule-input")
+            rule_input.text = "Updated robust rule text."
+            modal.action_save()
+            await pilot.pause()
+
+            # Verify store updated
+            with MemoryStore(db_path) as store:
+                updated = store.get_lesson("lesson-active-mod-01")
+                assert updated is not None
+                assert updated["rule"] == "Updated robust rule text."
+
+            # Verify lessons.md updated
+            content = open(lessons_md, encoding="utf-8").read()
+            assert "Updated robust rule text." in content
+            assert "Original rule text." not in content
+
+            # Verify wiki updated
+            index_path = os.path.join(wiki_dir, "index.md")
+            assert os.path.exists(index_path)
+            index_content = open(index_path, encoding="utf-8").read()
+            assert "Updated robust rule text" in index_content
+
+    asyncio.run(_run())
+
+
+def test_lessons_tui_active_mode_delete_preserves_cursor_position(temp_env):
+    """Test deleting an active lesson when not at top preserves cursor position instead of jumping to 0."""
+    db_path, lessons_md, wiki_dir = temp_env
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "lesson-act-00",
+            "rule": "First rule text.",
+            "category": "Testing",
+            "keywords": ["test0"],
+        })
+        store.insert_lesson({
+            "id": "lesson-act-01",
+            "rule": "Second rule text to delete.",
+            "category": "Testing",
+            "keywords": ["test1"],
+        })
+        store.insert_lesson({
+            "id": "lesson-act-02",
+            "rule": "Third rule text that should become highlighted.",
+            "category": "Testing",
+            "keywords": ["test2"],
+        })
+        from mcp_core.lessons_writer import write_all_lessons_to_markdown
+        write_all_lessons_to_markdown(store.list_lessons(), lessons_md)
+
+    async def _run():
+        app = LessonsReviewApp(db_path=db_path, lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            # Switch to active mode
+            await pilot.press("t")
+            assert app.mode == "active"
+            assert len(app.active_lessons) == 3
+
+            list_view = app.query_one("#lesson-list", LessonListView)
+            detail_view = app.query_one("#lesson-detail", LessonDetailView)
+
+            # Move cursor to index 1 (second item)
+            list_view.index = 1
+            await pilot.pause()
+            assert list_view.index == 1
+            assert list_view.get_selected_lesson()["id"] == "lesson-act-01"
+            assert detail_view.lesson["id"] == "lesson-act-01"
+
+            # Delete the second item
+            app.action_discard()
+            await pilot.pause()
+
+            # Cursor must remain at index 1 (pointing to lesson-act-02), NOT reset to 0
+            assert len(app.active_lessons) == 2
+            assert list_view.index == 1
+            assert list_view.get_selected_lesson()["id"] == "lesson-act-02"
+            assert detail_view.lesson["id"] == "lesson-act-02"
+
+            with MemoryStore(db_path) as store:
+                remaining_ids = [l["id"] for l in store.list_lessons()]
+                assert remaining_ids == ["lesson-act-00", "lesson-act-02"]
+
+    asyncio.run(_run())
+

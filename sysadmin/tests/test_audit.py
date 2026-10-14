@@ -106,6 +106,57 @@ def test_flag_lesson_at_exact_threshold_boundary():
     assert abs(flagged[0]["prevention_ratio"] - 0.2) < 1e-9
 
 
+def test_flag_lesson_consistently_ineffective():
+    lessons = [_lesson("l1", ["bash"], retrieval_count=2, prevented_rework_count=0, ineffective_count=3)]
+    flagged = flag_low_utility(lessons)
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "consistently_ineffective"
+    assert "consistently_ineffective" in flagged[0]["flag_reasons"]
+
+
+def test_flag_lesson_decay_never_retrieved():
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-01")]
+    flagged = flag_low_utility(lessons, reference_date=date(2026, 9, 30))
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "never_retrieved"
+    assert "never_retrieved" in flagged[0]["flag_reasons"]
+
+
+def test_flag_lesson_decay_recent_not_flagged():
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-09-20")]
+    flagged = flag_low_utility(lessons, reference_date=date(2026, 9, 30))
+    assert flagged == []
+
+
+def test_flag_lesson_decay_inactivity_padding_prevents_premature_decay():
+    """A 41-day-old lesson is spared decay if the pipeline was inactive for 20 days (only 21 active days)."""
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-20")]
+    # Calendar age: 41 days. Hiatus: 20 days (since Sep 10). Effective threshold: 30 + 20 = 50 days.
+    flagged = flag_low_utility(
+        lessons,
+        reference_date=date(2026, 9, 30),
+        latest_run_date=date(2026, 9, 10),
+    )
+    assert flagged == []
+
+
+def test_flag_lesson_decay_inactivity_padding_expires_when_active_history_exceeds_threshold():
+    """A 60-day-old lesson decays even with 20 days of hiatus because active history was 40 days (>= 30)."""
+    from datetime import date
+    lessons = [_lesson("l1", ["bash"], retrieval_count=0, created="2026-08-01")]
+    # Calendar age: 60 days. Hiatus: 20 days. Effective threshold: 50 days. 60 >= 50 -> flagged.
+    flagged = flag_low_utility(
+        lessons,
+        reference_date=date(2026, 9, 30),
+        latest_run_date=date(2026, 9, 10),
+    )
+    assert len(flagged) == 1
+    assert flagged[0]["flag_reason"] == "never_retrieved"
+
+
 # --- normalize_category (Phase 6.10) ---
 
 from mcp_core.audit import normalize_category
@@ -206,5 +257,50 @@ def test_add_taxonomy_domain_dynamic(tmp_path):
         data = json.load(f)
     assert "Docker & Containers" in data["taxonomies"]
     assert data["aliases"]["dockerization"] == "Docker & Containers"
+
+
+# --- cluster_lessons_by_similarity ---
+
+def test_cluster_lessons_by_similarity_groups_near_duplicates():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    lessons = [
+        {"id": "l1", "category": "Defensive Bash Scripting", "keywords": ["bash", "quotes"], "rule": "Always quote variables to prevent word splitting."},
+        {"id": "l2", "category": "ShellCheck", "keywords": ["shellcheck", "quoting"], "rule": "Always quote variables to avoid word splitting."},
+        {"id": "l3", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "always quote variables to prevent word splitting"},
+        {"id": "l4", "category": "Defensive Bash Scripting", "keywords": ["trap"], "rule": "Set up an error trap on ERR signal."},
+    ]
+    clusters = cluster_lessons_by_similarity(lessons, min_cluster_size=2)
+    assert len(clusters) == 1
+    assert clusters[0]["count"] == 3
+    assert set(clusters[0]["lesson_ids"]) == {"l1", "l2", "l3"}
+    # Category is the most common among cluster members
+    assert clusters[0]["category"] == "Defensive Bash Scripting"
+
+
+def test_cluster_lessons_by_similarity_does_not_cluster_dissimilar_same_category():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    lessons = [
+        {"id": "l1", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "Always quote variables to prevent word splitting."},
+        {"id": "l2", "category": "Defensive Bash Scripting", "keywords": ["bash"], "rule": "Deterministic resolution of binary paths in virtualenvs."},
+    ]
+    # Dissimilar rules in same category should NOT cluster under similarity clustering
+    clusters = cluster_lessons_by_similarity(lessons, min_cluster_size=2)
+    assert len(clusters) == 0
+
+
+def test_cluster_lessons_by_similarity_handles_proposed_rule():
+    from mcp_core.audit import cluster_lessons_by_similarity
+
+    pending = [
+        {"id": "p1", "category": "ShellCheck", "keywords": ["sc2086"], "proposed_rule": "Double quote to prevent globbing and word splitting."},
+        {"id": "p2", "category": "ShellCheck", "keywords": ["quoting"], "proposed_rule": "Double quote to prevent globbing and word splitting!"},
+    ]
+    clusters = cluster_lessons_by_similarity(pending, min_cluster_size=2)
+    assert len(clusters) == 1
+    assert clusters[0]["count"] == 2
+    assert set(clusters[0]["lesson_ids"]) == {"p1", "p2"}
+
 
 

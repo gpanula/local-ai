@@ -11,7 +11,13 @@ from __future__ import annotations
 import json
 import os
 
-from mcp_core.audit import cluster_lessons, flag_low_utility, is_canonical_category, normalize_category
+from mcp_core.audit import (
+    cluster_lessons,
+    cluster_lessons_by_similarity,
+    flag_low_utility,
+    is_canonical_category,
+    normalize_category,
+)
 from mcp_core.lesson_linter import lint_all_lessons, lint_lesson
 from mcp_core.lessons_writer import append_lesson_to_markdown, write_all_lessons_to_markdown
 from mcp_core.memory import MemoryStore
@@ -186,13 +192,17 @@ class ReviewLessonsCommand(BaseCommand):
                         skipped_violating_count += 1
                         continue
 
-                    lesson_id = store.promote_pending_lesson(item["id"])
+                    res = store.promote_pending_lesson(item["id"])
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         promoted_count += 1
-                        print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
+                        if is_new:
+                            print(f"  ✅ Kept lesson {lesson_id} ({item.get('id')})")
+                        else:
+                            print(f"  🔄 Reinforced active lesson {lesson_id} from {item.get('id')}")
                 print("\n" + "=" * 60)
                 summary_line = f"Summary — Automatically Kept: {promoted_count} | Total: {len(pending)}"
                 if skipped_violating_count > 0:
@@ -232,25 +242,33 @@ class ReviewLessonsCommand(BaseCommand):
                 action = _prompt_action()
 
                 if action == "k":
-                    lesson_id = store.promote_pending_lesson(item["id"])
+                    res = store.promote_pending_lesson(item["id"])
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         counts["kept"] += 1
-                        print(f"  ✅ Kept lesson {lesson_id} and appended to lessons.md")
+                        if is_new:
+                            print(f"  ✅ Kept lesson {lesson_id} and appended to lessons.md")
+                        else:
+                            print(f"  🔄 Reinforced active lesson {lesson_id} (already in lessons.md)")
                     else:
                         print("  ⚠️  Could not promote lesson (already removed?)")
 
                 elif action == "m":
                     edits = _prompt_modify(item)
-                    lesson_id = store.promote_pending_lesson(item["id"], edits=edits)
+                    res = store.promote_pending_lesson(item["id"], edits=edits)
+                    lesson_id, is_new = res if isinstance(res, tuple) else (res, True)
                     if lesson_id:
                         promoted = store.get_lesson(lesson_id)
-                        if promoted:
+                        if promoted and is_new:
                             append_lesson_to_markdown(promoted, lessons_md_path)
                         counts["modified"] += 1
-                        print(f"  ✏️  Modified and kept lesson {lesson_id}")
+                        if is_new:
+                            print(f"  ✏️  Modified and kept lesson {lesson_id}")
+                        else:
+                            print(f"  🔄 Modified and reinforced active lesson {lesson_id}")
                     else:
                         print("  ⚠️  Could not promote lesson (already removed?)")
 
@@ -345,7 +363,11 @@ class AuditLessonsCommand(BaseCommand):
                 return
 
             clusters = cluster_lessons(lessons, min_cluster_size=args.min_cluster_size)
-            low_utility = flag_low_utility(lessons, min_retrievals=args.min_retrievals)
+            low_utility = flag_low_utility(
+                lessons,
+                min_retrievals=args.min_retrievals,
+                latest_run_date=store.get_latest_pipeline_run_date(),
+            )
             violations = lint_all_lessons(lessons)
 
             if violations:
@@ -566,6 +588,11 @@ class CompactLessonsCommand(BaseCommand):
             help="Preview proposed consolidations without writing changes",
         )
         parser.add_argument(
+            "--retire-sunsets",
+            action="store_true",
+            help="Retire eligible sunset candidates (low utility, never retrieved, ineffective)",
+        )
+        parser.add_argument(
             "--min-cluster-size",
             type=int,
             default=2,
@@ -602,13 +629,18 @@ class CompactLessonsCommand(BaseCommand):
         if use_tui is None:
             use_tui = (not getattr(args, "plain", False)) and sys.stdin.isatty()
 
-        # Handle TUI mode when requested or running queue compaction interactively in TTY
-        is_queue_compaction = getattr(args, "queue_only", False) or getattr(args, "tui", False)
-        if use_tui and is_queue_compaction and not getattr(args, "auto", False) and not getattr(args, "dry_run", False):
+        # Handle TUI mode when requested or running compaction interactively in TTY
+        if use_tui and not getattr(args, "auto", False) and not getattr(args, "dry_run", False):
             try:
-                from lessons_tui.compact_app import launch_compact_queue_tui
+                from lessons_tui.compact_app import launch_compact_tui
 
-                launch_compact_queue_tui(min_cluster_size=args.min_cluster_size)
+                initial_mode = "active" if getattr(args, "active_only", False) else "pending"
+                launch_compact_tui(
+                    min_cluster_size=args.min_cluster_size,
+                    mode=initial_mode,
+                    lessons_md=args.lessons_md,
+                    wiki_dir=getattr(args, "wiki_dir", DEFAULT_WIKI_DIR),
+                )
                 return
             except Exception as e:
                 print(f"⚠️  TUI launch failed ({e}), falling back to text interface...")
@@ -629,6 +661,27 @@ class CompactLessonsCommand(BaseCommand):
             if do_active:
                 self._compact_active(store, args)
 
+            # --- 3. Report or Retire Sunset Candidates ---
+            if args.dry_run:
+                active_list = store.list_lessons()
+                sunset_candidates = flag_low_utility(
+                    active_list,
+                    latest_run_date=store.get_latest_pipeline_run_date(),
+                )
+                if sunset_candidates:
+                    print("\n" + "=" * 60)
+                    action_note = " (Dry Run: Would be retired with --retire-sunsets)" if getattr(args, "retire_sunsets", False) else ""
+                    print(f"🌅 [Sunset Candidates] Found {len(sunset_candidates)} active lesson(s) eligible for retirement:{action_note}")
+                    print("=" * 60)
+                    for sc in sunset_candidates:
+                        reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
+                        reason_str = ", ".join(reasons)
+                        print(f"  🔻 [{sc['id']}] Category: {sc.get('category', 'unknown')} | Reason: {reason_str}")
+                        print(f"     Rule: {sc.get('rule', '')}")
+                        print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
+            elif getattr(args, "retire_sunsets", False):
+                self._retire_sunset_candidates(store, args)
+
     def _compact_pending(self, store: MemoryStore, args) -> None:
         pending_list = store.list_pending_lessons()
         if not pending_list:
@@ -642,7 +695,7 @@ class CompactLessonsCommand(BaseCommand):
             mapped["rule"] = p.get("proposed_rule", "")
             mapped_pending.append(mapped)
 
-        clusters = cluster_lessons(mapped_pending, min_cluster_size=args.min_cluster_size)
+        clusters = cluster_lessons_by_similarity(mapped_pending, min_cluster_size=args.min_cluster_size)
         print(f"\n📋 Pending Queue: Found {len(clusters)} compaction candidate cluster(s) from {len(pending_list)} pending lessons.")
 
         for idx, cluster in enumerate(clusters, start=1):
@@ -699,7 +752,7 @@ class CompactLessonsCommand(BaseCommand):
             print("\n📚 Active Lessons: No active lessons to compact.")
             return
 
-        clusters = cluster_lessons(active_list, min_cluster_size=args.min_cluster_size)
+        clusters = cluster_lessons_by_similarity(active_list, min_cluster_size=args.min_cluster_size)
         print(f"\n📚 Active Lessons: Found {len(clusters)} compaction candidate cluster(s) from {len(active_list)} active lessons.")
 
         modified = False
@@ -717,6 +770,7 @@ class CompactLessonsCommand(BaseCommand):
             total_retrievals = sum(int(l.get("retrieval_count", 0)) for l in member_objs)
             total_prevented = sum(int(l.get("prevented_rework_count", 0)) for l in member_objs)
             total_ineffective = sum(int(l.get("ineffective_count", 0)) for l in member_objs)
+            total_reinforcements = sum(int(l.get("reinforcement_count", 0)) for l in member_objs)
 
             print("-" * 60)
             print(f"📦 [Active Cluster {idx}/{len(clusters)}] {len(member_objs)} items -> {member_ids}")
@@ -750,6 +804,8 @@ class CompactLessonsCommand(BaseCommand):
                 "retrieval_count": total_retrievals,
                 "prevented_rework_count": total_prevented,
                 "ineffective_count": total_ineffective,
+                "reinforcement_count": total_reinforcements,
+                "embeddings": None,
             })
             for other_id in member_ids[1:]:
                 store.delete_lesson(other_id)
@@ -779,6 +835,61 @@ class CompactLessonsCommand(BaseCommand):
                         }
                     ],
                     log_path,
+                )
+                print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
+
+    def _retire_sunset_candidates(self, store: MemoryStore, args) -> None:
+        active_list = store.list_lessons()
+        sunset_candidates = flag_low_utility(
+            active_list,
+            latest_run_date=store.get_latest_pipeline_run_date(),
+        )
+        if not sunset_candidates:
+            print("\n🌅 [Sunset Candidates] No active lessons currently eligible for retirement.")
+            return
+
+        print("\n" + "=" * 60)
+        print(f"🌅 [Sunset Candidates] Processing {len(sunset_candidates)} candidate(s) for retirement:")
+        print("=" * 60)
+
+        retired_count = 0
+        for sc in sunset_candidates:
+            lid = sc["id"]
+            reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
+            reason_str = ", ".join(reasons)
+            print(f"\n  🔻 [{lid}] Category: {sc.get('category', 'unknown')} | Reason: {reason_str}")
+            print(f"     Rule: {sc.get('rule', '')}")
+            print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
+
+            if not getattr(args, "auto", False):
+                choice = input("     [r] Retire / Delete  [s] Skip  →  ").strip().lower()
+                if choice != "r":
+                    print(f"     ⏭️ Skipped '{lid}'.")
+                    continue
+
+            store.delete_lesson(lid)
+            retired_count += 1
+            print(f"     🗑️ Retired lesson '{lid}'.")
+
+        if retired_count > 0:
+            updated_lessons = store.list_lessons()
+            write_all_lessons_to_markdown(updated_lessons, args.lessons_md)
+            print(f"\n📝 Re-synced {args.lessons_md} after retiring {retired_count} sunset lesson(s) ({len(updated_lessons)} remaining).")
+
+            wiki_dir = getattr(args, "wiki_dir", DEFAULT_WIKI_DIR)
+            if wiki_dir:
+                os.makedirs(wiki_dir, exist_ok=True)
+                generate_index(updated_lessons, os.path.join(wiki_dir, "index.md"))
+                generate_dashboard(updated_lessons, os.path.join(wiki_dir, "dashboard.md"))
+                from datetime import datetime, timezone
+                generate_log(
+                    [
+                        {
+                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                            "message": f"Wiki re-compiled after retiring {retired_count} sunset lesson(s).",
+                        }
+                    ],
+                    os.path.join(wiki_dir, "log.md"),
                 )
                 print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
 

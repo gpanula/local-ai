@@ -30,12 +30,40 @@ class ClusterItemWidget(ListItem):
         super().__init__(**kwargs)
         self.cluster = cluster
 
-    def compose(self) -> ComposeResult:
+    def _build_text(self) -> Text:
         idx = self.cluster.get("cluster_idx", 1)
         cat = self.cluster.get("category", "General")
         status = self.cluster.get("status", "pending")
         members = self.cluster.get("member_objs", [])
         merged_rule = self.cluster.get("merged_rule", "")
+
+        # Support sunset candidate rendering
+        if self.cluster.get("is_sunset"):
+            reasons = ", ".join(self.cluster.get("flag_reasons", ["sunset"]))
+            primary_id = self.cluster.get("primary_id", f"sunset-{idx}")
+            if status in ("compacted", "discarded", "retired"):
+                status_badge = "[RETIRED]"
+                badge_style = "red bold"
+                status_icon = "🌅"
+            elif status == "skipped":
+                status_badge = "[KEPT]"
+                badge_style = "dim cyan"
+                status_icon = "⏭️"
+            else:
+                status_badge = "[SUNSET]"
+                badge_style = "bright_magenta bold"
+                status_icon = "🔻"
+
+            text = Text()
+            text.append(f"{status_icon} ")
+            text.append(f"{status_badge} ", style=badge_style)
+            text.append(f"{primary_id} ", style="bold white")
+            text.append(f"({reasons}) ", style="bold red")
+            text.append(f"[{cat}]", style="dim cyan")
+            if merged_rule:
+                preview = merged_rule[:45] + "..." if len(merged_rule) > 45 else merged_rule
+                text.append(f"\n   ↳ {preview}", style="dim")
+            return text
 
         # Status badge & icon
         if status == "compacted":
@@ -65,7 +93,18 @@ class ClusterItemWidget(ListItem):
             preview = merged_rule[:45] + "..." if len(merged_rule) > 45 else merged_rule
             text.append(f"\n   ↳ {preview}", style="dim")
 
-        yield Static(text)
+        return text
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._build_text(), id="cluster-label")
+
+    def update_content(self) -> None:
+        """Refresh this item's visual representation without recreating the widget."""
+        try:
+            static = self.query_one("#cluster-label", Static)
+            static.update(self._build_text())
+        except Exception:
+            pass
 
 
 class ClusterListView(ListView):
@@ -91,13 +130,23 @@ class ClusterListView(ListView):
         super().__init__(**kwargs)
         self.clusters: List[Dict[str, Any]] = []
 
-    def set_clusters(self, clusters: List[Dict[str, Any]]) -> None:
+    def set_clusters(self, clusters: List[Dict[str, Any]], keep_index: Optional[int] = None) -> None:
         """Populate the list with given clusters."""
         self.clusters = clusters
         self.clear()
 
         for c in self.clusters:
             self.append(ClusterItemWidget(c))
+
+        if clusters:
+            target_idx = keep_index if (keep_index is not None and 0 <= keep_index < len(clusters)) else 0
+            self.index = target_idx
+
+    def refresh_items(self) -> None:
+        """Update existing item widgets in place without clearing the list or resetting selection."""
+        for child in self.children:
+            if isinstance(child, ClusterItemWidget):
+                child.update_content()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.item and isinstance(event.item, ClusterItemWidget):
