@@ -588,6 +588,11 @@ class CompactLessonsCommand(BaseCommand):
             help="Preview proposed consolidations without writing changes",
         )
         parser.add_argument(
+            "--retire-sunsets",
+            action="store_true",
+            help="Retire eligible sunset candidates (low utility, never retrieved, ineffective)",
+        )
+        parser.add_argument(
             "--min-cluster-size",
             type=int,
             default=2,
@@ -656,7 +661,7 @@ class CompactLessonsCommand(BaseCommand):
             if do_active:
                 self._compact_active(store, args)
 
-            # --- 3. Report Sunset Candidates in Dry-Run ---
+            # --- 3. Report or Retire Sunset Candidates ---
             if args.dry_run:
                 active_list = store.list_lessons()
                 sunset_candidates = flag_low_utility(
@@ -665,7 +670,8 @@ class CompactLessonsCommand(BaseCommand):
                 )
                 if sunset_candidates:
                     print("\n" + "=" * 60)
-                    print(f"🌅 [Sunset Candidates] Found {len(sunset_candidates)} active lesson(s) eligible for retirement:")
+                    action_note = " (Dry Run: Would be retired with --retire-sunsets)" if getattr(args, "retire_sunsets", False) else ""
+                    print(f"🌅 [Sunset Candidates] Found {len(sunset_candidates)} active lesson(s) eligible for retirement:{action_note}")
                     print("=" * 60)
                     for sc in sunset_candidates:
                         reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
@@ -673,6 +679,8 @@ class CompactLessonsCommand(BaseCommand):
                         print(f"  🔻 [{sc['id']}] Category: {sc.get('category', 'unknown')} | Reason: {reason_str}")
                         print(f"     Rule: {sc.get('rule', '')}")
                         print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
+            elif getattr(args, "retire_sunsets", False):
+                self._retire_sunset_candidates(store, args)
 
     def _compact_pending(self, store: MemoryStore, args) -> None:
         pending_list = store.list_pending_lessons()
@@ -827,6 +835,61 @@ class CompactLessonsCommand(BaseCommand):
                         }
                     ],
                     log_path,
+                )
+                print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
+
+    def _retire_sunset_candidates(self, store: MemoryStore, args) -> None:
+        active_list = store.list_lessons()
+        sunset_candidates = flag_low_utility(
+            active_list,
+            latest_run_date=store.get_latest_pipeline_run_date(),
+        )
+        if not sunset_candidates:
+            print("\n🌅 [Sunset Candidates] No active lessons currently eligible for retirement.")
+            return
+
+        print("\n" + "=" * 60)
+        print(f"🌅 [Sunset Candidates] Processing {len(sunset_candidates)} candidate(s) for retirement:")
+        print("=" * 60)
+
+        retired_count = 0
+        for sc in sunset_candidates:
+            lid = sc["id"]
+            reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
+            reason_str = ", ".join(reasons)
+            print(f"\n  🔻 [{lid}] Category: {sc.get('category', 'unknown')} | Reason: {reason_str}")
+            print(f"     Rule: {sc.get('rule', '')}")
+            print(f"     Telemetry: {sc.get('retrieval_count', 0)} retrievals, {sc.get('prevented_rework_count', 0)} prevented, {sc.get('ineffective_count', 0)} ineffective")
+
+            if not getattr(args, "auto", False):
+                choice = input("     [r] Retire / Delete  [s] Skip  →  ").strip().lower()
+                if choice != "r":
+                    print(f"     ⏭️ Skipped '{lid}'.")
+                    continue
+
+            store.delete_lesson(lid)
+            retired_count += 1
+            print(f"     🗑️ Retired lesson '{lid}'.")
+
+        if retired_count > 0:
+            updated_lessons = store.list_lessons()
+            write_all_lessons_to_markdown(updated_lessons, args.lessons_md)
+            print(f"\n📝 Re-synced {args.lessons_md} after retiring {retired_count} sunset lesson(s) ({len(updated_lessons)} remaining).")
+
+            wiki_dir = getattr(args, "wiki_dir", DEFAULT_WIKI_DIR)
+            if wiki_dir:
+                os.makedirs(wiki_dir, exist_ok=True)
+                generate_index(updated_lessons, os.path.join(wiki_dir, "index.md"))
+                generate_dashboard(updated_lessons, os.path.join(wiki_dir, "dashboard.md"))
+                from datetime import datetime, timezone
+                generate_log(
+                    [
+                        {
+                            "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                            "message": f"Wiki re-compiled after retiring {retired_count} sunset lesson(s).",
+                        }
+                    ],
+                    os.path.join(wiki_dir, "log.md"),
                 )
                 print(f"📚 Wiki re-compiled: index.md ({len(updated_lessons)} lessons), dashboard.md, log.md")
 

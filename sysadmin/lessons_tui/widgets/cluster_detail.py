@@ -98,6 +98,57 @@ class ClusterDetailView(VerticalScroll):
         merged_rule = cluster.get("merged_rule", "")
         primary_id = cluster.get("primary_id", members[0]["id"] if members else "unknown")
 
+        if cluster.get("is_sunset"):
+            reasons = ", ".join(cluster.get("flag_reasons", ["sunset"]))
+            header_text = Text()
+            header_text.append(f"🌅 Sunset Candidate #{idx}: ", style="bold white")
+            header_text.append(f"{primary_id} ", style="bold magenta")
+            header_text.append(f"in Category: '{cat}'", style="cyan")
+            header_widget.update(Panel(header_text, style="magenta"))
+
+            status_styles = {
+                "pending": ("⏳ ELIGIBLE FOR RETIREMENT - Press [x] or [c] to Retire / Delete, [s] to Keep", "yellow bold"),
+                "compacted": ("🌅 RETIRED & PRUNED FROM MEMORY", "red bold"),
+                "retired": ("🌅 RETIRED & PRUNED FROM MEMORY", "red bold"),
+                "skipped": ("⏭️ KEPT (Suppressed warning)", "dim cyan"),
+                "discarded": ("🌅 RETIRED & PRUNED FROM MEMORY", "red bold"),
+            }
+            status_msg, status_style = status_styles.get(status, (status.upper(), "white"))
+
+            meta_text = Text()
+            meta_text.append(f"Status: {status_msg}\n", style=status_style)
+            meta_text.append("🔻 Retirement Reason: ", style="bold red")
+            meta_text.append(f"{reasons}\n", style="bold yellow")
+            retrievals = cluster.get("total_retrievals", 0)
+            prevented = cluster.get("total_prevented", 0)
+            ineffective = cluster.get("total_ineffective", 0)
+            meta_text.append(f"📊 Telemetry: {retrievals} retrievals, {prevented} prevented, {ineffective} ineffective\n", style="dim")
+            meta_text.append(f"🏷️ Keywords: {', '.join(keywords) if keywords else 'none'}", style="dim cyan")
+            meta_widget.update(meta_text)
+
+            rule_panel = Panel(
+                Text(merged_rule, style="bold white"),
+                title=f"Rule Content: {primary_id}",
+                border_style="magenta",
+            )
+            rule_widget.update(rule_panel)
+
+            violations = lint_lesson({"id": primary_id, "rule": merged_rule})
+            if not violations:
+                lint_text = Text("✅ Rule passes linter check.", style="green")
+            else:
+                lint_text = Text(f"🚨 {len(violations)} Safety/Quality Warning(s):\n", style="red bold")
+                for v in violations:
+                    lint_text.append(f"  • [{v.suite}/{v.rule_name}]: {v.message}\n", style="yellow")
+            linter_widget.update(Panel(lint_text, title="Linter Diagnostic", border_style="dim"))
+
+            members_widget.update(Panel(
+                Text(f"Target Lesson ID: {primary_id}\nFlagged because this lesson has demonstrated low utility or zero retrievals over time.\nRetiring this lesson will remove it from the runtime database and lessons.md.", style="dim italic"),
+                title="Retirement Rationale",
+                border_style="dim",
+            ))
+            return
+
         # 1. Header
         header_text = Text()
         header_text.append(f"📦 Compaction Cluster #{idx}: ", style="bold white")

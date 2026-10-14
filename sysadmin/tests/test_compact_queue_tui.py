@@ -396,12 +396,53 @@ def test_compact_tui_tab_switching(tmp_path):
             assert len(app.clusters) == 1
             assert app.clusters[0]["primary_id"] == "a-tab-01"
 
-            # Switch back via 'tab' key
+            # Switch to sunset via 't' key
+            await pilot.press("t")
+            assert app.mode == "sunset"
+
+            # Switch back to pending via 'tab' key
             await pilot.press("tab")
             assert app.mode == "pending"
             assert app.clusters[0]["primary_id"] == "p-tab-01"
 
     asyncio.run(_run())
+
+
+def test_compact_tui_sunset_retirement(tmp_path):
+    """Verify retiring a sunset candidate in the TUI via the 'x' key."""
+    db_path = str(tmp_path / "memory.db")
+    lessons_md = str(tmp_path / "lessons.md")
+    wiki_dir = str(tmp_path / "wiki")
+
+    with MemoryStore(db_path) as store:
+        store.insert_lesson({
+            "id": "sunset-tab-01",
+            "rule": "Obsolete pattern that is constantly ineffective.",
+            "category": "Testing",
+            "keywords": ["pytest"],
+            "retrieval_count": 2,
+            "prevented_rework_count": 0,
+            "ineffective_count": 10,
+        })
+
+    async def _run():
+        app = CompactQueueApp(db_path=db_path, min_cluster_size=2, mode="sunset", lessons_md=lessons_md, wiki_dir=wiki_dir)
+        async with app.run_test() as pilot:
+            assert app.mode == "sunset"
+            assert len(app.clusters) == 1
+            assert app.clusters[0]["primary_id"] == "sunset-tab-01"
+            assert app.clusters[0]["status"] == "pending"
+
+            # Retire sunset candidate via 'x' key
+            await pilot.press("x")
+            assert app.clusters[0]["status"] == "retired"
+
+    asyncio.run(_run())
+
+    # Verify lesson was deleted from database
+    with MemoryStore(db_path) as store:
+        assert len(store.list_lessons()) == 0
+
 
 
 def test_compact_queue_tui_cursor_advance_no_skip(temp_db):

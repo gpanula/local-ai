@@ -37,6 +37,34 @@ class ClusterItemWidget(ListItem):
         members = self.cluster.get("member_objs", [])
         merged_rule = self.cluster.get("merged_rule", "")
 
+        # Support sunset candidate rendering
+        if self.cluster.get("is_sunset"):
+            reasons = ", ".join(self.cluster.get("flag_reasons", ["sunset"]))
+            primary_id = self.cluster.get("primary_id", f"sunset-{idx}")
+            if status in ("compacted", "discarded", "retired"):
+                status_badge = "[RETIRED]"
+                badge_style = "red bold"
+                status_icon = "🌅"
+            elif status == "skipped":
+                status_badge = "[KEPT]"
+                badge_style = "dim cyan"
+                status_icon = "⏭️"
+            else:
+                status_badge = "[SUNSET]"
+                badge_style = "bright_magenta bold"
+                status_icon = "🔻"
+
+            text = Text()
+            text.append(f"{status_icon} ")
+            text.append(f"{status_badge} ", style=badge_style)
+            text.append(f"{primary_id} ", style="bold white")
+            text.append(f"({reasons}) ", style="bold red")
+            text.append(f"[{cat}]", style="dim cyan")
+            if merged_rule:
+                preview = merged_rule[:45] + "..." if len(merged_rule) > 45 else merged_rule
+                text.append(f"\n   ↳ {preview}", style="dim")
+            return text
+
         # Status badge & icon
         if status == "compacted":
             status_badge = "[MERGED]"

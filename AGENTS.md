@@ -1,5 +1,13 @@
 # Agent Workspace Rules
 
+## ⚡ Priority 0: Instant Dispatch Triggers (Zero Pre-Flight Inspection)
+When any trigger keyword matches, the FIRST action MUST be the specified tool call.
+⛔ **HARD INTERRUPT**: Do NOT view schemas, do NOT list directories, do NOT inspect prompt or server files before dispatching.
+
+| Trigger Keywords | Mandatory Action | Canonical Call Template | Prohibited Pre-Actions |
+|---|---|---|---|
+| `"run pipeline"`, `"delegate"`, `"test local ai"` | Immediate pipeline launch | `call_mcp_tool('local-ollama', 'run_pipeline', {"prompt": "<path>", "async_run": True})` | `view_file`, `list_dir`, `grep_search` |
+
 ## 1. Git & Workflow
 - **No `main` commits**: Use branch prefixes `feat/`, `fix/`, `docs/`, `exp/`. Open PR for human review.
 - **Gitmoji commits**: Format `<gitmoji> [scope]: <desc>`. Check `CONTRIBUTING.md` / gitmoji.dev.

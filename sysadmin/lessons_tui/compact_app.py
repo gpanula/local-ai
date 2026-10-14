@@ -19,7 +19,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, Static
 
-from mcp_core.audit import cluster_lessons_by_similarity
+from mcp_core.audit import cluster_lessons_by_similarity, flag_low_utility
 from mcp_core.lessons_writer import write_all_lessons_to_markdown
 from mcp_core.memory import DEFAULT_DB_PATH, MemoryStore
 from mcp_core.wiki import generate_dashboard, generate_index, generate_log
@@ -103,6 +103,7 @@ class CompactQueueApp(App):
         Binding("tab", "switch_tab", "Switch Tab", priority=True),
         Binding("t", "switch_tab", "Toggle View", priority=True),
         Binding("c", "compact", "Compact/Merge"),
+        Binding("x", "retire_sunset", "Retire Sunset"),
         Binding("m", "modify", "Modify & Merge"),
         Binding("s", "skip", "Skip"),
         Binding("d", "discard", "Discard Cluster"),
@@ -127,6 +128,7 @@ class CompactQueueApp(App):
         self.wiki_dir = wiki_dir
         self.pending_clusters: List[Dict[str, Any]] = []
         self.active_clusters: List[Dict[str, Any]] = []
+        self.sunset_candidates: List[Dict[str, Any]] = []
         self.clusters: List[Dict[str, Any]] = []
         self.selected_cluster: Optional[Dict[str, Any]] = None
         self._reload_clusters_from_db()
@@ -258,7 +260,49 @@ class CompactQueueApp(App):
                     "status": "pending",
                 })
 
-        self.clusters = self.pending_clusters if self.mode == "pending" else self.active_clusters
+        # 3. Build sunset candidates
+        self.sunset_candidates = []
+        if active_list:
+            try:
+                with MemoryStore(self.db_path) as store:
+                    latest_run_date = store.get_latest_pipeline_run_date()
+            except Exception:
+                latest_run_date = None
+            raw_sunsets = flag_low_utility(active_list, latest_run_date=latest_run_date)
+            for idx, sc in enumerate(raw_sunsets, start=1):
+                reasons = sc.get("flag_reasons", [sc.get("flag_reason", "unknown")])
+                kws = sc.get("keywords", [])
+                if isinstance(kws, str):
+                    try:
+                        kws = json.loads(kws)
+                    except Exception:
+                        kws = [kws]
+                self.sunset_candidates.append({
+                    "cluster_idx": idx,
+                    "category": sc.get("category", "General"),
+                    "keywords": kws,
+                    "member_ids": [sc["id"]],
+                    "member_objs": [sc],
+                    "best_rule": sc.get("rule", ""),
+                    "merged_rule": sc.get("rule", ""),
+                    "merged_critiques": f"Sunset candidate. Reason: {', '.join(reasons)}",
+                    "primary_id": sc["id"],
+                    "total_retrievals": sc.get("retrieval_count", 0),
+                    "total_prevented": sc.get("prevented_rework_count", 0),
+                    "total_ineffective": sc.get("ineffective_count", 0),
+                    "total_reinforcements": sc.get("reinforcement_count", 0),
+                    "is_sunset": True,
+                    "flag_reasons": reasons,
+                    "status": "pending",
+                })
+
+        if self.mode == "pending":
+            self.clusters = self.pending_clusters
+        elif self.mode == "active":
+            self.clusters = self.active_clusters
+        else:
+            self.clusters = self.sunset_candidates
+
         if self.clusters:
             self.selected_cluster = self.clusters[0]
         else:
@@ -277,39 +321,54 @@ class CompactQueueApp(App):
         self.clusters = self.pending_clusters if self.mode == "pending" else self.active_clusters
 
         if self.mode == "pending":
+            self.clusters = self.pending_clusters
             tabs_indicator.update(
-                f"[bold yellow]▶ [Tab/t] Pending Clusters ({len(self.pending_clusters)})[/bold yellow]  |  [dim][Tab/t] Active Clusters ({len(self.active_clusters)})[/dim]"
+                f"[bold yellow]▶ [Tab/t] Pending ({len(self.pending_clusters)})[/bold yellow]  |  [dim][Tab/t] Active ({len(self.active_clusters)})[/dim]  |  [dim][Tab/t] 🌅 Sunset ({len(self.sunset_candidates)})[/dim]"
             )
             mode_label = "Pending Queue"
-        else:
+        elif self.mode == "active":
+            self.clusters = self.active_clusters
             tabs_indicator.update(
-                f"[dim][Tab/t] Pending Clusters ({len(self.pending_clusters)})[/dim]  |  [bold cyan]▶ [Tab/t] Active Clusters ({len(self.active_clusters)})[/bold cyan]"
+                f"[dim][Tab/t] Pending ({len(self.pending_clusters)})[/dim]  |  [bold cyan]▶ [Tab/t] Active ({len(self.active_clusters)})[/bold cyan]  |  [dim][Tab/t] 🌅 Sunset ({len(self.sunset_candidates)})[/dim]"
             )
             mode_label = "Active Knowledge"
+        else:
+            self.clusters = self.sunset_candidates
+            tabs_indicator.update(
+                f"[dim][Tab/t] Pending ({len(self.pending_clusters)})[/dim]  |  [dim][Tab/t] Active ({len(self.active_clusters)})[/dim]  |  [bold magenta]▶ [Tab/t] 🌅 Sunset ({len(self.sunset_candidates)})[/bold magenta]"
+            )
+            mode_label = "Sunset Candidates"
 
-        panel_header.update(f"📦 {mode_label} Clusters ({len(self.clusters)})")
+        panel_header.update(f"📦 {mode_label} ({len(self.clusters)})")
         list_view.set_clusters(self.clusters)
         if self.clusters:
             if not self.selected_cluster or self.selected_cluster not in self.clusters:
                 self.selected_cluster = self.clusters[0]
             list_view.index = self.clusters.index(self.selected_cluster)
             detail_view.display_cluster(self.selected_cluster)
-            self._notify_user(f"📋 {mode_label}: Loaded {len(self.clusters)} candidate compaction cluster(s).")
+            self._notify_user(f"📋 {mode_label}: Loaded {len(self.clusters)} candidate item(s).")
         else:
             self.selected_cluster = None
             detail_view.display_cluster(None)
-            self._notify_user(f"📋 {mode_label}: No duplicate clusters found.")
+            self._notify_user(f"📋 {mode_label}: No candidate items found.")
 
         self._update_stats()
 
     def action_switch_tab(self) -> None:
-        """Toggle between Pending and Active candidate clusters."""
-        self.mode = "active" if self.mode == "pending" else "pending"
+        """Cycle between Pending, Active, and Sunset candidate views."""
+        modes = ["pending", "active", "sunset"]
+        try:
+            curr_idx = modes.index(self.mode)
+            self.mode = modes[(curr_idx + 1) % len(modes)]
+        except ValueError:
+            self.mode = "pending"
         self._update_ui()
         if self.mode == "pending":
             self._notify_user("Switched to PENDING queue compaction clusters.")
-        else:
+        elif self.mode == "active":
             self._notify_user("Switched to ACTIVE memory compaction clusters.")
+        else:
+            self._notify_user("Switched to SUNSET candidates eligible for retirement.")
 
     @on(events.Click, "#tabs-indicator")
     def on_tabs_indicator_click(self) -> None:
@@ -436,7 +495,11 @@ class CompactQueueApp(App):
             return False
 
     def action_compact(self) -> None:
-        """Compact/merge the currently selected cluster."""
+        """Compact/merge the currently selected cluster or retire sunset candidate."""
+        if self.mode == "sunset":
+            self.action_retire_sunset()
+            return
+
         if not self.selected_cluster:
             self._notify_user("⚠️ No cluster selected to compact.")
             return
@@ -505,7 +568,11 @@ class CompactQueueApp(App):
         self.push_screen(modal, _on_modal_dismiss)
 
     def action_discard(self) -> None:
-        """Discard all lessons in the selected cluster."""
+        """Discard all lessons in the selected cluster or retire sunset candidate."""
+        if self.mode == "sunset":
+            self.action_retire_sunset()
+            return
+
         if not self.selected_cluster:
             self._notify_user("⚠️ No cluster selected to discard.")
             return
@@ -564,7 +631,34 @@ class CompactQueueApp(App):
         self._advance_to_next_pending()
 
     def action_auto_compact(self) -> None:
-        """Automatically compact all pending candidate clusters."""
+        """Automatically compact all pending candidate clusters or retire all sunsets."""
+        if self.mode == "sunset":
+            pending_sunsets = [c for c in self.sunset_candidates if c.get("status") == "pending"]
+            if not pending_sunsets:
+                self._notify_user("ℹ️ No pending sunset candidates to retire.")
+                return
+            retired_count = 0
+            with MemoryStore(self.db_path) as store:
+                for sc in pending_sunsets:
+                    lid = sc.get("primary_id")
+                    if lid:
+                        store.delete_lesson(lid)
+                        sc["status"] = "retired"
+                        retired_count += 1
+                updated_lessons = store.list_lessons()
+                write_all_lessons_to_markdown(updated_lessons, self.lessons_md)
+                self.recompile_wiki_after_change(
+                    retired_count,
+                    message=f"Wiki re-compiled after batch retiring {retired_count} sunset lesson(s) via TUI.",
+                )
+            self._notify_user(f"🎉 Batch retired {retired_count} sunset lesson(s).")
+            list_view = self.query_one("#cluster-list", ClusterListView)
+            list_view.refresh_items()
+            self._update_stats()
+            detail_view = self.query_one("#cluster-detail", ClusterDetailView)
+            detail_view.display_cluster(self.selected_cluster)
+            return
+
         pending_clusters = [c for c in self.clusters if c.get("status") == "pending"]
         if not pending_clusters:
             self._notify_user("ℹ️ No pending candidate clusters left to auto-compact.")
@@ -583,6 +677,39 @@ class CompactQueueApp(App):
         detail_view = self.query_one("#cluster-detail", ClusterDetailView)
         detail_view.display_cluster(self.selected_cluster)
         list_view.focus()
+
+    def action_retire_sunset(self) -> None:
+        """Retire / delete the currently selected sunset lesson."""
+        if not self.selected_cluster:
+            self._notify_user("⚠️ No lesson selected to retire.")
+            return
+
+        lid = self.selected_cluster.get("primary_id")
+        if not lid:
+            return
+
+        if self.selected_cluster.get("status") in ("compacted", "retired", "discarded"):
+            self._notify_user(f"⚠️ Lesson '{lid}' already retired.")
+            return
+
+        try:
+            with MemoryStore(self.db_path) as store:
+                store.delete_lesson(lid)
+                updated_lessons = store.list_lessons()
+                write_all_lessons_to_markdown(updated_lessons, self.lessons_md)
+                self.recompile_wiki_after_change(
+                    1,
+                    message=f"Wiki re-compiled after retiring sunset lesson '{lid}' via TUI.",
+                )
+
+            self.selected_cluster["status"] = "retired"
+            self._notify_user(f"🗑️ Successfully retired sunset lesson '{lid}'.")
+            list_view = self.query_one("#cluster-list", ClusterListView)
+            list_view.refresh_items()
+            self._update_stats()
+            self._advance_to_next_pending()
+        except Exception as e:
+            self._notify_user(f"❌ Error retiring sunset lesson '{lid}': {e}")
 
 
 def launch_compact_tui(
