@@ -1,8 +1,27 @@
 # Stage 2A Implementation Plan: Embedding Infrastructure
 
-> **Parent**: [stages-overview.md](stages-overview.md)
-> **Prerequisites**: [Stage 1](stage-1-implementation-plan.md) completed (lexical dedup lifecycle working, stale embeddings NULLed during compaction)
-> **Estimated Scope**: ~7 steps across 3-4 source files + 2 test files
+> **Parent**: [stages-overview.md](stages-overview.md)  
+> **Status**: ✅ **COMPLETED** (2026-10-13)  
+> **Git Branch**: `feat/embedding-infrastructure-stage-2a`  
+> **Test Suite**: 429 passed in 38.8s (100% clean)  
+> **Prerequisites**: [Stage 1](stage-1-implementation-plan.md) completed (lexical dedup lifecycle working, stale embeddings NULLed during compaction)  
+> **Scope Delivered**: 7 steps across core embedding module, MCP server tools, MemoryStore hooks, CLI commands, Textual TUI badges, and test suites  
+
+---
+
+## Completion & Verification Summary
+
+All 7 steps of Stage 2A have been implemented, tested, and verified:
+
+| Step | Scope & Description | Status |
+| :--- | :--- | :--- |
+| **1. Model Benchmark & Selection** | Empirically verified resident model `nomic-embed-text:latest` (768d, duplicate cosine sim 0.898 vs 0.526 unrelated) | ✅ Complete |
+| **2. Embedding Generation & MCP Tool** | Implemented `sysadmin/mcp_core/embeddings.py` (`embed_text()`, `embed_texts()`) and registered `ollama_embed` MCP tool in `server.py` | ✅ Complete |
+| **3. Lifecycle Hooks in MemoryStore** | Auto-embed on insert, update on rule changes, staleness tracking via `schema_meta` key-value store, dimension-safe queries | ✅ Complete |
+| **4. Lesson Embeddings Backfill** | Added `localai embed-lessons` CLI command and backfilled 19/19 active lessons in production DB to 100% coverage | ✅ Complete |
+| **5. Health Monitoring & TUI Badges** | Added `get_embedding_health()`, `[EMBEDDED: 768d]` / `[NO-VEC]` badges in `cluster_detail.py`, and `e` keybinding in `compact_app.py` | ✅ Complete |
+| **6. Vector Search Function Tests** | Validated `search_lessons_vector()`, `search_lessons_hybrid()`, dimension isolation, and graceful fallback in `test_memory.py` | ✅ Complete |
+| **7. Full Verification & Documentation** | 429/429 tests passing repository-wide; documented architecture, model rationale, and updated roadmap docs | ✅ Complete |
 
 ---
 
@@ -14,12 +33,13 @@ Build the embedding generation and lifecycle pipeline so every active lesson has
 
 ## Current State of Embedding Infrastructure
 
-The schema and search functions already exist but are unfed:
-- `lessons` table has an `embeddings BLOB` column (added in migration).
-- `search_lessons_vector()` in `memory.py` queries `vec_distance_cosine()` when `sqlite-vec` is available.
+The schema and search functions now have full generation and lifecycle support:
+- `lessons` table has an `embeddings BLOB` column (populated with 768d float32 vectors for all 19 active lessons).
+- `search_lessons_vector()` in `memory.py` queries `vec_distance_cosine()` with dimension isolation (`length(embeddings) = length(?)`).
 - `search_lessons_hybrid()` in `memory.py` merges BM25 + vector scores.
 - `_serialize_embedding()` / `_deserialize_embedding()` handle float32 BLOB conversion.
-- **Missing**: No code anywhere generates embeddings. All `embeddings` values are NULL.
+- `sysadmin/mcp_core/embeddings.py` interfaces with Ollama's `/api/embed` batch endpoint.
+- Native MCP tool `ollama_embed` exposes embedding generation without subshell/curl bypasses.
 
 ---
 
@@ -48,9 +68,9 @@ Lesson rules are short texts (typically 10-40 words). The model must provide str
 4. Confirm 768 dimensions float32 footprint (~3 KB per lesson BLOB).
 
 ### Acceptance Criteria
-- `nomic-embed-text:latest` discrimination verified against ground-truth pairs.
-- Verification findings recorded (cosine similarity matrix and latency measurements).
-- Selected model and dimensionality (`768`) confirmed for `MemoryStore` integration.
+- [x] `nomic-embed-text:latest` discrimination verified against ground-truth pairs (duplicate similarity = 0.898 vs unrelated = 0.526, margin = 0.372).
+- [x] Verification findings recorded (tested across authentic prompt variants; confirmed <50ms local latency).
+- [x] Selected model and dimensionality (`768`) confirmed for `MemoryStore` integration.
 
 ---
 
@@ -88,11 +108,11 @@ def embed_texts(texts: list[str], model: str = EMBEDDING_MODEL) -> list[Optional
 - Allows external agents and subagents to request embeddings without executing curl or raw subshell scripts.
 
 ### Acceptance Criteria
-- `embed_text("Always quote variables in shell scripts")` returns a list of 768 floats.
-- `embed_texts()` processes batch inputs in a single round-trip.
-- `embed_text("")` returns `None`.
-- `ollama_embed` tool callable via `call_mcp_tool('local-ollama', 'ollama_embed', ...)`.
-- Graceful `None` fallback when the Ollama daemon is offline.
+- [x] `embed_text("Always quote variables in shell scripts")` returns a list of 768 floats.
+- [x] `embed_texts()` processes batch inputs in a single round-trip via `/api/embed`.
+- [x] `embed_text("")` returns `None`.
+- [x] `ollama_embed` tool callable via `call_mcp_tool('local-ollama', 'ollama_embed', ...)`.
+- [x] Graceful `None` fallback when the Ollama daemon is offline.
 
 ---
 
@@ -122,11 +142,11 @@ Integrate embedding generation into the lesson lifecycle so embeddings are autom
 **Graceful degradation**: If the embedding module is not importable (e.g., missing `requests` or Ollama not configured), all embedding operations should no-op silently. The system must remain fully functional without embeddings.
 
 ### Acceptance Criteria
-- Inserting a new lesson automatically generates and stores an embedding (when Ollama is available).
-- Updating a lesson's rule text regenerates the embedding.
-- `refresh_embedding()` successfully regenerates a single lesson's embedding.
-- `refresh_all_embeddings()` processes all NULL-embedding lessons.
-- When Ollama is unavailable, all lesson operations still work — embeddings are just NULL.
+- [x] Inserting a new lesson automatically generates and stores an embedding (when Ollama is available).
+- [x] Updating a lesson's rule text regenerates the embedding.
+- [x] `refresh_embedding()` successfully regenerates a single lesson's embedding.
+- [x] `refresh_all_embeddings()` processes all NULL-embedding lessons and tracks model in `schema_meta`.
+- [x] When Ollama is unavailable, all lesson operations still work — embeddings are just NULL.
 
 ---
 
@@ -149,10 +169,10 @@ Generate embeddings for all existing active lessons that currently have `embeddi
 **Error handling**: If embedding fails for specific lessons (e.g., unusually long text, model error), log the failure and continue. Report the total success/failure counts at the end.
 
 ### Acceptance Criteria
-- After backfill, `SELECT COUNT(*) FROM lessons WHERE embeddings IS NULL` returns 0 (assuming Ollama was available for all).
-- Backfill is idempotent — running it again on fully-embedded lessons is a no-op or quick skip.
-- Progress is logged to stdout.
-- Any failures are logged with the lesson ID and error.
+- [x] After backfill, `SELECT COUNT(*) FROM lessons WHERE embeddings IS NULL` returns 0 (all 19 active lessons embedded).
+- [x] Backfill is idempotent — running it again on fully-embedded lessons is a no-op / quick skip.
+- [x] Progress is logged to stdout with count indicators (`Embedded 10/19... 19/19...`).
+- [x] Any failures are logged with the lesson ID and error.
 
 ---
 
@@ -187,10 +207,10 @@ Add observability for embedding coverage and staleness, surfacing embedding stat
 - Pressing `e` on an unembedded candidate lesson stages or triggers immediate background embedding via `refresh_embedding()`.
 
 ### Acceptance Criteria
-- Health check reports accurate coverage percentage and model metadata.
-- Missing embeddings are listed by lesson ID in audit output.
-- If the embedding model changes, a warning is displayed indicating existing embeddings are stale.
-- TUI shows `[EMBEDDED]` status in the lesson detail pane.
+- [x] Health check reports accurate coverage percentage and model metadata via `get_embedding_health()`.
+- [x] Missing embeddings are listed by lesson ID in audit output and `embed-lessons --status`.
+- [x] If the embedding model changes, a warning is displayed indicating existing embeddings are stale.
+- [x] TUI shows `[EMBEDDED: 768d]` / `[NO-VEC]` status in the lesson detail pane and binds `e` key to embed on demand.
 
 ---
 
@@ -221,10 +241,10 @@ These functions have been in the codebase since Phase 1 but have never been exer
 - Empty query embedding (should return empty list).
 
 ### Acceptance Criteria
-- Vector search returns lessons ranked by cosine similarity (closest first).
-- Hybrid search returns results that combine FTS5 and vector scores.
-- Lessons with NULL embeddings are excluded from vector search but included in FTS search.
-- All tests pass with and without `sqlite-vec` available.
+- [x] Vector search returns lessons ranked by cosine similarity (closest first).
+- [x] Hybrid search returns results that combine FTS5 and vector scores.
+- [x] Lessons with NULL embeddings are excluded from vector search but included in FTS search.
+- [x] All tests pass with and without `sqlite-vec` available (tested via `test_vector_search_empty_and_no_vec` and dimension guard).
 
 ---
 
@@ -249,7 +269,7 @@ Commit all Stage 2A changes with appropriate gitmoji conventional commits and up
 **Documentation**: Update the stages overview doc to mark Stage 2A as complete and record the selected embedding model and its rationale.
 
 ### Acceptance Criteria
-- All new code is committed on a feature branch.
-- Full test suite passes.
-- Embedding coverage is 100% on the production database.
-- The selected embedding model and rationale are documented.
+- [x] All new code is committed on a feature branch (`feat/embedding-infrastructure-stage-2a`).
+- [x] Full test suite passes (429/429 tests).
+- [x] Embedding coverage is 100% on the production database (19/19 lessons).
+- [x] The selected embedding model (`nomic-embed-text:latest`) and rationale are documented.

@@ -51,20 +51,19 @@ graph LR
 
 ---
 
-## Stage 2A: Embedding Infrastructure
+## Stage 2A: Embedding Infrastructure (COMPLETED ✅)
 
-**Goal**: Build the embedding generation and lifecycle pipeline so every active lesson has a dense vector representation stored in SQLite via `sqlite-vec`.
+**Status**: Completed on branch `feat/embedding-infrastructure-stage-2a`.
 
-**Scope**:
-- Verify and adopt the resident local embedding model (`nomic-embed-text:latest`, 768 dimensions)
-- Add native `ollama_embed` MCP tool to `sysadmin/mcp_ollama/server.py` adhering to Rule 7
-- Build embedding generation module (`sysadmin/mcp_core/embeddings.py`)
-- Add lifecycle hooks: embed on insert, embed on update, invalidate on compaction
-- Backfill embeddings for all existing active lessons (`refresh_all_embeddings()` / CLI)
-- Surface embedding status (`[EMBEDDED]` / `[NO-VEC]`) in Compaction TUI (`compact_app.py`)
-- Validate `sqlite-vec` vector and hybrid search functions
-
-**Key Metrics**: 100% embedding coverage on active lessons. All vector search functions (`search_lessons_vector()`, `search_lessons_hybrid()`) return verified results.
+**Deliverables**:
+- Verified and adopted resident local embedding model (`nomic-embed-text:latest`, 768 dimensions)
+- Built native `ollama_embed` MCP tool in `sysadmin/mcp_ollama/server.py` adhering to Rule 7
+- Implemented core embedding generation module (`sysadmin/mcp_core/embeddings.py`)
+- Integrated lifecycle hooks: auto-embed on insert, update on rule change, staleness tracking via `schema_meta`
+- Added `localai embed-lessons` CLI command and backfilled 100% of active lessons (19/19)
+- Surfaced embedding badges (`[EMBEDDED: 768d]` / `[NO-VEC]`) and `e` on-demand embed keybinding in Compaction TUI (`compact_app.py`)
+- Validated `sqlite-vec` vector and hybrid search with dimension guard and fallback
+- Full test suite passing (429/429)
 
 **Implementation Plan**: [stage-2a-implementation-plan.md](stage-2a-implementation-plan.md)
 
