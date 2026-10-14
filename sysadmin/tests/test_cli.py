@@ -15,6 +15,7 @@ EXPECTED_COMMANDS = {
     "shellcheck", "service-status", "journal-logs", "write-file", "read-file",
     "review-lessons", "audit-lessons", "compile-wiki", "compact-lessons",
     "lint-lessons", "unload-model", "export-dataset", "verify-vram", "build-models", "train",
+    "embed-lessons",
 }
 
 

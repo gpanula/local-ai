@@ -54,6 +54,7 @@ class TestOllamaMCPServer(unittest.TestCase):
         self.assertIn("shellcheck_inspect", tool_names)
         self.assertIn("service_status", tool_names)
         self.assertIn("journal_logs", tool_names)
+        self.assertIn("ollama_embed", tool_names)
 
     def test_write_and_read_file(self):
         test_rel_path = "sysadmin/scratch_test_file.txt"
@@ -604,6 +605,28 @@ echo $UNQUOTED_VAR
         self.assertTrue(len(data["failure_chronology"]) > 0)
         self.assertTrue(len(data["escalations"]) > 0)
         self.assertEqual(data["escalations"][0]["escalated_model"], "winter-coder:24gb-codestral")
+
+    def test_ollama_embed_tool(self):
+        """Verify calling ollama_embed tool via JSON-RPC."""
+        with patch("mcp_core.embeddings.embed_texts", return_value=[[0.1, 0.2, 0.3]]):
+            req = {
+                "jsonrpc": "2.0",
+                "id": 700,
+                "method": "tools/call",
+                "params": {
+                    "name": "ollama_embed",
+                    "arguments": {
+                        "text": "Always quote shell variables"
+                    }
+                }
+            }
+            res = server.process_jsonrpc(req)
+            self.assertIsNotNone(res)
+            self.assertNotIn("isError", res["result"])
+            data = json.loads(res["result"]["content"][0]["text"])
+            self.assertEqual(data["count"], 1)
+            self.assertEqual(data["dimensions"], 3)
+            self.assertEqual(data["embeddings"], [[0.1, 0.2, 0.3]])
 
 
 if __name__ == "__main__":

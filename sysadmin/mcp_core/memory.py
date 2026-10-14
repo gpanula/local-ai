@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS model_performance (
 
 CREATE INDEX IF NOT EXISTS idx_model_perf_lookup ON model_performance(domain_tag, model);
 CREATE INDEX IF NOT EXISTS idx_model_perf_model ON model_performance(model);
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -284,6 +289,8 @@ class MemoryStore:
             data["keywords"] = json.loads(data["keywords"])
         except (json.JSONDecodeError, TypeError):
             data["keywords"] = []
+        if "embeddings" in data and isinstance(data["embeddings"], bytes):
+            data["embeddings"] = _deserialize_embedding(data["embeddings"])
         return data
 
     @staticmethod
@@ -315,18 +322,27 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Lesson CRUD
     # ------------------------------------------------------------------
-    def insert_lesson(self, lesson: dict) -> str:
+    def insert_lesson(self, lesson: dict, auto_embed: bool = True) -> str:
         """Insert a lesson and return its generated ID.
 
         ``lesson`` may include an explicit ``id`` (used as-is) or omit it to
-        auto-generate one. ``keywords`` may be a list or a JSON string. An
-        optional ``embeddings`` value (a list of floats) is stored as a BLOB
-        for vector search.
+        auto-generate one. ``keywords`` may be a list or a JSON string. If
+        ``embeddings`` is omitted and ``auto_embed`` is True, generates an embedding
+        using the local Ollama instance (fallback to NULL if offline).
         """
         lesson_id = lesson.get("id") or self._next_lesson_id()
         keywords = lesson.get("keywords", [])
         keywords_json = json.dumps(keywords) if not isinstance(keywords, str) else keywords
-        embedding_blob = _serialize_embedding(lesson.get("embeddings"))
+
+        has_explicit_embeddings = "embeddings" in lesson
+        embeddings = lesson.get("embeddings")
+        if not has_explicit_embeddings and auto_embed:
+            try:
+                from mcp_core.embeddings import embed_text
+                embeddings = embed_text(lesson["rule"])
+            except Exception:
+                embeddings = None
+        embedding_blob = _serialize_embedding(embeddings)
 
         self.conn.execute(
             """
@@ -374,12 +390,12 @@ class MemoryStore:
             ).fetchall()
         return [self._row_to_lesson(r) for r in rows]
 
-    def update_lesson(self, lesson_id: str, updates: dict) -> None:
+    def update_lesson(self, lesson_id: str, updates: dict, auto_embed: bool = True) -> None:
         """Apply partial updates to a lesson by ID.
 
         ``updates`` may contain any of the lesson columns. ``keywords`` may be
-        a list or JSON string. The FTS index is re-synced when ``rule``,
-        ``keywords``, or ``category`` change.
+        a list or JSON string. If ``rule`` is updated and ``embeddings`` is not
+        explicitly provided, automatically regenerates the embedding.
         """
         if not updates:
             return
@@ -392,7 +408,14 @@ class MemoryStore:
             kw = fields["keywords"]
             fields["keywords"] = json.dumps(kw) if not isinstance(kw, str) else kw
 
-        if "embeddings" in fields:
+        if "rule" in fields and "embeddings" not in fields and auto_embed:
+            try:
+                from mcp_core.embeddings import embed_text
+                new_emb = embed_text(fields["rule"])
+            except Exception:
+                new_emb = None
+            fields["embeddings"] = _serialize_embedding(new_emb)
+        elif "embeddings" in fields:
             fields["embeddings"] = _serialize_embedding(fields["embeddings"])
 
         # Re-sync FTS index if searchable fields changed. Delete from the FTS
@@ -422,6 +445,7 @@ class MemoryStore:
                 self._sync_fts_insert(
                     lesson_id, row["rule"], row["keywords"], row["category"]
                 )
+
         self.conn.commit()
 
     def delete_lesson(self, lesson_id: str) -> None:
@@ -432,6 +456,139 @@ class MemoryStore:
         )
         self.conn.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
         self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Embedding management & health
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Metadata key-value store (schema_meta)
+    # ------------------------------------------------------------------
+    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Fetch a value from the schema_meta table."""
+        row = self.conn.execute("SELECT value FROM schema_meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Insert or update a key-value pair in schema_meta."""
+        self.conn.execute("INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)", (key, str(value)))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Embedding management & health
+    # ------------------------------------------------------------------
+    def refresh_embedding(self, lesson_id: str) -> bool:
+        """Regenerate and store the embedding for a single lesson.
+
+        Returns True on success, False if Ollama was unreachable or embedding failed.
+        """
+        lesson = self.get_lesson(lesson_id)
+        if not lesson or not lesson.get("rule"):
+            return False
+        try:
+            from mcp_core.embeddings import DEFAULT_EMBEDDING_MODEL, embed_text
+            model_name = DEFAULT_EMBEDDING_MODEL
+            emb = embed_text(lesson["rule"])
+        except Exception:
+            emb = None
+            model_name = None
+        if emb is None:
+            return False
+        blob = _serialize_embedding(emb)
+        self.conn.execute(
+            "UPDATE lessons SET embeddings = ? WHERE id = ?",
+            (blob, lesson_id),
+        )
+        if model_name:
+            self.set_meta("embedding_model", model_name)
+        self.conn.commit()
+        return True
+
+    def refresh_all_embeddings(
+        self,
+        batch_size: int = 10,
+        force: bool = False,
+        on_progress: Optional[Any] = None,
+    ) -> tuple[int, int]:
+        """Regenerate embeddings for active lessons.
+
+        If ``force`` is False, only processes lessons where ``embeddings IS NULL``.
+        Returns ``(success_count, failure_count)``.
+        """
+        query = "SELECT id, rule FROM lessons" if force else "SELECT id, rule FROM lessons WHERE embeddings IS NULL"
+        rows = self.conn.execute(query).fetchall()
+        if not rows:
+            return 0, 0
+
+        success = 0
+        failed = 0
+        try:
+            from mcp_core.embeddings import DEFAULT_EMBEDDING_MODEL, embed_texts
+            model_name = DEFAULT_EMBEDDING_MODEL
+        except Exception:
+            return 0, len(rows)
+
+        total_to_process = len(rows)
+        for i in range(0, total_to_process, batch_size):
+            chunk = rows[i : i + batch_size]
+            texts = [r["rule"] for r in chunk]
+            embs = embed_texts(texts)
+            for idx, r in enumerate(chunk):
+                emb = embs[idx] if idx < len(embs) else None
+                if emb is not None:
+                    blob = _serialize_embedding(emb)
+                    self.conn.execute("UPDATE lessons SET embeddings = ? WHERE id = ?", (blob, r["id"]))
+                    success += 1
+                else:
+                    failed += 1
+            self.conn.commit()
+            if on_progress:
+                on_progress(min(i + batch_size, total_to_process), total_to_process)
+
+        if success > 0 and model_name:
+            self.set_meta("embedding_model", model_name)
+
+        return success, failed
+
+    def get_embedding_health(self) -> dict:
+        """Return embedding coverage statistics and health metrics."""
+        total = self.conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        embedded = self.conn.execute("SELECT COUNT(*) FROM lessons WHERE embeddings IS NOT NULL").fetchone()[0]
+        missing_rows = self.conn.execute("SELECT id FROM lessons WHERE embeddings IS NULL ORDER BY id").fetchall()
+        missing_ids = [r[0] for r in missing_rows]
+        coverage_pct = round((embedded / total * 100.0), 1) if total > 0 else 100.0
+
+        try:
+            from mcp_core.embeddings import DEFAULT_EMBEDDING_DIMENSIONS, DEFAULT_EMBEDDING_MODEL
+            model_name = DEFAULT_EMBEDDING_MODEL
+            dims = DEFAULT_EMBEDDING_DIMENSIONS
+        except Exception:
+            model_name = "unknown"
+            dims = 768
+
+        stored_model = self.get_meta("embedding_model")
+        warning = None
+        if stored_model and stored_model != model_name:
+            status = "stale_model"
+            warning = f"Embeddings were generated with {stored_model}, but configured model is {model_name}."
+        elif len(missing_ids) > 0:
+            status = "coverage_gap"
+        else:
+            status = "healthy"
+
+        result = {
+            "total_lessons": total,
+            "embedded_lessons": embedded,
+            "missing_count": len(missing_ids),
+            "coverage_pct": coverage_pct,
+            "null_embeddings": missing_ids,
+            "model_name": model_name,
+            "stored_model": stored_model or model_name,
+            "expected_dimensions": dims,
+            "status": status,
+        }
+        if warning:
+            result["warning"] = warning
+        return result
 
     # ------------------------------------------------------------------
     # Telemetry counters (Phase 5)
@@ -574,10 +731,11 @@ class MemoryStore:
                 SELECT lessons.*, vec_distance_cosine(lessons.embeddings, ?) AS vec_dist
                 FROM lessons
                 WHERE lessons.embeddings IS NOT NULL
+                  AND length(lessons.embeddings) = length(?)
                 ORDER BY vec_dist ASC
                 LIMIT ?
                 """,
-                (query_blob, fetch_limit),
+                (query_blob, query_blob, fetch_limit),
             ).fetchall()
         except sqlite3.OperationalError:
             # sqlite-vec not loaded for this connection (e.g. extension load failed).

@@ -102,6 +102,10 @@ alias localai-compact-active-plain="${LOCAL_AI_DIR}/bin/localai-compact-active -
 alias localai-compact-active-auto="${LOCAL_AI_DIR}/bin/localai-compact-active --auto"
 alias localai-lint-lessons="${LOCALAI_PYTHON} ${LOCAL_AI_DIR}/sysadmin/mcp_client.py lint-lessons"
 alias localai-lint-lessons-fix="${LOCALAI_PYTHON} ${LOCAL_AI_DIR}/sysadmin/mcp_client.py lint-lessons --fix"
+alias localai-embed="${LOCAL_AI_DIR}/bin/localai-embed-lessons"
+alias localai-embed-lessons="${LOCAL_AI_DIR}/bin/localai-embed-lessons"
+alias localai-embed-status="${LOCAL_AI_DIR}/bin/localai-embed-lessons --status"
+alias localai-embed-reindex="${LOCAL_AI_DIR}/bin/localai-embed-lessons --reindex"
 
 # Ollama Model & Pipeline Management
 alias localai-unload="${LOCALAI_PYTHON} ${LOCAL_AI_DIR}/sysadmin/mcp_client.py unload-model"

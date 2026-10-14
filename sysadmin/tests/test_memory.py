@@ -5,6 +5,7 @@ All tests use a temporary database (``tmp_path``) so they never touch the real
 """
 
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -272,6 +273,13 @@ def test_vector_search_skips_lessons_without_embedding(store):
     ids = [r["id"] for r in results]
     assert "v1" in ids
     assert "no-embed" not in ids
+
+
+def test_vector_search_empty_and_no_vec(store):
+    _embed_lesson(store, "v1", "heredoc", ["heredoc"], [1.0, 0.0])
+    assert store.search_lessons_vector([], top_k=5) == []
+    with patch("mcp_core.memory._SQLITE_VEC_AVAILABLE", False):
+        assert store.search_lessons_vector([1.0, 0.0], top_k=5) == []
 
 
 def test_hybrid_search_combines_signals(store):
@@ -611,5 +619,52 @@ def test_get_latest_pipeline_run_date(tmp_path):
         latest_perf = s.get_latest_pipeline_run_date()
         assert latest_perf is not None
         assert isinstance(latest_perf, date)
+
+
+def test_refresh_embedding_and_health(store):
+    with patch("mcp_core.embeddings.embed_text", return_value=[0.1, 0.2, 0.3]):
+        lid = store.insert_lesson({"id": "l-emb-1", "rule": "Rule needing embedding", "embeddings": None})
+        assert store.get_lesson(lid)["embeddings"] is None
+
+        health_before = store.get_embedding_health()
+        assert health_before["missing_count"] == 1
+        assert health_before["status"] == "coverage_gap"
+
+        ok = store.refresh_embedding(lid)
+        assert ok is True
+        lesson = store.get_lesson(lid)
+        assert lesson["embeddings"] == pytest.approx([0.1, 0.2, 0.3])
+
+        health_after = store.get_embedding_health()
+        assert health_after["total_lessons"] == 1
+        assert health_after["embedded_lessons"] == 1
+        assert health_after["coverage_pct"] == 100.0
+        assert health_after["missing_count"] == 0
+        assert health_after["status"] == "healthy"
+
+
+def test_refresh_all_embeddings(store):
+    store.insert_lesson({"id": "l-1", "rule": "First rule", "embeddings": None})
+    store.insert_lesson({"id": "l-2", "rule": "Second rule", "embeddings": None})
+    store.insert_lesson({"id": "l-3", "rule": "Third rule", "embeddings": [0.5, 0.5]})
+
+    with patch("mcp_core.embeddings.embed_texts", return_value=[[0.1, 0.2], [0.3, 0.4]]):
+        success, failed = store.refresh_all_embeddings(batch_size=2)
+        assert success == 2
+        assert failed == 0
+
+    assert store.get_lesson("l-1")["embeddings"] == pytest.approx([0.1, 0.2])
+    assert store.get_lesson("l-2")["embeddings"] == pytest.approx([0.3, 0.4])
+    assert store.get_lesson("l-3")["embeddings"] == pytest.approx([0.5, 0.5])
+
+
+def test_embedding_stale_model_detection(store):
+    store.insert_lesson({"id": "l-1", "rule": "First rule", "embeddings": [0.1, 0.2]})
+    store.set_meta("embedding_model", "old-model:latest")
+    health = store.get_embedding_health()
+    assert health["status"] == "stale_model"
+    assert "old-model:latest" in health["warning"]
+
+
 
 
