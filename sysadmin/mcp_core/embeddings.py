@@ -1,87 +1,139 @@
-"""Embedding generation via the local Ollama HTTP API.
+"""Embedding generation module for the Local AI lesson-learning system.
 
-Phase 4.02: ``get_embedding`` produces a float vector for a text snippet using
-Ollama's ``/api/embed`` endpoint. It talks directly to the Ollama HTTP API
-(mirroring ``mcp_ollama/server.py``'s ``_http_request`` pattern) rather than
-going through the MCP server, since no embedding tool is exposed there.
-
-The default model is ``nomic-embed-text`` (768-dim), pulled via
-``ollama pull nomic-embed-text``.
+Generates dense vector embeddings using a local Ollama instance (defaulting to
+``nomic-embed-text:latest``, 768 dimensions). Uses Ollama's modern batch ``/api/embed``
+endpoint with graceful fallback. All functions degrade safely without raising exceptions
+if Ollama is offline or the embedding model is unavailable.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
+
+DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
+DEFAULT_EMBEDDING_DIMENSIONS = 768
 
 
-def _validate_ollama_host(raw: str) -> str:
-    """Validate that OLLAMA_HOST has an http/https scheme and is a loopback/private address."""
+def _get_ollama_host(host: Optional[str] = None) -> str:
+    """Resolve and validate the Ollama host URL."""
+    raw = host or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
     parsed = urllib.parse.urlparse(raw)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"OLLAMA_HOST must use http or https scheme, got: {raw!r}")
-    hostname = parsed.hostname or ""
-    if hostname not in ("127.0.0.1", "localhost", "::1"):
-        import ipaddress
-
-        try:
-            addr = ipaddress.ip_address(hostname)
-            if not (addr.is_loopback or addr.is_private):
-                raise ValueError(f"OLLAMA_HOST resolves to a non-private address: {hostname}")
-        except ValueError:
-            raise ValueError(f"OLLAMA_HOST hostname must be localhost/loopback or a private IP: {hostname}")
+        raw = f"http://{raw}"
     return raw.rstrip("/")
 
 
-OLLAMA_HOST = _validate_ollama_host(os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"))
+def _normalize_text_for_embedding(text: str) -> str:
+    """Normalize input text for dense embedding generation.
 
-
-def _http_request(endpoint: str, method: str = "GET", data: Optional[Dict[str, Any]] = None, timeout: int = 120) -> Dict[str, Any]:
-    """Perform a JSON HTTP request against the Ollama API and return parsed JSON."""
-    url = f"{OLLAMA_HOST}{endpoint}"
-    req = urllib.request.Request(url, method=method)
-    req.add_header("Content-Type", "application/json")
-    body = json.dumps(data).encode("utf-8") if data is not None else None
-    try:
-        with urllib.request.urlopen(req, data=body, timeout=timeout) as response:
-            res_body = response.read().decode("utf-8")
-            if not res_body.strip():
-                return {}
-            return json.loads(res_body)
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Ollama API HTTP {e.code} ({url}): {e.reason} - {error_body}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Failed to connect to Ollama at {url}: {e}")
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Ollama API request error ({url}): {e}")
-
-
-def get_embedding(text: str, model: str = "nomic-embed-text") -> List[float]:
-    """Return a float embedding vector for ``text`` via Ollama's ``/api/embed``.
-
-    Raises ``RuntimeError`` on any failure (connection, HTTP error, or a missing
-    embedding in the response).
+    Preserves sentence structure, punctuation, and casing while stripping leading/trailing
+    whitespace and collapsing duplicate whitespace runs.
     """
-    if not text or not text.strip():
-        raise ValueError("Cannot embed empty text")
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
 
-    data = _http_request(
-        "/api/embed",
-        method="POST",
-        data={"model": model, "input": text},
-    )
 
-    embeddings = data.get("embeddings") or []
-    if not embeddings or not embeddings[0]:
-        raise RuntimeError(f"Ollama returned no embedding for model {model!r}")
+def embed_texts(
+    texts: List[str],
+    model: str = DEFAULT_EMBEDDING_MODEL,
+    host: Optional[str] = None,
+    timeout: int = 30,
+) -> List[Optional[List[float]]]:
+    """Generate dense vector embeddings for a batch of text strings.
 
-    vector = embeddings[0]
-    if not isinstance(vector, list) or not all(isinstance(v, (int, float)) for v in vector):
-        raise RuntimeError(f"Ollama returned a malformed embedding for model {model!r}")
+    Args:
+        texts: List of text strings to embed.
+        model: Ollama embedding model name.
+        host: Optional Ollama host override (defaults to $OLLAMA_HOST).
+        timeout: HTTP request timeout in seconds.
 
-    return [float(v) for v in vector]
+    Returns:
+        List of float lists (each matching model dimensionality) or None for failed items.
+    """
+    if not texts:
+        return []
+
+    cleaned = [_normalize_text_for_embedding(t) for t in texts]
+    # Check if all inputs are empty
+    valid_indices = [i for i, t in enumerate(cleaned) if t]
+    if not valid_indices:
+        return [None] * len(texts)
+
+    base_url = _get_ollama_host(host)
+    valid_texts = [cleaned[i] for i in valid_indices]
+
+    results: List[Optional[List[float]]] = [None] * len(texts)
+
+    # Primary path: Ollama /api/embed (batch capable)
+    try:
+        url = f"{base_url}/api/embed"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"model": model, "input": valid_texts}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            embeddings = payload.get("embeddings", [])
+            for idx, orig_pos in enumerate(valid_indices):
+                if idx < len(embeddings) and isinstance(embeddings[idx], list):
+                    results[orig_pos] = [float(v) for v in embeddings[idx]]
+        return results
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, OSError):
+        pass
+
+    # Secondary fallback path: /api/embeddings (single item iteration)
+    for idx, orig_pos in enumerate(valid_indices):
+        text_item = valid_texts[idx]
+        try:
+            url = f"{base_url}/api/embeddings"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"model": model, "prompt": text_item}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                emb = payload.get("embedding")
+                if isinstance(emb, list):
+                    results[orig_pos] = [float(v) for v in emb]
+        except Exception:
+            results[orig_pos] = None
+
+    return results
+
+
+def embed_text(
+    text: str,
+    model: str = DEFAULT_EMBEDDING_MODEL,
+    host: Optional[str] = None,
+    timeout: int = 30,
+) -> Optional[List[float]]:
+    """Generate a dense vector embedding for a single text string.
+
+    Args:
+        text: Text string to embed.
+        model: Ollama embedding model name.
+        host: Optional Ollama host override.
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        List of floats (length 768 for nomic-embed-text) or None on error/empty input.
+    """
+    if not text or not _normalize_text_for_embedding(text):
+        return None
+    res = embed_texts([text], model=model, host=host, timeout=timeout)
+    return res[0] if res else None
+
+
+# Backward-compatibility alias
+get_embedding = embed_text
