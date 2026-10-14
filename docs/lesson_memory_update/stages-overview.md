@@ -33,25 +33,19 @@ graph LR
 
 ---
 
-## Stage 1: Lexical Dedup Lifecycle
+## Stage 1: Lexical Dedup Lifecycle (COMPLETED ✅)
 
-**Goal**: Eliminate duplicate lessons at every lifecycle transition using the existing lexical similarity engine. No new dependencies.
+**Status**: Completed in PR #10 and merged into `main` in PR #7.
 
-**Scope**:
-- Fix `are_rules_similar()` normalization inconsistency
-- Unify the similarity threshold constant
-- Implement ingestion guard in `stage_pending_lesson()` (active + pending dedup)
-- Implement promotion guard in `promote_pending_lesson()` (active dedup + `is_new` return contract)
-- Add rule-text similarity clustering for compaction (`cluster_lessons_by_similarity()`)
-- Fix `lessons.md` desync on duplicate promotion
-- Invalidate stale embeddings during active lesson compaction
-- Add TOCTOU concurrency guard (SQLite `BEGIN IMMEDIATE`)
-- Add lesson decay / sunset flagging
-- Add full lifecycle integration test
-- Execute one-time compaction cleanup via `localai-compact --auto`
-- Update test fixtures with realistic phrasing variants
-
-**Key Metrics**: Pending lessons: 17 → ≤6. Active lessons: 66 → ~28 distinct. Zero duplicate lessons in prompt injection output.
+**Deliverables**:
+- Normalized `are_rules_similar()` with unified `0.75` Jaccard threshold
+- Ingestion and promotion guards with reinforcement tracking
+- Rule-text similarity clustering for compaction (`cluster_lessons_by_similarity()`)
+- SQLite concurrency guard (`BEGIN IMMEDIATE`)
+- Lesson decay and sunset candidate flagging (`flag_low_utility`) with operational pipeline padding
+- `--retire-sunsets` flag in CLI (`localai-compact-lessons`, `localai-compact-active`)
+- Textual Compaction TUI (`compact_app.py`) with 3-way tab cycling (`[Pending Queue]`, `[Active Lessons]`, `[Sunset Candidates]`)
+- Full test suite passing (393/393)
 
 **Implementation Plan**: [stage-1-implementation-plan.md](stage-1-implementation-plan.md)
 
@@ -59,17 +53,18 @@ graph LR
 
 ## Stage 2A: Embedding Infrastructure
 
-**Goal**: Build the embedding generation and lifecycle pipeline so every lesson has a dense vector representation stored in SQLite via `sqlite-vec`.
+**Goal**: Build the embedding generation and lifecycle pipeline so every active lesson has a dense vector representation stored in SQLite via `sqlite-vec`.
 
 **Scope**:
-- Benchmark and select a local Ollama embedding model
-- Build the embedding generation function (`embed_lesson_rule()`)
-- Add lifecycle hooks: embed on insert, embed on update, invalidate + re-embed on compaction
-- Backfill embeddings for all existing active lessons
-- Add embedding health monitoring (coverage, staleness detection)
-- Validate `sqlite-vec` extension loading and vector storage
+- Verify and adopt the resident local embedding model (`nomic-embed-text:latest`, 768 dimensions)
+- Add native `ollama_embed` MCP tool to `sysadmin/mcp_ollama/server.py` adhering to Rule 7
+- Build embedding generation module (`sysadmin/mcp_core/embeddings.py`)
+- Add lifecycle hooks: embed on insert, embed on update, invalidate on compaction
+- Backfill embeddings for all existing active lessons (`refresh_all_embeddings()` / CLI)
+- Surface embedding status (`[EMBEDDED]` / `[NO-VEC]`) in Compaction TUI (`compact_app.py`)
+- Validate `sqlite-vec` vector and hybrid search functions
 
-**Key Metrics**: 100% embedding coverage on active lessons. All vector search functions (`search_lessons_vector()`, `search_lessons_hybrid()`) return results.
+**Key Metrics**: 100% embedding coverage on active lessons. All vector search functions (`search_lessons_vector()`, `search_lessons_hybrid()`) return verified results.
 
 **Implementation Plan**: [stage-2a-implementation-plan.md](stage-2a-implementation-plan.md)
 
@@ -77,14 +72,14 @@ graph LR
 
 ## Stage 2B: Hybrid Retrieval Upgrade
 
-**Goal**: Wire hybrid search (BM25 + vector similarity) into the lesson retrieval pipeline as the primary search path, improving retrieval quality for semantically similar but lexically different queries.
+**Goal**: Wire hybrid search (BM25 + vector similarity) into the lesson retrieval pipeline as the primary search path, using prompt goal context for dense vector matching.
 
 **Scope**:
-- Upgrade `collect_relevant_lessons()` to use `search_lessons_hybrid()` when embeddings are available
-- Build a query embedding pipeline (embed the search query at retrieval time)
-- Tune BM25 vs vector weight balance
+- Upgrade `collect_relevant_lessons()` in `pipeline.py` to embed the **task prompt/goal context** (rather than isolated 2-word tags) for vector retrieval
+- Calibrate hybrid fusion using Reciprocal Rank Fusion (RRF) or normalized min-max weighting
+- Build query embedding pipeline with ephemeral pipeline-run caching
 - Validate retrieval quality against known query → lesson pairs
-- Ensure graceful degradation when embeddings are unavailable
+- Ensure zero-regression graceful degradation when embeddings or Ollama are unavailable
 
 **Key Metrics**: Hybrid search retrieves relevant lessons that FTS5-only search misses. Zero regression on existing retrieval quality.
 
@@ -94,16 +89,17 @@ graph LR
 
 ## Stage 3: Semantic Dedup & Scaling
 
-**Goal**: Replace O(n²) pairwise comparisons with embedding-based approximate nearest neighbor (ANN) pre-filtering, and add semantic duplicate detection that catches vocabulary-shifted duplicates.
+**Goal**: Introduce semantic duplicate detection that catches vocabulary-shifted and code-shifted duplicates, combined with vector pre-filtering and TUI clustering badges.
 
 **Scope**:
-- Build `are_rules_similar_v2()` combining lexical (Jaccard) and semantic (cosine) similarity signals
-- Replace pairwise scans in ingestion and compaction with ANN candidate pre-filtering via `sqlite-vec`
+- Build `are_rules_similar_v2()` using a **tiered disjunctive decision gate** (`lexical_pass OR semantic_pass OR hybrid_pass`) to solve vocabulary/code shift gaps
+- Use scalar `vec_distance_cosine()` candidate pre-filtering for sub-second clustering (under 2,000 lessons), documenting `vec0` virtual table indexing for scale
+- Surface similarity origin badges (`[SEMANTIC]`, `[LEXICAL]`, `[HYBRID]`) and cosine similarity metrics in Compaction TUI (`compact_app.py`)
 - Add cross-category semantic deduplication
-- Benchmark scaling: verify sub-linear performance on 500+ lesson corpus
-- Add MinHash/LSH fallback for environments without `sqlite-vec`
+- Benchmark scaling performance up to 1,000+ lesson corpus
+- Optional MinHash/LSH fallback for non-vector environments
 
-**Key Metrics**: Ingestion guard runs in O(1) amortized (ANN lookup + constant comparisons). Compaction scales sub-linearly. Semantic duplicates (different vocabulary, same meaning) are detected.
+**Key Metrics**: Semantic duplicates (different vocabulary/code snippets, same meaning) are caught. Compaction triage clearly distinguishes semantic vs lexical clusters.
 
 **Implementation Plan**: [stage-3-implementation-plan.md](stage-3-implementation-plan.md)
 

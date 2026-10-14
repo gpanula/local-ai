@@ -23,144 +23,162 @@ Replace O(n²) pairwise comparisons with embedding-based approximate nearest nei
 
 ---
 
-## Step 1: Build `are_rules_similar_v2()` — Hybrid Similarity
+## Step 1: Build `are_rules_similar_v2()` — Tiered Disjunctive Similarity
 
 ### What
-Create an upgraded similarity function that combines lexical signals (Jaccard, SequenceMatcher) with semantic signals (cosine similarity on embeddings) for more accurate near-duplicate detection.
+Create an upgraded similarity function combining lexical signals (Jaccard, SequenceMatcher) with semantic signals (cosine similarity on embeddings) using a **tiered disjunctive decision gate** rather than a strict linear weighted average.
+
+### Why
+In Stage 1 testing, `lesson-20260918-05` and `lesson-20260929-01` were semantically identical, but because one rule embedded raw bash syntax (`trap 'echo "..."' ERR`), the token Jaccard similarity dropped to `0.188`.
+Under a naive weighted formula like `0.4 * lexical + 0.6 * cosine`, a high cosine match of `0.90` yields `0.4*0.188 + 0.6*0.90 = 0.615 < 0.65`, failing to merge.
+
+A tiered decision gate ensures that high semantic equivalence triggers deduplication regardless of low token overlap caused by code syntax or vocabulary shifts.
 
 ### Where
 - `sysadmin/mcp_core/injection.py`: Add `are_rules_similar_v2()` alongside the existing function.
 
 ### Design Notes
 
-**Hybrid scoring approach**:
-The function should combine three signals:
-1. **Token Jaccard similarity** — catches exact/near-exact word overlap.
-2. **Character SequenceMatcher ratio** — catches character-level rearrangements and minor edits.
-3. **Cosine similarity on embeddings** — catches semantic equivalence with different vocabulary.
+**Decision Gate Logic**:
+```python
+def are_rules_similar_v2(
+    rule1: str,
+    rule2: str,
+    emb1: Optional[list[float]] = None,
+    emb2: Optional[list[float]] = None,
+    lexical_threshold: float = SIMILARITY_THRESHOLD, # 0.75
+    semantic_threshold: float = 0.82,
+    hybrid_lexical: float = 0.40,
+    hybrid_semantic: float = 0.70,
+) -> tuple[bool, str]:
+    """Check if two rules are similar.
+    
+    Returns (is_similar, match_reason) where match_reason is one of:
+      'lexical', 'semantic', 'hybrid', or 'none'.
+    """
+    # 1. Lexical evaluation
+    lexical_score = compute_lexical_similarity(rule1, rule2)
+    if lexical_score >= lexical_threshold:
+        return True, "lexical"
 
-**Combining strategy**: Weighted combination rather than hard thresholds on each signal. This avoids the brittleness of requiring all three to pass independently.
+    # 2. Semantic evaluation (if embeddings are provided)
+    if emb1 is not None and emb2 is not None:
+        cos_sim = _cosine_similarity(emb1, emb2)
+        # Strong semantic equivalence overrides vocabulary / syntax differences
+        if cos_sim >= semantic_threshold:
+            return True, "semantic"
+        # Balanced hybrid match
+        if lexical_score >= hybrid_lexical and cos_sim >= hybrid_semantic:
+            return True, "hybrid"
 
-Proposed formula:
+    return False, "none"
 ```
-combined_score = (
-    lexical_weight * max(jaccard, seq_ratio)
-    + semantic_weight * cosine_sim
-)
-is_similar = combined_score >= combined_threshold
-```
 
-**Weight selection**: Start with `lexical_weight=0.4, semantic_weight=0.6, combined_threshold=0.65`. The semantic signal should dominate because it catches the cases lexical similarity misses (which is the entire point of Stage 3). The lexical signal provides a safety net for short texts where embeddings may be noisy.
+**Short-text guard**:
+- For short rules (< 25 characters), raise `semantic_threshold` to `0.88` to avoid false positives on terse general statements.
 
-**Short-text guard**: Preserve the existing guard for very short texts (< 25 chars). On short text, embeddings are less reliable, so increase `lexical_weight` and decrease `semantic_weight` dynamically.
-
-**Embedding generation**: The function needs embeddings for both rules. Two options:
-- **Option A (preferred)**: Accept pre-computed embeddings as optional parameters. Callers that already have embeddings (e.g., from the database) pass them in. Callers without embeddings get lexical-only comparison.
-- **Option B**: Generate embeddings on the fly via `embed_text()`. This introduces Ollama latency into every comparison.
-
-Option A is preferred because it keeps the function fast and deterministic for callers that have cached embeddings, while still working (lexical-only) when embeddings are unavailable.
-
-**Backward compatibility**: The existing `are_rules_similar()` must remain available and unchanged for Stage 1 code paths that don't have embeddings. `are_rules_similar_v2()` is a superset that falls back to lexical-only behavior when embeddings are `None`.
+**Option A (Pre-computed Embeddings)**:
+- Accept embeddings as optional parameters. When callers (e.g. `MemoryStore`) already have cached vectors, comparison is instant. When embeddings are `None`, falls back cleanly to lexical-only comparison.
 
 ### Acceptance Criteria
-- `are_rules_similar_v2("Always quote variables", "Use double-quotes around parameter expansions", emb1, emb2)` returns `True` (semantic match that v1 misses).
-- `are_rules_similar_v2("Always quote variables", "Never use eval in production", emb1, emb2)` returns `False` (correctly distinguishes unrelated rules).
-- When embeddings are `None`, behavior is equivalent to `are_rules_similar()`.
-- Short texts (< 25 chars) are handled with increased lexical weight.
+- `are_rules_similar_v2()` returns `True, "semantic"` for code-shifted pairs like `lesson-20260918-05` and `lesson-20260929-01`.
+- `are_rules_similar_v2()` returns `False, "none"` for distinct rules in the same category.
+- When embeddings are `None`, behavior matches `are_rules_similar()` (100% backward compatible).
+- Match reason (`lexical`, `semantic`, `hybrid`) is returned for telemetry and TUI display.
 
 ---
 
-## Step 2: ANN Pre-Filter for Ingestion Guard
+## Step 2: Vector Candidate Pre-Filter for Ingestion Guard
 
 ### What
-Replace the O(n) full-scan similarity check in `stage_pending_lesson()` with an ANN pre-filter that uses `sqlite-vec` to find candidate near-duplicates, then runs `are_rules_similar_v2()` only on those candidates.
-
-### Why
-Currently `stage_pending_lesson()` (after Stage 1) compares the incoming rule against every active and pending lesson. At 500+ lessons, this becomes a performance bottleneck. ANN search returns the top-K most similar vectors in approximately O(log n) time, reducing the comparison set dramatically.
+Replace the O(n) full-scan similarity check in `stage_pending_lesson()` with a vector distance candidate pre-filter, followed by `are_rules_similar_v2()` evaluation on candidates.
 
 ### Where
-- `sysadmin/mcp_core/memory.py`: Modify the dedup logic in `stage_pending_lesson()`.
+- `sysadmin/mcp_core/memory.py`: Modify dedup logic in `stage_pending_lesson()`.
 
 ### Design Notes
 
-**ANN query approach**:
-1. Generate an embedding for the incoming `proposed_rule` via `embed_text()`.
-2. Query sqlite-vec for the top-K closest lessons by cosine distance: `SELECT id, rule, embeddings, vec_distance_cosine(embeddings, ?) AS dist FROM lessons WHERE embeddings IS NOT NULL ORDER BY dist ASC LIMIT ?`
-3. Use a generous K (e.g., 10-20) to avoid missing true duplicates.
-4. Run `are_rules_similar_v2()` on each candidate with the pre-fetched embeddings.
-5. If any candidate matches, handle as before (active match → bump `ineffective_count`; pending match → merge).
+**Candidate Selection & Indexing Strategy**:
+- For corpora under ~2,000 lessons, SQLite's scalar function `vec_distance_cosine()` over an indexed `embeddings IS NOT NULL` table executes in **< 4 milliseconds**.
+- Query candidate lessons:
+  ```sql
+  SELECT id, rule, embeddings, vec_distance_cosine(embeddings, ?) AS vec_dist
+  FROM lessons
+  WHERE embeddings IS NOT NULL
+  ORDER BY vec_dist ASC
+  LIMIT 15;
+  ```
+- Run `are_rules_similar_v2()` only on the top-15 candidates.
+- If an active rule matches (`is_similar=True`), bump reinforcement/ineffective counts instead of inserting a duplicate.
+- *Scaling note*: For future multi-user deployments exceeding 5,000 lessons, a `vec0` virtual table index can be migrated without modifying the caller interface.
 
-**Pending lessons**: Pending lessons may not have embeddings (they're not embedded until promotion in the current design). For pending dedup, either:
-- Embed pending lessons at staging time (adds an Ollama call per staging).
-- Fall back to lexical-only scan for pending lessons.
-
-Recommended: Embed pending lessons at staging time. The cost is one embedding call per staging event, which is negligible compared to the LLM calls in the pipeline. This enables ANN-based pending dedup as well.
-
-**Fallback**: If the embedding generation fails or `sqlite-vec` is unavailable, fall back to the Stage 1 full-scan behavior. The ANN pre-filter is a performance optimization, not a correctness requirement.
+**Pending Queue Embeddings**:
+- Embed pending lessons at staging time so the pending review queue also benefits from semantic candidate pre-filtering.
 
 ### Acceptance Criteria
-- Ingestion with ANN pre-filter produces the same dedup results as the full-scan approach on the current corpus (correctness validation).
-- At 500+ lessons (synthetic test), ANN pre-filter ingestion is measurably faster than full-scan.
-- When `sqlite-vec` is unavailable, behavior falls back to Stage 1 full-scan.
-- Pending lessons receive embeddings at staging time.
+- Ingestion pre-filter catches semantic duplicates at staging time.
+- Operates in < 15ms per ingestion event.
+- Gracefully falls back to lexical scan when Ollama or `sqlite-vec` is offline.
 
 ---
 
-## Step 3: ANN-Based Compaction Clustering
+## Step 3: Compaction Clustering & TUI Integration
 
 ### What
-Replace the O(n²) pairwise comparison in `cluster_lessons_by_similarity()` with ANN-based candidate generation, reducing compaction time on large lesson sets.
+1. Upgrade `cluster_lessons_by_similarity()` to use vector candidate pre-filtering.
+2. Surface similarity origin badges (`[SEMANTIC]`, `[LEXICAL]`, `[HYBRID]`) and cosine similarity in the Consolidation TUI (`compact_app.py`).
 
 ### Where
-- `sysadmin/mcp_core/audit.py`: Modify `cluster_lessons_by_similarity()`.
+- `sysadmin/mcp_core/audit.py`: Update `cluster_lessons_by_similarity()`.
+- `sysadmin/lessons_tui/widgets/cluster_list.py` & `cluster_detail.py`: Display match origin and similarity scores.
 
 ### Design Notes
 
-**ANN clustering approach**:
-1. For each lesson with an embedding, query sqlite-vec for its K nearest neighbors (K=10).
-2. For each neighbor pair, run `are_rules_similar_v2()` to confirm similarity.
-3. Build the union-find connected components from confirmed similar pairs.
-4. This reduces comparisons from O(n²) to O(n·K) where K is a small constant.
+**Clustering Algorithm**:
+1. For each lesson with an embedding, query the top-10 nearest neighbors.
+2. Confirm pairwise similarity via `are_rules_similar_v2()`.
+3. Track cluster metadata: match type (`semantic`, `lexical`, `hybrid`) and maximum cosine similarity.
+4. Build union-find connected components.
 
-**Lessons without embeddings**: Include them in a lexical-only fallback pass. Compare each unembedded lesson against all other lessons using `are_rules_similar()` (v1). This subset is expected to be small (newly staged lessons before embedding backfill).
-
-**Correctness validation**: Before deploying ANN clustering as the default, run both the old O(n²) approach and the new ANN approach on the same corpus and verify they produce identical clusters. Any difference indicates the K value is too small (true duplicates not in top-K neighbors).
+**Consolidation TUI Display**:
+- In `ClusterListView`: Tag clusters with badges:
+  - `[SEMANTIC 0.88]` (semantic match with code/vocabulary shift)
+  - `[LEXICAL 0.81]` (text overlap)
+  - `[HYBRID 0.74]` (both signals contributed)
+- In `ClusterDetailView`: Display individual pairwise similarity scores and allow the operator to inspect exactly why the cluster was proposed.
 
 ### Acceptance Criteria
-- ANN clustering produces the same clusters as O(n²) clustering on the current corpus.
-- At 500+ lessons, ANN clustering is measurably faster.
-- Lessons without embeddings are handled via lexical fallback.
-- K value is documented and justified.
+- Compaction clustering correctly groups `lesson-20260918-05` and `lesson-20260929-01` into a semantic cluster.
+- TUI displays match type and similarity metric for each cluster.
+- Unembedded lessons are clustered via lexical fallback pass.
 
 ---
 
 ## Step 4: Cross-Category Semantic Deduplication
 
 ### What
-Ensure that semantic duplicates across different categories are detected and handled, both at ingestion time and during compaction.
+Ensure that semantic duplicates across different categories are detected and resolved during compaction and ingestion.
 
 ### Why
-After Stage 1, category-agnostic lexical scans catch cross-category duplicates that share words. But vocabulary-shifted duplicates across categories (e.g., a `ShellCheck` lesson about quoting vs a `Defensive Bash Scripting` lesson about quoting with different phrasing) are only catchable with semantic similarity.
+Vocabulary-shifted rules across distinct categories (e.g. `ShellCheck` vs `Defensive Bash Scripting`) share semantic intent but no exact category keyword. Embeddings are category-agnostic and naturally bridge cross-domain duplicates.
 
 ### Where
-- Already handled by the ANN pre-filter in Steps 2 and 3 (embeddings are category-agnostic).
-- `sysadmin/mcp_core/memory.py`: Verify ingestion guard ANN query does not filter by category.
-- `sysadmin/mcp_core/audit.py`: Verify compaction ANN query does not filter by category.
+- `sysadmin/mcp_core/memory.py`: Ingestion guard vector query.
+- `sysadmin/mcp_core/audit.py`: Compaction clustering vector query.
 
 ### Design Notes
 
-**Category merging on cross-category dedup**:
-When two lessons from different categories are identified as semantic duplicates:
-- During compaction: Keep the category of the lesson with the most specific/canonical category. Re-evaluate via `normalize_category()` on the merged keyword set.
-- During ingestion: If the incoming lesson matches an active lesson in a different category, the existing active lesson's category is preserved. The incoming lesson's keywords are merged.
-
-**Documentation**: Cross-category dedup may surface unexpected merges (e.g., "ShellCheck" lesson merged into "Defensive Bash Scripting"). Log these events for operator review. Consider adding a `--verbose` flag to `localai-compact` that shows cross-category merges explicitly.
+**Category Reconciliation**:
+- When two lessons from different categories merge:
+  1. Combine keyword sets.
+  2. Re-normalize category using `normalize_category(combined_keywords)`.
+  3. Prefer canonical categories over specialized ones.
+- Log cross-category merges explicitly in wiki `log.md` and TUI status bar.
 
 ### Acceptance Criteria
-- Two semantically identical lessons in different categories are detected as duplicates.
-- Category re-evaluation produces the most specific canonical category.
-- Cross-category merges are logged for visibility.
-- No unrelated lessons across categories are falsely merged.
+- Cross-category duplicates are grouped into unified clusters.
+- Category reconciliation selects the most accurate canonical category.
+- Cross-category merges are highlighted in TUI and logs.
 
 ---
 
